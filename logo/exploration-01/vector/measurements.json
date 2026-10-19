@@ -1,0 +1,382 @@
+{
+  "source": "04-compact-updraft.png",
+  "units": "source pixels on the 1254 by 1254 source canvas",
+  "mark_bounds": {
+    "x": 320.15056991339253,
+    "y": 236.5,
+    "width": 667.3494300866075,
+    "height": 617.6113278174143
+  },
+  "vector_wordmark_bounds": [
+    305.5033873976062,
+    930.5215729945874,
+    950.6650987750677,
+    1046.7035371558482
+  ],
+  "mark_components": 2,
+  "cubic_segments": 19,
+  "intentional_sharp_tips": 4,
+  "smooth_join_count": 15,
+  "max_join_tangent_error_degrees": 1.724111757361496e-06,
+  "max_join_position_error": 0.0,
+  "max_join_curvature_jump": 3.836505516052746e-09,
+  "valid_simple_closed_components": true,
+  "components_overlap": false,
+  "minimum_component_separation": 31.796303559949088,
+  "source_to_vector_p95": 0.6814046874191441,
+  "source_to_vector_max": 1.4142135623730951,
+  "vector_to_source_p95": 0.7550971600074526,
+  "vector_to_source_max": 1.3392203034311556,
+  "chains": [
+    {
+      "name": "upper-outer",
+      "fit_p95": 0.29723959011352225,
+      "fit_max": 0.6817220694083085,
+      "segments": 4
+    },
+    {
+      "name": "upper-channel",
+      "fit_p95": 0.551338449306927,
+      "fit_max": 0.7796257502182179,
+      "segments": 3
+    },
+    {
+      "name": "lower-channel-and-base",
+      "fit_p95": 0.4744512127239492,
+      "fit_max": 1.028328503938271,
+      "segments": 7
+    },
+    {
+      "name": "lower-inner-curl",
+      "fit_p95": 0.49293148146078347,
+      "fit_max": 0.6510594970955397,
+      "segments": 5
+    }
+  ],
+  "joins": [
+    {
+      "chain": "upper-outer",
+      "join": 1,
+      "position_error": 0.0,
+      "tangent_error_degrees": 1.279893393704723e-06,
+      "curvature_jump": 4.484214837966556e-11
+    },
+    {
+      "chain": "upper-outer",
+      "join": 2,
+      "position_error": 0.0,
+      "tangent_error_degrees": 7.509023425307621e-07,
+      "curvature_jump": 6.984483605625841e-10
+    },
+    {
+      "chain": "upper-outer",
+      "join": 3,
+      "position_error": 0.0,
+      "tangent_error_degrees": 2.7753144411787847e-07,
+      "curvature_jump": 2.1826627744775395e-10
+    },
+    {
+      "chain": "upper-channel",
+      "join": 1,
+      "position_error": 0.0,
+      "tangent_error_degrees": 4.079832615723404e-07,
+      "curvature_jump": 2.290197762336299e-12
+    },
+    {
+      "chain": "upper-channel",
+      "join": 2,
+      "position_error": 0.0,
+      "tangent_error_degrees": 4.6562272068348476e-08,
+      "curvature_jump": 3.284278790767481e-10
+    },
+    {
+      "chain": "lower-channel-and-base",
+      "join": 1,
+      "position_error": 0.0,
+      "tangent_error_degrees": 1.5137515078699714e-06,
+      "curvature_jump": 5.181459083406642e-10
+    },
+    {
+      "chain": "lower-channel-and-base",
+      "join": 2,
+      "position_error": 0.0,
+      "tangent_error_degrees": 1.6620309668908246e-06,
+      "curvature_jump": 2.5624651359135164e-10
+    },
+    {
+      "chain": "lower-channel-and-base",
+      "join": 3,
+      "position_error": 0.0,
+      "tangent_error_degrees": 1.659244354506074e-06,
+      "curvature_jump": 1.0875641236109818e-09
+    },
+    {
+      "chain": "lower-channel-and-base",
+      "join": 4,
+      "position_error": 0.0,
+      "tangent_error_degrees": 1.129515554593073e-06,
+      "curvature_jump": 3.836505516052746e-09
+    },
+    {
+      "chain": "lower-channel-and-base",
+      "join": 5,
+      "position_error": 0.0,
+      "tangent_error_degrees": 1.724111757361496e-06,
+      "curvature_jump": 9.632547884330656e-11
+    },
+    {
+      "chain": "lower-channel-and-base",
+      "join": 6,
+      "position_error": 0.0,
+      "tangent_error_degrees": 1.1046195479176349e-06,
+      "curvature_jump": 2.8975284498133913e-09
+    },
+    {
+      "chain": "lower-inner-curl",
+      "join": 1,
+      "position_error": 0.0,
+      "tangent_error_degrees": 1.6813402738090126e-06,
+      "curvature_jump": 4.752559734644279e-10
+    },
+    {
+      "chain": "lower-inner-curl",
+      "join": 2,
+      "position_error": 0.0,
+      "tangent_error_degrees": 8.855717111256597e-07,
+      "curvature_jump": 1.478827726941745e-09
+    },
+    {
+      "chain": "lower-inner-curl",
+      "join": 3,
+      "position_error": 0.0,
+      "tangent_error_degrees": 1.5296759619906132e-06,
+      "curvature_jump": 2.4190074509461423e-09
+    },
+    {
+      "chain": "lower-inner-curl",
+      "join": 4,
+      "position_error": 0.0,
+      "tangent_error_degrees": 8.252584425841903e-07,
+      "curvature_jump": 2.817637763732894e-10
+    }
+  ],
+  "airflow_gap": {
+    "method": "Cross sections perpendicular to the bisector of the two local unit tangents, sampled along the shared channel.",
+    "sample_count": 854,
+    "minimum_width": 31.796281308091864,
+    "maximum_width": 56.756206580367376,
+    "maximum_at_percent": 33.25221484833367,
+    "interior_maxima_over_0_3_units": 1,
+    "interior_minima_over_0_3_units": 1,
+    "stations": [
+      {
+        "station_percent": 0,
+        "u": 0.0,
+        "v": 0.4869307760499794,
+        "a": [
+          325.5,
+          672.5
+        ],
+        "b": [
+          358.51977034992876,
+          689.1904279966445
+        ],
+        "width": 36.99831916010794
+      },
+      {
+        "station_percent": 10,
+        "u": 0.10300000000000001,
+        "v": 0.4093612410692293,
+        "a": [
+          374.38129708617015,
+          610.9012847874608
+        ],
+        "b": [
+          400.414647576259,
+          645.7221622401834
+        ],
+        "width": 43.4767621186
+      },
+      {
+        "station_percent": 25,
+        "u": 0.25,
+        "v": 0.3126832464582293,
+        "a": [
+          471.46020869093616,
+          554.4821358886642
+        ],
+        "b": [
+          490.81638808015225,
+          606.2442107844389
+        ],
+        "width": 55.26277298564837
+      },
+      {
+        "station_percent": 50,
+        "u": 0.458,
+        "v": 0.17995979379505844,
+        "a": [
+          637.9841915686771,
+          498.7007778492237
+        ],
+        "b": [
+          656.6842343242708,
+          547.8040706751847
+        ],
+        "width": 52.543553033774785
+      },
+      {
+        "station_percent": 75,
+        "u": 0.651,
+        "v": 0.06762752501826425,
+        "a": [
+          791.8881077222342,
+          427.39004303887725
+        ],
+        "b": [
+          813.6008761115072,
+          460.546224211126
+        ],
+        "width": 39.633024878921326
+      },
+      {
+        "station_percent": 90,
+        "u": 0.77,
+        "v": 0.01865034705343697,
+        "a": [
+          875.7348035670128,
+          367.71029836716457
+        ],
+        "b": [
+          896.8362429981934,
+          391.9636622735217
+        ],
+        "width": 32.14803892684543
+      },
+      {
+        "station_percent": 100,
+        "u": 0.853,
+        "v": 5.5754365707636146e-05,
+        "a": [
+          926.2720590054097,
+          319.8160074039347
+        ],
+        "b": [
+          950.292791911768,
+          344.67932480727876
+        ],
+        "width": 34.5713777807312
+      }
+    ]
+  },
+  "layout": {
+    "wordmark_bounds": [
+      305.5033873976062,
+      930.5215729945874,
+      950.6650987750677,
+      1046.7035371558482
+    ],
+    "symbol_to_wordmark_gap": 76.41024517717301,
+    "mark_bbox_center_right_of_wordmark_center": 25.741041870359368,
+    "alignment_policy": "Preserve the selected composition. Do not treat its optical offset as a geometry error.",
+    "standalone_mark_clear_space_each_side": 48
+  },
+  "curvature": [
+    {
+      "chain": "upper-outer",
+      "curvature_sign_changes": 1,
+      "minimum_radius": 160.0906096174832
+    },
+    {
+      "chain": "upper-channel",
+      "curvature_sign_changes": 1,
+      "minimum_radius": 88.15962920579561
+    },
+    {
+      "chain": "lower-channel-and-base",
+      "curvature_sign_changes": 2,
+      "minimum_radius": 72.15399014415944
+    },
+    {
+      "chain": "lower-inner-curl",
+      "curvature_sign_changes": 1,
+      "minimum_radius": 34.16149574092427
+    }
+  ],
+  "svg_exports": {
+    "flight-deck-04-mark.svg": {
+      "path_count": 2,
+      "all_paths_explicitly_closed": true,
+      "embedded_raster_images": 0,
+      "live_text_elements": 0,
+      "bytes": 1541
+    },
+    "flight-deck-04-lockup.svg": {
+      "path_count": 3,
+      "all_paths_explicitly_closed": true,
+      "embedded_raster_images": 0,
+      "live_text_elements": 0,
+      "bytes": 14684
+    }
+  },
+  "small_size_checks": [
+    {
+      "width_px": 16,
+      "height_px": 15,
+      "components_at_half_coverage": 1,
+      "component_areas_px": [
+        71
+      ],
+      "minimum_gap_in_output_pixels": 0.6664586844604902
+    },
+    {
+      "width_px": 24,
+      "height_px": 23,
+      "components_at_half_coverage": 1,
+      "component_areas_px": [
+        148
+      ],
+      "minimum_gap_in_output_pixels": 0.9996880266907354
+    },
+    {
+      "width_px": 32,
+      "height_px": 30,
+      "components_at_half_coverage": 2,
+      "component_areas_px": [
+        151,
+        122
+      ],
+      "minimum_gap_in_output_pixels": 1.3329173689209803
+    },
+    {
+      "width_px": 48,
+      "height_px": 45,
+      "components_at_half_coverage": 2,
+      "component_areas_px": [
+        334,
+        277
+      ],
+      "minimum_gap_in_output_pixels": 1.9993760533814708
+    },
+    {
+      "width_px": 64,
+      "height_px": 60,
+      "components_at_half_coverage": 2,
+      "component_areas_px": [
+        599,
+        489
+      ],
+      "minimum_gap_in_output_pixels": 2.6658347378419607
+    },
+    {
+      "width_px": 96,
+      "height_px": 90,
+      "components_at_half_coverage": 2,
+      "component_areas_px": [
+        1357,
+        1103
+      ],
+      "minimum_gap_in_output_pixels": 3.9987521067629417
+    }
+  ]
+}
