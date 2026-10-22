@@ -212,7 +212,7 @@ Don't wait on 👀. Claude may react to a comment "when no review starts, so loo
 
 **Drafts and pushes.** Gemini reviews when a PR opens [S49]. `code_review.pull_request_opened.include_drafts` defaults to `true`, so it acts on drafts too [S50]. The docs don't say whether a push starts another review. On 12 `vllm-project/vllm-ascend` PRs with 1 to 101 commits, each had exactly one Gemini review. **Observed.** A new review needs `/gemini review` [S49].
 
-**How a script knows it is done.** Gemini reacted 👀 to the PR within seconds and later posted a `COMMENTED` review whose `commit_id` was the head SHA. The 👀 stayed after the review. **Observed** on [vllm-project/vllm-ascend#19055](https://github.com/vllm-project/vllm-ascend/pull/19055) and [AI-Hypercomputer/maxtext#5812](https://github.com/AI-Hypercomputer/maxtext/pull/5812). The `gemini-code-assist` app has no permission to write checks or commit statuses, so a review is the only possible done signal [S51]. **Inference** from the app's permissions.
+**How a script knows it is done.** Gemini reacted 👀 to the PR within seconds and later posted a `COMMENTED` review whose `commit_id` was the head SHA. The 👀 stayed after the review. **Observed** on [vllm-project/vllm-ascend#19055](https://github.com/vllm-project/vllm-ascend/pull/19055) and [AI-Hypercomputer/maxtext#5812](https://github.com/AI-Hypercomputer/maxtext/pull/5812). The `gemini-code-assist` app has no permission to write checks or commit statuses, so a review is the only possible done mark [S51]. **Inference** from the app's permissions.
 
 **Plan.** Google's docs say "there are no charges for using Gemini Code Assist on GitHub during Preview" for the enterprise version [S49]. Whether the consumer version is free, and its daily limits, are **Unconfirmed**.
 
@@ -222,7 +222,7 @@ The detail in this section comes from a sub-agent that read the sources and the 
 
 Qodo Merge is now called Qodo, and its login is `qodo-code-review[bot]` [S52]. It skips drafts by default. The **Code review trigger** setting offers "Published PRs", "Draft and published PRs", and "Manual only" [S53][S54]. Whether it reviews each push by default is unclear. The TOML reference says `handle_push_trigger` defaults to `false`, and the portal page says **Review every push** is on by default [S55][S54].
 
-Hosted Qodo posts no check run or commit status. Its app can only read checks [S51]. It posts a review only when it has new inline comments. The reliable done signal is a comment reading "Code review by qodo was updated up to the latest commit" followed by the full commit URL [S56]. **Observed** on [sayed710/rocky#114](https://github.com/sayed710/rocky/pull/114) and [BigSimmo/PsychSift#3590](https://github.com/BigSimmo/PsychSift/pull/3590). While it works, it posts a "Qodo is busy working" comment and deletes it when done. **Observed** on BigSimmo/PsychSift#3590.
+Hosted Qodo posts no check run or commit status. Its app can only read checks [S51]. It posts a review only when it has new inline comments. The reliable done mark is a comment reading "Code review by qodo was updated up to the latest commit" followed by the full commit URL [S56]. **Observed** on [sayed710/rocky#114](https://github.com/sayed710/rocky/pull/114) and [BigSimmo/PsychSift#3590](https://github.com/BigSimmo/PsychSift/pull/3590). While it works, it posts a "Qodo is busy working" comment and deletes it when done. **Observed** on BigSimmo/PsychSift#3590.
 
 Qodo has no permanent free tier. Pro Team starts at $30 a month for 2,500 credits, about 18 reviews [S57]. Public repos with 200 or more stars can join an open source program [S58].
 
@@ -277,7 +277,7 @@ The Free plan covers public projects and private projects up to 50k lines of cod
 
 These facts constrain how check waits for bots. They don't settle the design.
 
-- Check can't use one rule for all bots. It needs a small table keyed by bot login or app slug, with the done signal for each.
+- Check can't use one rule for all bots. It needs a small table keyed by bot login or app slug, with the done mark for each.
 - Check has to learn which bots a repo uses before it waits. Copilot leaves no trace on a PR nobody asked it to review, and SonarQube Cloud posts nothing until it has finished. The time limit in [FLD-9](https://linear.app/campdotdev/issue/FLD-9) covers both cases.
 - Every rule has to compare against the head SHA. Copilot, Sourcery, Codacy, Graphite, and CodeRabbit have all left their latest review on a commit older than the head. Sourcery, Graphite, and CodeRabbit reported done on the head anyway.
 - "Done" and "reviewed" differ. CodeRabbit's `success` can mean rate limited or skipped. Bugbot's `neutral` can mean it hit a usage limit. Copilot's review can say it reviewed nothing. Claude's check run can say declined. Check should record which bots reviewed the head and which only finished, and say so in its verdict.

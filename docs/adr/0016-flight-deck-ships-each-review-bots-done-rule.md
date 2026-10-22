@@ -1,0 +1,19 @@
+# Flight Deck ships each review bot's done rule, and the repo record names the bots
+
+The bot round waits for each review bot the repo record lists. The runner needs one rule per bot to tell when that bot has finished with the head commit (ADR 0010), because no two bots leave the same done mark. Copilot posts a review, CodeRabbit sets a commit status, and Codex edits a comment whose hidden marker differs between repos. These rules describe vendors, not repos. So they ship with each Flight Deck version as data the runner reads, beside the flows and skills, and they change only through `flight-deck update` (ADR 0015). The record keeps the repo's choices: which bots to wait for, each bot's time limit, and whether the runner has to ask a bot to review. It can also hold a full rule of its own, for a bot Flight Deck doesn't ship or to replace a shipped rule that broke. A reviewer counts as a review bot only if it waits for the PR to go ready or for a mention. Anything that has already run on the draft when check starts is CI, whatever it posts, so check's first verdict judges it.
+
+## Considered options
+
+- **Setup copies each rule into the record,** the way it writes slot defaults. The record would show exactly what the runner does. But a vendor change would break every repo until each one reran setup and committed the result. Slot defaults are the repo's choices. A rule is knowledge about a vendor, like the text of a skill, which also ships in the version folder (ADR 0014).
+- **Rules ship only with Flight Deck.** A bot Flight Deck doesn't know, such as an in-house reviewer, would wait for a new version. So would the fix for a rule a vendor broke.
+- **A commenting workflow, such as React Doctor, is a review bot.** Its findings would reach check only in the bot round, after check had passed a commit whose findings existed before check started. Every PR with a finding would cost a bot round and a trip back. Its login, `github-actions[bot]`, is also shared by every workflow in the repo.
+
+## Consequences
+
+- A rule names the bot's `login`, one done mark on the head commit, what that mark must show to count as a review, where the bot's findings appear, a re-trigger, and a default time limit. A done mark is a check run, a commit status, a review, or a comment that contains the head SHA.
+- A done mark counts as a review only when it matches the rule's `reviewed` test. Anything else reads "didn't review", and the ledger quotes the bot's own words. A reworded success text makes the ledger understate the bot's reviews, never overstate them, and the bot's findings still reach the bot round.
+- Every record entry names a shipped rule or holds a full one. An entry with neither makes the record invalid, which pauses the issue. A bot that leaves no done mark stays out of the record.
+- With `ask = true`, the runner sends a bot's re-trigger every time it marks the PR ready, including the first time.
+- v1 ships rules for Copilot, Codex, CodeRabbit, Greptile, Sourcery, Cursor Bugbot, Claude Code Review, Qodo, and Gemini. Codacy, SonarQube Cloud, and Graphite run on drafts and on every push, so the record lists them as CI-only extras, like React Doctor. A CI-only extra that reports through comments names its comment markers, and the runner copies those comments into check's inbox.
+- If one listed bot doesn't review the head on 3 PRs in a row, the runner files an unsent issue and flags it. A broken rule surfaces there.
+- When setup writes a rule that shadows a shipped one, it offers an upstream report. Rerunning setup offers to drop the shadowing rule.

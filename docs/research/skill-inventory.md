@@ -4,6 +4,8 @@ Research for [FLD-5](https://linear.app/campdotdev/issue/FLD-5/which-skills-on-t
 
 Corrected on 2026-10-16: the maintainer pointed out that `technical-writing` and `unslop` come from the pstack plugin in `cursor/plugins`, under MIT. The first version of this note called them the maintainer's own. The copies in `campdotdev/agent-config` are modified forks of pstack's.
 
+Corrected on 2026-10-19, for [FLD-26](https://linear.app/campdotdev/issue/FLD-26/which-skills-does-flight-deck-depend-on-fork-or-write-itself): the copies carry no edits of the maintainer's own. Each `SKILL.md` matches an older pstack commit: `technical-writing` matches `b047069` (2026-08-01), and `unslop` matches `99559f2` (2026-08-02). Every line that differs from pstack's `HEAD` is a change pstack made later. The only file the fork adds is `technical-writing/agents/openai.yaml`, for Codex. The "modified fork" wording below means an older copy.
+
 ## Answer
 
 The board has 19 skill cards. Add `unslop` and `watch-pr`, which the board names outside a skill card, plus `implement` and `implement-spec`, and the inventory covers 23 skills.

@@ -269,7 +269,7 @@ Some details caught the test:
 - `srt` refused a config file with no `network.deniedDomains` key and printed `Refusing to run with the built-in defaults`. The docs say an empty, unreadable, or invalid settings file stops it from starting. A missing `~/.srt-settings.json` starts it with defaults that block the network [S13].
 - The built-in Bash sandbox inside `srt` failed to start, as described under section 4.
 
-The runtime always denies writes to `.git/hooks`, to `.git/config` unless `allowGitConfig` is set, to `.mcp.json`, `.claude/commands`, `.claude/agents`, and to shell startup files at the project root [S13][S16]. Its list doesn't include `.claude/settings.json`. The docs say to add Claude Code's other configuration paths to `denyWrite` [S13].
+The runtime always denies writes to `.git/hooks`, to `.git/config` unless `allowGitConfig` is set, to `.mcp.json`, `.claude/commands`, `.claude/agents`, and to shell startup files at the project root [S13][S16]. Its list doesn't include `.claude/settings.json`. The docs say to add Claude Code's other configuration paths to `denyWrite` [S13]. [Why `pnpm install` fails in the sandbox](dependency-installs-in-the-sandbox.md) corrects this list. The runtime also denies `.vscode`, `.idea`, `.gitmodules`, and `.ripgreprc`, and on macOS it denies every protected name at any depth below the working directory.
 
 On SIGINT and SIGTERM, `srt` forwards the signal to its one child process. The source has no process-group kill [S16].
 

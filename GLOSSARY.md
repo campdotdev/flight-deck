@@ -49,8 +49,12 @@ To assign an issue to the maintainer because it needs them: a pause, a change re
 _Avoid_: Notify, ping, alert, escalate, notice
 
 **Follow-up issue**:
-An issue a stage creates, unsent, for something it found outside its brief, such as a second bug or a command that fails on the default branch. It enters the factory only if the maintainer sends it.
+An issue a stage creates, unsent, for something outside its brief, such as a second bug, a command that fails on the default branch, or the rest of a report that says to start with one part. It enters the factory only if the maintainer sends it.
 _Avoid_: Spin-off, side quest, TODO
+
+**Gap issue**:
+An issue setup offers, unsent, for something the repo lacks, such as unit tests or a rollback procedure. It describes the gap and leaves the choice of tool to plan.
+_Avoid_: TODO, chore, setup task
 
 **Default-branch failure**:
 A failed workflow run or production deploy on the repo's default branch, which the runner files as an issue.
@@ -80,6 +84,30 @@ _Avoid_: Workflow, command
 The flow the maintainer runs by hand to add a factory to a repo. It writes the repo record. Installing Flight Deck on a Mac is a separate step.
 _Avoid_: Onboarding, init, install
 
+**Install**:
+The step that puts Flight Deck on a Mac and signs in what exists once per Mac: the runner, the Claude credential, and the factory's GitHub machine user. It runs once per Mac, before setup adds a factory to any repo.
+_Avoid_: Setup, bootstrap
+
+**Dependency install**:
+The repo's own command that fetches its dependencies and links them into a worktree, such as `pnpm install --frozen-lockfile`. It is unrelated to installing Flight Deck.
+_Avoid_: Install (alone), bootstrap
+
+**Dependency cache**:
+The runner's copy of a repo's dependencies, installed from the default branch. Each session starts from a clone of it, and only the runner writes it.
+_Avoid_: Store (pnpm's store is one part of it), warm cache
+
+**Register**:
+To put a repo on one Mac's repo list, so that Mac's runner starts its factory's sessions. Unregistering takes the repo off one Mac and leaves its factory in place. Removing a factory undoes setup.
+_Avoid_: Attach, enable, detach (the runner detaches a synced issue from GitHub)
+
+**Factory mark**:
+The note setup writes in the description of a team's Ready to plan status. It names the repo whose factory owns the team's factory statuses and the Mac that runs that factory.
+_Avoid_: Owner mark (the maintainer owns the factory), tag, lock
+
+**Trial run**:
+A throwaway factory session that install or setup starts the way the runner will, so a problem shows up while the maintainer watches instead of on the first issue.
+_Avoid_: Dry run (a dry run tests a flow on Shaders during planning), smoke test
+
 **Slot**:
 A named point in a flow where a step the repo chose runs, such as writing a changeset at the end of build. The repo record names the skill that fills each slot.
 _Avoid_: Hook (Claude Code uses that word for something else), plugin, extension point
@@ -99,6 +127,10 @@ _Avoid_: Original description, request, ticket body
 **Acceptance criterion**:
 One testable statement in a brief that says when the issue is done, and names how it is proven: by a record command, in the running app, or by a type check only.
 _Avoid_: Requirement, definition of done
+
+**Design**:
+The drawings of what users see, in the files the repo record names, such as a Figma file with a frame for each screen and each state of a component. A frame counts as the design only when it sits in those files or the maintainer linked it.
+_Avoid_: Mockup, comp, spec (a spec is an issue)
 
 **Spec**:
 An issue that describes one larger change. Its sub-issues are the issues that build it.
@@ -120,6 +152,14 @@ _Avoid_: Merge, for this step
 A version of the repo that reaches its users, such as a package published to a registry or an app deployed to production. The maintainer makes every release through the repo's own release step, and the factory never makes one.
 _Avoid_: Launch, ship
 
+**Public contract**:
+Anything outside the repo depends on, in the form the repo's last release shipped it, such as a library's exports, a CLI's flags and output, an HTTP API, a config format, or public URLs. Something added since the last release isn't public yet, so changing it breaks nothing.
+_Avoid_: API surface, public API (a contract can be a file format or a URL)
+
+**Version**:
+One build of Flight Deck itself, such as 1.4.0. Every factory on a Mac runs the version installed there.
+_Avoid_: Release (that word means the repo's release)
+
 **Handoff**:
 What a stage leaves for the next one, written where the next stage reads it.
 _Avoid_: Notes, context
@@ -136,6 +176,10 @@ _Avoid_: Context, input, cache
 Build's handoff to check: what satisfies each acceptance criterion and how build proved it, plus its shortcuts, the changes the brief didn't ask for, and what it couldn't verify. Check doubts them until it has proven them itself.
 _Avoid_: Summary, report
 
+**Shortcut**:
+A simplification build makes on purpose, with its limit named in the code and in build's claims. Check treats a named shortcut as a decision, not a finding, unless the expected load already crosses its limit.
+_Avoid_: Hack, workaround, tech debt
+
 **Verdict**:
 Check's judgment of one exact commit: a pass, or numbered findings sent back to build. A newer commit has no verdict until check judges it.
 _Avoid_: Approval, review
@@ -147,6 +191,14 @@ _Avoid_: Issue (that word means a Linear issue), comment, nit
 **Ledger**:
 What check posts when it passes an issue: each acceptance criterion and the proof check accepted for it.
 _Avoid_: Test report, Testing section
+
+**Review bot**:
+A reviewer outside the repo's own workflows that reviews a PR only once it is marked ready or asked, such as Copilot code review or CodeRabbit. Anything that has already run on the draft is CI, whatever it posts, whether a workflow in the repo or an app such as SonarQube Cloud.
+_Avoid_: Bot (alone), AI reviewer, review app
+
+**Done mark**:
+What a review bot leaves on a commit when it has finished with it: a check run, a commit status, a review, or a marker in a comment. A done mark alone doesn't mean the bot reviewed anything.
+_Avoid_: Done signal, completion signal (a signal is debrief's count)
 
 **Bot round**:
 A second verdict on a commit check already passed. It judges only the findings the repo's review bots left once the PR was marked ready.

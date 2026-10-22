@@ -5,7 +5,7 @@ Flight Deck needs only its own platform: macOS, Claude Code, git, GitHub with `g
 ## Considered options
 
 - **The board's stack.** The board was drawn for one React component library, and its flows name Vitest, Storybook, Playwright, Fallow, React Doctor, Figma, and changesets. A fixed stack would let each flow run deeper checks written for those tools. Every repo outside that stack would have to adopt them or go without a factory.
-- **A switch for each step Flight Deck knows.** A repo on a stack Flight Deck doesn't know would wait for a Flight Deck release.
+- **A switch for each step Flight Deck knows.** A repo on a stack Flight Deck doesn't know would wait for a new Flight Deck version.
 - **Steps written only in the repo's `AGENTS.md`.** Nothing would prove a step ran, so check couldn't hold build to it.
 
 ## Consequences
