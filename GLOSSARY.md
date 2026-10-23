@@ -41,8 +41,12 @@ To hand an issue to the factory. No stage takes an issue the maintainer hasn't s
 _Avoid_: Dispatch, queue, approve
 
 **Pause**:
-To stop an issue's work until the maintainer moves it again. The factory pauses an issue when it needs something only the maintainer can give: an answer, a review, or a fix outside the repo.
+To stop an issue's work until the maintainer answers or moves it again. The factory pauses an issue when it needs something only the maintainer can give: an answer, a review, or a fix outside the repo.
 _Avoid_: Block (blocking is a relation between issues), hold, escalate
+
+**Answer**:
+One of the one-word replies a pause offers the maintainer, each tied to the status the issue moves to next.
+_Avoid_: Option, choice, command
 
 **Flag**:
 To assign an issue to the maintainer because it needs them: a pause, a change ready for review, a stale take, or trouble with the runner.
