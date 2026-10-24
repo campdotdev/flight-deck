@@ -192,6 +192,10 @@ _Avoid_: Approval, review
 One numbered problem in a verdict that sends work back, with the line it breaks and a failing case.
 _Avoid_: Issue (that word means a Linear issue), comment, nit
 
+**Merge risk**:
+How closely the maintainer should read a change that check passed before merging it: low, medium, or high. A passed change has no findings but can still be risky, such as a break of a public contract.
+_Avoid_: Merge danger, risk score, confidence
+
 **Ledger**:
 What check posts when it passes an issue: each acceptance criterion and the proof check accepted for it.
 _Avoid_: Test report, Testing section
