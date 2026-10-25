@@ -72,6 +72,10 @@ _Avoid_: Suggestion, recommendation, retro item
 A count the runner keeps of one kind of factory mistake since the last debrief, such as the issues check sent back to build. Each signal has a threshold, and a count that reaches it starts a debrief.
 _Avoid_: Metric, alert, trigger
 
+**Setup gap**:
+A cause debrief finds in how the factory is set up, rather than in one session's choices, such as a tool the sandbox denies or a rule a flow lacks. It recurs on every run it touches, so debrief proposes a fix the first time it sees one.
+_Avoid_: Environment issue, infra problem
+
 **Maintainer**:
 The person who owns a factory and makes every call an agent escalates. In v1, the solo developer.
 _Avoid_: Owner, maintainer on duty, admin
