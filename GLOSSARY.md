@@ -16,6 +16,10 @@ _Avoid_: Daemon, scheduler, dispatcher, worker
 To mark an issue as being worked by one stage's session, so that no other session starts it. The runner takes an issue before it starts the session, and a flow run by hand takes it first.
 _Avoid_: Claim (that word belongs to build's claims), pick up, lock
 
+**Hold**:
+The runner's state of starting no new session while running ones finish. The maintainer holds the runner and starts it again, and the runner holds itself short of the plan limits.
+_Avoid_: Pause (an issue's state), suspend
+
 **Repo**:
 The codebase a factory works on. Any repo a solo developer owns, new or existing.
 _Avoid_: Project (Linear uses that word for something else), codebase, app
@@ -42,7 +46,7 @@ _Avoid_: Dispatch, queue, approve
 
 **Pause**:
 To stop an issue's work until the maintainer answers or moves it again. The factory pauses an issue when it needs something only the maintainer can give: an answer, a review, or a fix outside the repo.
-_Avoid_: Block (blocking is a relation between issues), hold, escalate
+_Avoid_: Block (blocking is a relation between issues), hold (the runner's state), escalate
 
 **Answer**:
 One of the one-word replies a pause offers the maintainer, each tied to the status the issue moves to next.
