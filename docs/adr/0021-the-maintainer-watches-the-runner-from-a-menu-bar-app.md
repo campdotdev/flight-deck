@@ -26,3 +26,4 @@ Flags reach the maintainer through Linear (ADR 0011), but nothing showed the run
 - When the runner's heartbeat is more than 3 minutes old, the icon says the runner isn't responding. Silence no longer hides a dead runner, though a closed lid still stops the factory.
 - The menu posts no notifications. Flags reach the maintainer through Linear, and the runner posts a macOS notification only for trouble that stops it (ADR 0011).
 - v1 has no fuller local UI: no board, no timeline, no spec numbers, and no local PR walkthrough. ADR 0020 already ruled out a published walkthrough. A fuller UI is a later effort.
+- ADR 0024 decides how the app is built, shipped, and started, and where it first appears in the menu bar.

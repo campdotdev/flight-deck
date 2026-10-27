@@ -11,5 +11,5 @@ Flight Deck ships a program as well as skills. One runner per Mac, kept alive by
 ## Consequences
 
 - Factory sessions load the repo's config and Flight Deck, and nothing from the maintainer's user setup. The runner passes `--setting-sources project,local`, then adds Flight Deck and the Linear MCP server back explicitly. A maintainer's personal `CLAUDE.md` rules, such as using GitButler, never reach a factory session. ADR 0007 narrows the flag to `--setting-sources project` and locks what each session loads. Neither flag keeps out the maintainer's `~/.claude/CLAUDE.md` or shell startup file, so ADR 0007 excludes both.
-- Installing Flight Deck means installing the runner and its launchd agent. A Claude Code plugin can't do that on its own, because every process a plugin declares stops with its session.
+- Installing Flight Deck means installing the runner and its launchd agent. A Claude Code plugin can't do that on its own, because every process a plugin declares stops with its session. ADR 0024 points the agent at a launcher that never changes and adds a second agent for the menu bar app.
 - The launchd agent sets `ProcessType` to `Standard`. macOS throttles the CPU and disk of a `Background` job and of every process it starts. Under `Background`, Shaders' typecheck took 500 s in a session instead of 50 s, and six unit tests timed out.

@@ -97,7 +97,7 @@ The flow the maintainer runs by hand to add a factory to a repo. It writes the r
 _Avoid_: Onboarding, init, install
 
 **Install**:
-The step that puts Flight Deck on a Mac and signs in what exists once per Mac: the runner, the Claude credential, and the factory's GitHub machine user. It runs once per Mac, before setup adds a factory to any repo.
+The step that puts Flight Deck on a Mac and signs in what exists once per Mac: the runner, the menu bar app, the Claude credential, and the factory's GitHub machine user. It runs once per Mac, before setup adds a factory to any repo.
 _Avoid_: Setup, bootstrap
 
 **Dependency install**:
