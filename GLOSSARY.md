@@ -204,6 +204,10 @@ _Avoid_: Approval, review
 One numbered problem in a verdict that sends work back, with the line it breaks and a failing case.
 _Avoid_: Issue (that word means a Linear issue), comment, nit
 
+**Change request**:
+One thing the maintainer asks of a change after check passed it, in a GitHub review or a Linear comment: a change to the code, or an answer to a question. It amends the brief for that issue, so build acts on it and check judges whether build did.
+_Avoid_: Feedback, review comment, finding (a finding is check's)
+
 **Merge risk**:
 How closely the maintainer should read a change that check passed before merging it: low, medium, or high. A passed change has no findings but can still be risky, such as a break of a public contract.
 _Avoid_: Merge danger, risk score, confidence
