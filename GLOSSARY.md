@@ -144,6 +144,10 @@ _Avoid_: Requirement, definition of done
 The drawings of what users see, in the files the repo record names, such as a Figma file with a frame for each screen and each state of a component. A frame counts as the design only when it sits in those files or the maintainer linked it.
 _Avoid_: Mockup, comp, spec (a spec is an issue)
 
+**Rendered file**:
+A file the repo commits that only a browser or a container can make, such as a visual test's baseline or a poster image. No session can make one, so CI makes it or the maintainer does.
+_Avoid_: Snapshot (Playwright and Jest use it for their baselines, and Vitest for other things), artifact (the archive CI uploads), golden file
+
 **Spec**:
 An issue that describes one larger change. Its sub-issues are the issues that build it.
 _Avoid_: Epic, parent issue

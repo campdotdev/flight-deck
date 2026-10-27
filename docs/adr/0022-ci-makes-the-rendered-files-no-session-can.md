@@ -1,0 +1,41 @@
+# CI makes the rendered files no session can
+
+Some changes need a rendered file: a file the repo commits that only a browser or a container can make, such as a new visual baseline. No factory session can make one. Chromium can't start in the sandbox on macOS (ADR 0009), and the sandbox blocks the Docker socket, which can mount anything on the Mac. In the FlutedGlass dry run, check paused for two baselines after a 26.5-minute verdict, and the maintainer ran `pnpm snap` by hand. So when the repo's CI renders a file and uploads its render on failure, build commits CI's render. CI compares future runs against its own render, so the committed file can't drift from what gates the merge, and nothing new runs on the Mac.
+
+## Considered options
+
+- **A runner job.** The runner would start CI's container image itself, with only the worktree mounted, so the repo's code never touches the Docker socket. Every factory Mac would need Docker or OrbStack, and the container would need its own Linux dependency install and its own network limits. Its pixels can still drift from CI's. Shaders forces amd64 in `pnpm snap` because an arm64 render pushed its noisiest shaders past the tolerance. The job takes about as long as CI, and it still can't make a macOS baseline.
+- **A pause with the exact command.** Debrief proposed this after the Shaders dry runs: plan marks the criterion, and build pauses before handoff. It keeps the by-hand step the maintainer wants gone. A run on the maintainer's Mac also depends on the Mac's state. The first `pnpm snap` in the dry run rendered the maintainer's own dev server on port 3000, because Shaders' Playwright config reuses a running server outside CI.
+- **Build makes the file another way,** such as a screenshot from the browser MCP server. In the dry run, build rendered FlutedGlass's poster from a scratch dev route. Shaders' poster script exists so that a poster can't drift from its demo, and a screenshot goes around the script.
+
+## Consequences
+
+- Playwright leaves CI's render where CI can upload it. When a baseline is missing, Playwright 1.59.1 writes its render into the test's output folder and fails the test with an error that retries skip. When a baseline changed, it writes the actual, expected, and diff images there. Shaders' CI uploads that folder on failure as `visual-regression-diffs-<shard>` and keeps it for 7 days.
+- A dry run on Shaders proved the path. A draft PR deleted Simplex Noise's Linux baseline. CI failed in one shard, with no retries, and uploaded `simplex-noise-default-actual.png`. That render passes Shaders' own tolerance against the deleted file: 560 of 209,440 pixels differ, 0.27% against a 2% limit. The artifact's folder names come from test titles, so build finds each file's path in the job log, which names it: "A snapshot doesn't exist at `.../simplex-noise-default-chromium-linux.png`, writing actual."
+- The repo record lists each kind of rendered file. An entry names the artifact that holds CI's render, or the command that makes the file by hand and what the factory does without it. For Shaders:
+
+	```toml
+	[[rendered]]
+	files = "apps/docs-tests/visual/**/*-chromium-linux.png"
+	artifact = "visual-regression-diffs-*"
+
+	[[rendered]]
+	files = "apps/docs-tests/visual/**/*-chromium-darwin.png"
+	command = "pnpm snap <spec>"
+	without = "leave out"
+
+	[[rendered]]
+	files = "apps/docs/public/posters/*"
+	command = "pnpm posters"
+	without = "pause"
+	```
+
+- The runner reruns a failed workflow in full once, as before. If CI is still red after the rerun, and a failed run uploaded an artifact the record names, the runner starts build again instead of check. Build's inbox holds both runs' images and the failed jobs' logs. The runner copies only image files out of the artifact. Playwright also writes an `error-context.md` beside each failure, which opens with instructions to an agent: "Explain why, be concise... Provide a snippet of code with the fix".
+- Build compares each image with its own screenshot of the same state in the running app, and with the design's frame when one exists. It commits the images for the changes its brief asked for, at the paths the record's `files` name, and fixes the code behind every other failing image. The runner does this once per build handoff. If CI fails again, check starts and sorts the failure like any failing CI. Other failing jobs reach check as before.
+- CI first runs on a standalone issue's PR or on the spec PR (ADR 0004). In a spec, build on the spec commits the rendered files that the sub-issues need, and each sub-issue's check proves its visual criteria in the running app.
+- Check compares each new or changed rendered file with its own screenshot of the same state. It compares by eye, not by pixel, because the browser MCP server on the Mac renders differently from CI's Linux Chromium. A file that shows something else, such as a black canvas, a half-compiled frame, or the wrong state, is a finding. A changed file the brief didn't ask for is an unasked change in build's claims, and check judges it under the scope rules.
+- A `leave out` entry is for a file nothing checks before the merge, such as Shaders' macOS baselines, which only keep the maintainer's local runs green. The factory commits no such file. The PR body names the files left out and the command that makes them, and check doesn't count a missing one as a finding, even where the repo's docs say to commit it.
+- A `pause` entry is for a file users see, such as a poster. Plan marks each criterion that needs one, and build pauses before handoff with the command, so no check runs first.
+- Setup proposes the list from the CI workflows' upload steps, the test config, and the repo's scripts and docs that write committed images, and the maintainer confirms it. Setup proves each `artifact` entry on the throwaway draft PR it opens to test review bots (ADR 0016). That PR also deletes one file from each `artifact` entry. Setup waits for CI, downloads the artifact, and checks that it holds a render of the deleted file that passes the repo's own tolerance against it. An entry that fails moves to `pause`, and setup offers a gap issue to upload the render on failure.
+- For each `command` entry, setup asks the maintainer whether to leave the file out or pause. It offers a gap issue to drop the file or to add a CI job that renders and uploads it. On Shaders, that means dropping the macOS baselines or rendering them on a macOS runner, and adding a CI job that renders posters. Once such a job exists, the entry names its artifact.
+- When the sandbox can start Chromium (ADR 0009), sessions could render a baseline for the Mac's own platform. CI's render still gates the merge.
