@@ -160,6 +160,10 @@ _Avoid_: Story (Storybook uses that word for a rendered example of a component)
 The branch a spec's issues land on. It becomes the spec's one PR into the default branch.
 _Avoid_: Integration branch, feature branch
 
+**Factory branch**:
+A branch the runner pushes to the repo for the factory: an issue's own branch or a spec branch. The repo's CI runs its code before check or the maintainer has read it.
+_Avoid_: Bot branch, agent branch
+
 **Land**:
 To move a spec branch forward to the exact commit check passed for one of its issues. A landed issue is on the spec branch but not yet on the default branch.
 _Avoid_: Merge, for this step
