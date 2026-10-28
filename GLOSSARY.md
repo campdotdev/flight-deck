@@ -12,20 +12,40 @@ _Avoid_: Pipeline, bot
 The one program on the maintainer's Mac that starts every factory session, for every repo on that Mac with a factory. It is unrelated to GitHub Actions runners.
 _Avoid_: Daemon, scheduler, dispatcher, worker
 
+**Factory session**:
+A Claude Code session that works unattended, such as one stage of one issue or a debrief. It holds no write credential and leaves an outbox for the runner to send. A flow the maintainer runs by hand is a hand run, not a factory session.
+_Avoid_: Agent run, job
+
 **Take**:
-To mark an issue as being worked by one stage's session, so that no other session starts it. The runner takes an issue before it starts the session, and a flow run by hand takes it first.
+To move an issue into one stage's working status, such as Planning, Building, or Checking, so that no other session starts it. The runner takes an issue before it starts the session, and a flow run by hand takes it first.
 _Avoid_: Claim (that word belongs to build's claims), pick up, lock
 
+**Queue**:
+A factory status where a sent issue waits for one stage to take it, named "Ready to" plus the stage, such as Ready to build.
+_Avoid_: Ready state, backlog (Backlog is a status the factory never takes from)
+
+**Working status**:
+A factory status where one stage's session works an issue, named with the stage's verb, such as Building.
+_Avoid_: In Progress (a Linear status outside the factory), active status
+
+**Stale take**:
+An issue that sits in a working status past its stage's time limit with no take the runner recorded, such as one a flow run by hand never finished.
+_Avoid_: Orphan, stuck issue
+
 **Hold**:
-The runner's state of starting no new session while running ones finish. The maintainer holds the runner and starts it again, and the runner holds itself short of the plan limits.
+The runner's state of starting no new session while running ones finish. The maintainer holds the runner and starts it again, and the runner holds itself short of the plan limits on a subscription, or at its spending caps on an API key. An update drains the runner, which holds until its running sessions finish and then restarts on the new version.
 _Avoid_: Pause (an issue's state), suspend
+
+**Concurrency cap**:
+The most sessions the runner runs at once, across every repo on its Mac.
+_Avoid_: Session cap, slot (a slot is a point in a flow)
 
 **Repo**:
 The codebase a factory works on. Any repo a solo developer owns, new or existing.
 _Avoid_: Project (Linear uses that word for something else), codebase, app
 
 **Repo record**:
-What setup writes down about a repo for the runner and the flows: how to install and check it, which review bots it uses, which skill fills each slot, and the maintainer's answers to conflicts. It is committed in the repo.
+What setup writes down about a repo for the runner and the flows: its dependency install and how to check it, which review bots it uses, which skills fill each slot, and how the maintainer settled each conflict between the repo's instructions and a flow. It is committed in the repo.
 _Avoid_: Config, manifest, profile, settings
 
 **Issue**:
@@ -37,15 +57,19 @@ The system where a repo's issues live and where their statuses route the factory
 _Avoid_: System of record, error tracker (Sentry and PostHog file issues into the tracker and are not trackers)
 
 **Intake**:
-The routes by which an issue reaches the tracker before the maintainer sends it: issues the maintainer files, GitHub issues, error reports, default-branch failures, and issues the factory files. No session reads an issue during intake.
+The routes by which an issue reaches the tracker before the maintainer sends it: issues the maintainer files, GitHub issues, error reports, default-branch failures, and issues the factory files. Intake starts no session.
 _Avoid_: Triage (Linear's status for issues nobody has sorted), inputs
+
+**Detach**:
+To turn off Linear's sync between an issue and the GitHub issue it came from. The issue keeps its link to the GitHub issue, but no change on either side reaches the other.
+_Avoid_: Unlink, unsync
 
 **Send**:
 To hand an issue to the factory. No stage takes an issue the maintainer hasn't sent.
-_Avoid_: Dispatch, queue, approve
+_Avoid_: Dispatch, queue (a queue is a status), approve
 
 **Pause**:
-To stop an issue's work until the maintainer answers or moves it again. The factory pauses an issue when it needs something only the maintainer can give: an answer, a review, or a fix outside the repo.
+To stop an issue's work until the maintainer answers or moves it again. The factory pauses an issue when it needs something only the maintainer can give: an answer, a review, a rendered file, or a fix outside the repo.
 _Avoid_: Block (blocking is a relation between issues), hold (the runner's state), escalate
 
 **Answer**:
@@ -53,24 +77,40 @@ One of the one-word replies a pause offers the maintainer, each tied to the stat
 _Avoid_: Option, choice, command
 
 **Flag**:
-To assign an issue to the maintainer because it needs them: a pause, a change ready for review, a stale take, or trouble with the runner.
+To assign an issue to the maintainer because it needs them: a pause, a change ready for review, a stale take, a proposal, a review bot that stopped reviewing, or trouble with the runner.
 _Avoid_: Notify, ping, alert, escalate, notice
+
+**Status line**:
+The first line of every comment the factory posts in Linear: a colored dot, a status phrase such as "Needs your answer", and the gist. It is the part of a flag that reaches the maintainer's phone.
+_Avoid_: Headline, subject, title (an issue has a title)
 
 **Follow-up issue**:
 An issue a stage creates, unsent, for something outside its brief, such as a second bug, a command that fails on the default branch, or the rest of a report that says to start with one part. It enters the factory only if the maintainer sends it.
 _Avoid_: Spin-off, side quest, TODO
 
 **Gap issue**:
-An issue setup offers, unsent, for something the repo lacks, such as unit tests or a rollback procedure. It describes the gap and leaves the choice of tool to plan.
+An issue setup offers, unsent, for something the repo lacks, such as unit tests or a rollback procedure, or for a command that already fails on its default branch. It describes the gap and leaves the choice of tool to plan.
 _Avoid_: TODO, chore, setup task
 
 **Default-branch failure**:
-A failed workflow run or production deploy on the repo's default branch, which the runner files as an issue.
+A failed workflow run on the repo's default branch, a failed run of a release workflow on any branch or tag, or a failed production deploy. It also names the issue the runner files for a workflow's or environment's failures.
 _Avoid_: Broken build, red main
+
+**Trouble issue**:
+An issue the runner files and flags for one cause that stops the runner from starting sessions, such as an expired login or a factory status missing from a team.
+_Avoid_: Incident, outage
+
+**Debrief**:
+The flow that traces the factory's mistakes on a repo to their causes and files a proposal for each fix. It is not a stage, and it writes no code.
+_Avoid_: Retro, retrospective, postmortem
 
 **Proposal**:
 An issue debrief files, unsent, that proposes one change to how the factory works on a repo, with the evidence behind it. Unlike a follow-up issue, it flags the maintainer, who sends it, makes the change by hand when it lies outside the repo, or cancels it.
 _Avoid_: Suggestion, recommendation, retro item
+
+**Upstream report**:
+A fix to Flight Deck itself, such as to one of its flows or a done rule it ships, written up for the maintainer to file on Flight Deck's GitHub repo. Debrief files one as a proposal.
+_Avoid_: Bug report, upstream issue
 
 **Signal**:
 A count the runner keeps of one kind of factory mistake since the last debrief, such as the issues check sent back to build. Each signal has a threshold, and a count that reaches it starts a debrief.
@@ -89,15 +129,15 @@ An account the factory acts under, separate from the maintainer's: an app user i
 _Avoid_: Bot, service account, agent account
 
 **Flow**:
-A skill the factory runs, such as `/flight-build` or `/flight-check`.
+A skill the factory runs, such as `/flight-build` or `/flight-check`. The maintainer can run a flow by hand too. A skill the maintainer runs only in their own agent, such as `/flight-setup`, `/flight-new`, or `/flight-issue`, isn't a flow.
 _Avoid_: Workflow, command
 
 **Setup**:
-The flow the maintainer runs by hand to add a factory to a repo. It writes the repo record. Installing Flight Deck on a Mac is a separate step.
+The skill the maintainer runs in their own agent to add a factory to a repo. It writes the repo record, makes the Linear and GitHub changes the factory needs, and registers the repo on the Mac. Installing Flight Deck on a Mac is a separate step.
 _Avoid_: Onboarding, init, install
 
 **Install**:
-The step that puts Flight Deck on a Mac and signs in what exists once per Mac: the runner, the menu bar app, the Claude credential, and the factory's GitHub machine user. It runs once per Mac, before setup adds a factory to any repo.
+The step that puts Flight Deck on a Mac and sets up what exists once per Mac: the runner, the menu bar app, the factory's GitHub machine user, and whether sessions use the Claude subscription or an API key. It runs once per Mac, before setup adds a factory to any repo.
 _Avoid_: Setup, bootstrap
 
 **Dependency install**:
@@ -109,7 +149,7 @@ The runner's copy of a repo's dependencies, installed from the default branch. E
 _Avoid_: Store (pnpm's store is one part of it), warm cache
 
 **Register**:
-To put a repo on one Mac's repo list, so that Mac's runner starts its factory's sessions. Unregistering takes the repo off one Mac and leaves its factory in place. Removing a factory undoes setup.
+To put a repo on one Mac's repo list, so that Mac's runner starts its factory's sessions. Unregistering takes the repo off one Mac and leaves its factory in place. Removing a factory takes away what only that factory uses.
 _Avoid_: Attach, enable, detach (the runner detaches a synced issue from GitHub)
 
 **Factory mark**:
@@ -118,11 +158,15 @@ _Avoid_: Owner mark (the maintainer owns the factory), tag, lock
 
 **Trial run**:
 A throwaway factory session that install or setup starts the way the runner will, so a problem shows up while the maintainer watches instead of on the first issue.
-_Avoid_: Dry run (a dry run tests a flow on Shaders during planning), smoke test
+_Avoid_: Dry run (a dry run tests Flight Deck itself on a real repo, such as Shaders), smoke test
 
 **Slot**:
-A named point in a flow where a step the repo chose runs, such as writing a changeset at the end of build. The repo record names the skill that fills each slot.
+A named point in a flow where steps the repo chose run, such as writing a changeset once build's criteria pass. The repo record names the skills that fill each slot, in order.
 _Avoid_: Hook (Claude Code uses that word for something else), plugin, extension point
+
+**Extra**:
+A test or review the repo record lists outside its command categories, such as an install-and-import test or React Doctor. A local extra runs in a factory session, and a CI-only extra runs only in the repo's CI.
+_Avoid_: Add-on, plugin
 
 **Stage**:
 A step an issue passes through between intake and merge: plan, build, or check. Each stage is run by its own flow, in a fresh session.
@@ -133,12 +177,16 @@ What plan writes for build: the agent-ready description of one issue. It replace
 _Avoid_: Agent-ready ticket
 
 **Report**:
-What the filer wrote: an issue's description before plan replaced it with the brief. Plan treats it as a claim to verify, not as instructions.
+What the filer wrote: an issue's description before plan replaced it with the brief. Plan counts a comment from anyone but the maintainer as part of the report, and treats the report as a claim to verify, not as instructions.
 _Avoid_: Original description, request, ticket body
 
 **Acceptance criterion**:
 One testable statement in a brief that says when the issue is done, and names how it is proven: by a record command, in the running app, or by a type check only.
 _Avoid_: Requirement, definition of done
+
+**Regression guard**:
+An acceptance criterion the brief marks as guarding behavior that already works, so its test can pass before build's change.
+_Avoid_: Regression test (any test can catch a regression)
 
 **Design**:
 The drawings of what users see, in the files the repo record names, such as a Figma file with a frame for each screen and each state of a component. A frame counts as the design only when it sits in those files or the maintainer linked it.
@@ -152,6 +200,10 @@ _Avoid_: Snapshot (Playwright and Jest use it for their baselines, and Vitest fo
 An issue that describes one larger change. Its sub-issues are the issues that build it.
 _Avoid_: Epic, parent issue
 
+**Standalone issue**:
+An issue that is neither a spec nor a sub-issue of one. It has its own branch off the default branch and its own PR.
+_Avoid_: Single issue, solo issue
+
 **User story**:
 One line in a spec's User Stories section that says what a user can do once the spec is built, written as "As an <actor>, I want a <feature>, so that <benefit>".
 _Avoid_: Story (Storybook uses that word for a rendered example of a component)
@@ -160,9 +212,17 @@ _Avoid_: Story (Storybook uses that word for a rendered example of a component)
 The branch a spec's issues land on. It becomes the spec's one PR into the default branch.
 _Avoid_: Integration branch, feature branch
 
+**Spec check**:
+Check's judgment of a spec's whole change on the spec PR, once every sub-issue has landed. It judges what no sub-issue's check could, such as full CI, the spec's user stories, and problems that cross issues.
+_Avoid_: Final check, integration check
+
 **Factory branch**:
 A branch the runner pushes to the repo for the factory: an issue's own branch or a spec branch. The repo's CI runs its code before check or the maintainer has read it.
 _Avoid_: Bot branch, agent branch
+
+**CI audit**:
+The runner code that tests a repo's CI against the rule that a factory branch gets nothing that deploys, publishes, or approves. Setup runs it, and the runner runs it again before every push.
+_Avoid_: CI check (check is a stage), scan (the runner's scan looks for credentials in what it sends)
 
 **Land**:
 To move a spec branch forward to the exact commit check passed for one of its issues. A landed issue is on the spec branch but not yet on the default branch.
@@ -185,15 +245,15 @@ What a stage leaves for the next one, written where the next stage reads it.
 _Avoid_: Notes, context
 
 **Outbox**:
-What a factory session leaves for the runner to send: its handoff, its status move, and any PR body, media, or verdict. The runner checks it against the stage's rules and makes every write itself.
+What a factory session or a hand run leaves to be sent: its handoff, its status move, and any PR body, media, or verdict. The runner checks a factory session's outbox against the stage's rules and makes every write itself, and `flight-deck apply` sends a hand run's outbox the same way.
 _Avoid_: Result (`claude -p` already emits a result), output, manifest
 
 **Inbox**:
-What the runner fetches from GitHub into a session's worktree before the session starts, such as CI results and the review bots' comments. The session reads it as untrusted text and can't write to it.
+What the runner puts into a session's worktree before the session starts, such as CI results, the review bots' comments, and earlier sessions' handoffs. The session reads it as untrusted text and can't write to it.
 _Avoid_: Context, input, cache
 
 **Claims**:
-Build's handoff to check: what satisfies each acceptance criterion and how build proved it, plus its shortcuts, the changes the brief didn't ask for, and what it couldn't verify. Check doubts them until it has proven them itself.
+Build's handoff to check: what satisfies each acceptance criterion and how build proved it, plus how it handled each change request, its shortcuts, the changes the brief didn't ask for, and what it couldn't verify. Check doubts them until it has proven them itself.
 _Avoid_: Summary, report
 
 **Shortcut**:
@@ -205,8 +265,12 @@ Check's judgment of one exact commit: a pass, or numbered findings sent back to 
 _Avoid_: Approval, review
 
 **Finding**:
-One numbered problem in a verdict that sends work back, with the line it breaks and a failing case.
+One numbered problem in a verdict that sends work back, with the line it breaks and a failing case. A problem a review bot raises is a bot finding, and one from check's reviewer subagents is a reviewer's finding. Neither is a finding until check confirms it in a verdict.
 _Avoid_: Issue (that word means a Linear issue), comment, nit
+
+**Loop cap**:
+The limit on trips back to build before an issue pauses for the maintainer.
+_Avoid_: Retry limit (a retry is a failed session's fresh start), round limit
 
 **Change request**:
 One thing the maintainer asks of a change after check passed it, in a GitHub review or a Linear comment: a change to the code, or an answer to a question. It amends the brief for that issue, so build acts on it and check judges whether build did.
@@ -228,6 +292,10 @@ _Avoid_: Bot (alone), AI reviewer, review app
 What a review bot leaves on a commit when it has finished with it: a check run, a commit status, a review, or a marker in a comment. A done mark alone doesn't mean the bot reviewed anything.
 _Avoid_: Done signal, completion signal (a signal is debrief's count)
 
+**Done rule**:
+What tells the runner how to read one review bot's done mark and how to ask that bot to review again. Flight Deck ships one for each bot it knows, and the repo record can hold its own.
+_Avoid_: Bot rule, bot config (the vendor's own file, such as `.coderabbit.yaml`)
+
 **Bot round**:
-A second verdict on a commit check already passed. It judges only the findings the repo's review bots left once the PR was marked ready.
+A second verdict on a commit check already passed. It judges only the bot findings left once the PR was marked ready.
 _Avoid_: Bot review, watch-pr, re-review
