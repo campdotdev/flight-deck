@@ -217,12 +217,16 @@ Check's judgment of a spec's whole change on the spec PR, once every sub-issue h
 _Avoid_: Final check, integration check
 
 **Factory branch**:
-A branch the runner pushes to the repo for the factory: an issue's own branch or a spec branch. The repo's CI runs its code before check or the maintainer has read it.
+A branch the runner pushes to the repo for the factory: an issue's own branch or a spec branch. The repo's CI runs its code before check or the maintainer has read it. No host builds it.
 _Avoid_: Bot branch, agent branch
 
 **CI audit**:
 The runner code that tests a repo's CI against the rule that a factory branch gets nothing that deploys, publishes, or approves. Setup runs it, and the runner runs it again before every push.
 _Avoid_: CI check (check is a stage), scan (the runner's scan looks for credentials in what it sends)
+
+**Host build**:
+A build or deploy of a branch's code that an app outside the repo's workflows starts on its own, such as a Vercel preview. It counts as CI. A factory branch never gets one.
+_Avoid_: Preview deploy (alone), deployment
 
 **Land**:
 To move a spec branch forward to the exact commit check passed for one of its issues. A landed issue is on the spec branch but not yet on the default branch.
