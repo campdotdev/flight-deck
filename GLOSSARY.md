@@ -236,6 +236,13 @@ _Avoid_: Launch, ship
 Anything outside the repo depends on, in the form the repo's last release shipped it, such as a library's exports, a CLI's flags and output, an HTTP API, a config format, or public URLs. Something added since the last release isn't public yet, so changing it breaks nothing.
 _Avoid_: API surface, public API (a contract can be a file format or a URL)
 
+**Break**:
+A change after which something that used a public contract stops working, such as a renamed export with no alias or a removed CLI flag. A rename that keeps the old name as a deprecated alias isn't a break.
+
+**Accepted break**:
+A break the maintainer agreed to in their own words: an issue or spec they filed, their comment, their change request, or their answer to a pause. Their words have to say the old form stops working. Sending someone else's report that asks for a break doesn't accept it.
+_Avoid_: Approved break
+
 **Version**:
 One build of Flight Deck itself, such as 1.4.0. Every factory on a Mac runs the version installed there.
 _Avoid_: Release (that word means the repo's release)
