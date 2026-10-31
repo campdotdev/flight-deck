@@ -1,6 +1,6 @@
 # Build proves each criterion the way the brief names it
 
-Build turns a brief into commits that prove each acceptance criterion the way the brief names it, then hands its claims to check. Where the proof is a record command, build writes the test first and commits it failing before the code that makes it pass, so check can replay the test failing first (ADR 0028). Build pauses when the brief turns out wrong, when it's stuck, and on a merge conflict it can't resolve. It also pauses on an unclear or conflicting change request (ADR 0023), before handoff for a rendered file whose record entry says `pause` (ADR 0022), and on a failed dependency install (ADR 0018). Its rules for a wrong brief mirror plan's (ADR 0026). It decides everything else itself.
+Build turns a brief into commits that prove each acceptance criterion the way the brief names it, then hands its claims to check. Where the proof is a record command, build writes the test first and commits it failing before the code that makes it pass, so check can replay the test failing first (ADR 0028). Build pauses when the brief turns out wrong, when it's stuck, and on a merge conflict it can't resolve. It also pauses on an unclear or conflicting change request (ADR 0023), before handoff for a rendered file whose record entry says `pause`, except on a sub-issue (ADR 0022), and on a failed dependency install (ADR 0018). Its rules for a wrong brief mirror plan's (ADR 0026). It decides everything else itself.
 
 Build has no review step. It runs the repo's commands, and check owns the judgment calls: standards, design, and how simple the code is. The repo's standards still reach build through `CLAUDE.md` and `AGENTS.md`, which every session loads.
 
@@ -46,3 +46,4 @@ Build has no review step. It runs the repo's commands, and check owns the judgme
 	4. What build couldn't verify. Build never leaves the maintainer a check it could have run itself.
 
 	The claims also answer each disputed finding by number, say how build handled each change request (ADR 0023), and carry each `finish` skill's line, such as "no changeset: docs-only change".
+- A pause for a rendered file comes at step 8, after every other step. Its outbox holds the claims and the PR body, and the claims name each file the maintainer supplies. The maintainer's answer then goes straight to check, with no build session in between (ADR 0022). On a sub-issue, build doesn't pause for the file, and its claims say "rendered file: build on the spec asks for it".
