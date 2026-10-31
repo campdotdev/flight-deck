@@ -128,6 +128,10 @@ _Avoid_: Owner, maintainer on duty, admin
 An account the factory acts under, separate from the maintainer's: an app user in Linear and a machine user in GitHub.
 _Avoid_: Bot, service account, agent account
 
+**Reader app**:
+The second Linear app in each workspace, which can only read. Factory sessions read Linear through it. Nothing in Linear ever appears under its name, so it isn't a factory account.
+_Avoid_: Read-only bot, session account
+
 **Flow**:
 A skill the factory runs, such as `/flight-build` or `/flight-check`. The maintainer can run a flow by hand too. A skill the maintainer runs only in their own agent, such as `/flight-setup`, `/flight-new`, or `/flight-issue`, isn't a flow.
 _Avoid_: Workflow, command

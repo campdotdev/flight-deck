@@ -12,7 +12,7 @@ A repo's issues sit in one Linear team, and the repo record names it. Two repos 
 
 ## Consequences
 
-- Linear Free is the floor, so no flow uses a paid plan's feature, such as Releases or triage responsibility, even as an option. A Free workspace allows 2 teams, so it holds at most 2 factories. A third repo needs a paid plan or a second free workspace with its own Flight Deck app.
+- Linear Free is the floor, so no flow uses a paid plan's feature, such as Releases or triage responsibility, even as an option. A Free workspace allows 2 teams, so it holds at most 2 factories. A third repo needs a paid plan or a second free workspace with its own two Linear apps.
 - Ready to plan is an `unstarted` status, and the other seven are `started`.
 - Each stage has a queue, named "Ready to" plus the stage, and a working status named with the stage's verb, such as Ready to build and Building. A take moves an issue from the queue to the working status. Plan hands off to Ready to build. Build hands off to Ready to check, where the issue waits until check can start (ADR 0010). Check moves a passed issue to In Review, or sends it back to Ready to build with its findings.
 - Statuses belong to a team, so the record maps each lifecycle role to a status name on that team. The record's `[tracker]` table holds `kind = "linear"`, the `workspace`, and the `team` key, such as `SHA`. `[tracker.statuses]` holds one line per role, such as `ready_to_plan = "Ready to plan"`. Flows speak in roles, so a team that renamed Done or In Review still works, and another tracker can map its own states later.
