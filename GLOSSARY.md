@@ -20,6 +20,14 @@ _Avoid_: Agent run, job
 To move an issue into one stage's working status, such as Planning, Building, or Checking, so that no other session starts it. The runner takes an issue before it starts the session, and a flow run by hand takes it first.
 _Avoid_: Claim (that word belongs to build's claims), pick up, lock
 
+**Factory status**:
+One of the eight statuses setup adds to a repo's team: Ready to plan, Planning, Ready to build, Building, Ready to check, Checking, Landed, and Paused. The team's own statuses, such as In Review and Done, aren't factory statuses, even when the factory moves an issue into one.
+_Avoid_: Lifecycle status, factory state
+
+**In flight**:
+A sent issue is in flight while it's still the factory's: while it sits in a factory status, or in In Review because check passed it. The runner owns the assignee and the subscribers of an in-flight issue.
+_Avoid_: Sent issue (an issue stays sent after it merges), factory issue, active
+
 **Queue**:
 A factory status where a sent issue waits for one stage to take it, named "Ready to" plus the stage, such as Ready to build.
 _Avoid_: Ready state, backlog (Backlog is a status the factory never takes from)
