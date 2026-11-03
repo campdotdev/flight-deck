@@ -41,7 +41,7 @@ An issue that sits in a working status past its stage's time limit with no take 
 _Avoid_: Orphan, stuck issue
 
 **Hold**:
-The runner's state of starting no new session while running ones finish. The maintainer holds the runner and starts it again, and the runner holds itself short of the plan limits on a subscription, or at its spending caps on an API key. An update drains the runner, which holds until its running sessions finish and then restarts on the new version.
+The runner's state of starting no new session on an issue, and no cache refresh, while running ones finish. The maintainer holds the runner and starts it again, and the runner holds itself short of the plan limits on a subscription, or at its spending caps on an API key. An update drains the runner, which holds until its running sessions finish and then restarts on the new version.
 _Avoid_: Pause (an issue's state), suspend
 
 **Concurrency cap**:
