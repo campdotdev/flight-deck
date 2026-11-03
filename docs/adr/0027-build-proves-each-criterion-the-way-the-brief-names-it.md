@@ -2,7 +2,7 @@
 
 Build turns a brief into commits that prove each acceptance criterion the way the brief names it, then hands its claims to check. Where the proof is a record command, build writes the test first and commits it failing before the code that makes it pass, so check can replay the test failing first (ADR 0028). Build pauses when the brief turns out wrong, when it's stuck, and on a merge conflict it can't resolve. It also pauses on an unclear or conflicting change request (ADR 0023), before handoff for a rendered file whose record entry says `pause`, except on a sub-issue (ADR 0022), and on a failed dependency install (ADR 0018). Its rules for a wrong brief mirror plan's (ADR 0026). It decides everything else itself.
 
-Build has no review step. It runs the repo's commands, and check owns the judgment calls: standards, design, and how simple the code is. The repo's standards still reach build through `CLAUDE.md` and `AGENTS.md`, which every session loads.
+Build has no review step. It runs the repo's commands, and check owns the judgment calls: standards, design, and how simple the code is. The repo's standards still reach build through `CLAUDE.md` and `AGENTS.md`, which every session loads (ADR 0007).
 
 ## Considered options
 
