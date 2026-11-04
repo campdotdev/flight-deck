@@ -240,6 +240,10 @@ _Avoid_: CI check (check is a stage), scan (the runner's scan looks for credenti
 A build or deploy of a branch's code that an app outside the repo's workflows starts on its own, such as a Vercel preview. It counts as CI. A factory branch never gets one.
 _Avoid_: Preview deploy (alone), deployment
 
+**Ready-only job**:
+A job in the repo's own workflows that skips a PR while it is a draft and runs only once the PR is marked ready, such as one guarded by `github.event.pull_request.draft == false`. It is CI, not a review bot.
+_Avoid_: Draft-gated job, post-ready check
+
 **Land**:
 To move a spec branch forward to the exact commit check passed for one of its issues. A landed issue is on the spec branch but not yet on the default branch.
 _Avoid_: Merge, for this step
@@ -320,5 +324,5 @@ What tells the runner how to read one review bot's done mark and how to ask that
 _Avoid_: Bot rule, bot config (the vendor's own file, such as `.coderabbit.yaml`)
 
 **Bot round**:
-A second verdict on a commit check already passed. It judges only the bot findings left once the PR was marked ready.
+A second verdict on a commit check already passed. It judges only what arrived once the PR was marked ready: the bot findings and the ready-only jobs that failed.
 _Avoid_: Bot review, watch-pr, re-review
