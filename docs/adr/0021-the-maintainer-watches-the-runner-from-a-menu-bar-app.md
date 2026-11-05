@@ -23,6 +23,7 @@ Flags reach the maintainer through Linear (ADR 0011), but nothing showed the run
 - **Stop** asks the maintainer to confirm while a session runs. Each stopped session's issue pauses without a flag (ADR 0011) and stays paused until the maintainer moves it or answers `retry` (ADR 0019).
 - Usage shows the plan's five-hour window and its week, each with its reset time. On an API key, it shows spending against the daily and monthly caps (ADR 0007).
 - One runner serves every repo on the Mac (ADR 0002), so the menu covers every factory on it and names each issue's repo. **Open Linear** opens the Needs you view.
+- Each Linear workspace has its own Needs you view, so when the Mac's factories span two workspaces, the menu gets one "N more in <workspace>" row and one **Open Linear** item for each. With one workspace, the menu is as above. When the Flight Deck app can't read the view, both open the maintainer's My Issues page, which lists every flag but also the maintainer's own work. Reading the view with the setup key would give the runner a second Linear identity (ADR 0005).
 - The menu and `flight-deck status` read the same state, which the runner rewrites at each poll, so they always agree. Both lag Linear by up to one poll, about a minute.
 - `flight-deck status` prints that state as text, for every factory on the Mac:
 	- The runner's state and when it last polled.
@@ -31,6 +32,7 @@ Flags reach the maintainer through Linear (ADR 0011), but nothing showed the run
 	- Open trouble causes and stale takes (ADR 0011).
 	- Debrief's signal counts (ADR 0012).
 - When the runner's heartbeat is more than 3 minutes old, the icon says the runner isn't responding. Silence no longer hides a dead runner, though a closed lid still stops the factory.
+- A hold scoped to one workspace or one repo, such as a failed Linear token mint, leaves the runner working for the other factories. When such holds cover every registered repo, nothing can start, so the icon and the header show the runner as held and name the cause. A trouble cause the runner can't file as an issue shows as a row under the flag, so it stays visible after its notification goes. It isn't a flag, so the icon doesn't count it.
 - The menu posts no notifications. Flags reach the maintainer through Linear, and the runner posts a macOS notification only for trouble that stops it (ADR 0011).
 - v1 has no fuller local UI: no board, no timeline, no spec numbers, and no local PR walkthrough. ADR 0020 already ruled out a published walkthrough. A fuller UI is a later effort.
 - ADR 0024 decides how the app is built, shipped, and started, and where it first appears in the menu bar.
