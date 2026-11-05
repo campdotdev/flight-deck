@@ -209,7 +209,7 @@ A file the repo commits that only a browser or a container can make, such as a v
 _Avoid_: Snapshot (Playwright and Jest use it for their baselines, and Vitest for other things), artifact (the archive CI uploads), golden file
 
 **Spec**:
-An issue that describes one larger change. Its sub-issues are the issues that build it.
+An issue that describes one larger change. Its sub-issues are the issues that build it, and they sit on its team. An issue whose parent sits on another team is a standalone issue to the factory.
 _Avoid_: Epic, parent issue
 
 **Standalone issue**:
