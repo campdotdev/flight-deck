@@ -10,7 +10,7 @@ Linear's GitHub Issues Sync copies a Linear issue's description to the GitHub is
 
 ## Consequences
 
-- A detached issue stays detached. A reporter's later GitHub comments stop reaching Linear, and closing or reopening the GitHub issue no longer moves the Linear issue. The maintainer sees those changes only as GitHub notifications. The runner fetches the GitHub issue's body and comments into each session's inbox (ADR 0013).
+- A detached issue stays detached. A reporter's later GitHub comments stop reaching Linear, and closing or reopening the GitHub issue no longer moves the Linear issue. The maintainer sees those changes only as GitHub notifications. The runner fetches the GitHub issue's body and comments into each plan and build session's inbox (ADR 0013). Check and the bot round don't get them, because check reads from GitHub only what ADR 0028 lists.
 - A pause asks the maintainer, never the filer. Until the detach, a factory reply in the synced thread would reach GitHub as a `linear-code[bot]` comment that opens with "from flightdeck:", so the runner never writes in that thread. The maintainer passes any question on to the reporter.
 - Until the detach, the factory's status moves keep a synced issue open on GitHub, because Linear maps every unstarted and started status to open. Canceled closes the GitHub issue as not planned, as `linear-code[bot]` when the Flight Deck app user moves it and as the maintainer's connected GitHub account when they do.
 - GitHub issues arrive through one-way sync, and setup won't add a factory to a team that syncs two-way (ADR 0013). One-way sync still carries comments and open or closed status in both directions, so the runner detaches every synced issue before it applies a brief.
