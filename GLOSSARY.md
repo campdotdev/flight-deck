@@ -101,7 +101,7 @@ An issue setup offers, unsent, for something the repo lacks, such as unit tests 
 _Avoid_: TODO, chore, setup task
 
 **Default-branch failure**:
-A failed workflow run on the repo's default branch, a failed run of a release workflow on any branch or tag, or a failed production deploy. It also names the issue the runner files for a workflow's or environment's failures.
+A failed workflow run that the repo's default branch itself starts, a failed run of a release workflow on any branch or tag but a factory branch, or a failed production deploy. A run that an issue, a comment, or a pull request starts isn't one. It also names the issue the runner files for a workflow's or environment's failures.
 _Avoid_: Broken build, red main
 
 **Trouble issue**:
