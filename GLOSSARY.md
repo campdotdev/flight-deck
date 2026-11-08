@@ -172,6 +172,10 @@ _Avoid_: Owner mark (the maintainer owns the factory), tag, lock
 A throwaway factory session that install or setup starts the way the runner will, so a problem shows up while the maintainer watches instead of on the first issue.
 _Avoid_: Dry run (a dry run tests Flight Deck itself on a real repo, such as Shaders), smoke test
 
+**Trial PR**:
+The throwaway draft PR that setup has the machine user open, holding setup's uncommitted diff, to prove the review bots, the rendered-file artifacts, the CI guards, and the host exclusions before the maintainer commits the diff. Setup closes it and deletes its branch.
+_Avoid_: Test PR, dry-run PR
+
 **Slot**:
 A named point in a flow where steps the repo chose run, such as writing a changeset once build's criteria pass. The repo record names the skills that fill each slot, in order.
 _Avoid_: Hook (Claude Code uses that word for something else), plugin, extension point
