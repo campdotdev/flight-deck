@@ -256,6 +256,9 @@ _Avoid_: Merge, for this step
 A version of the repo that reaches its users, such as a package published to a registry or an app deployed to production. The maintainer makes every release through the repo's own release step, and the factory never makes one.
 _Avoid_: Launch, ship
 
+**Release workflow**:
+A workflow that publishes a package or deploys, whatever starts it. The record's `release_workflows` lists them. Its failed run counts toward Escaped under the release rule, never as a CI failure.
+
 **Public contract**:
 Anything outside the repo depends on, in the form the repo's last release shipped it, such as a library's exports, a CLI's flags and output, an HTTP API, a config format, or public URLs. Something added since the last release isn't public yet, so changing it breaks nothing.
 _Avoid_: API surface, public API (a contract can be a file format or a URL)
