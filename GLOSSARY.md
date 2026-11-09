@@ -283,7 +283,7 @@ What a factory session or a hand run leaves to be sent: its handoff, its status 
 _Avoid_: Result (`claude -p` already emits a result), output, manifest
 
 **Inbox**:
-What the runner puts in a session's folder, beside its outbox and outside its worktree, before the session starts, such as CI results, the review bots' comments, and earlier sessions' handoffs. The session reads it as untrusted text and can't write to it.
+What the runner puts in a session's folder, beside its outbox and outside its worktree, before the session starts, such as CI results, the review bots' comments, and earlier sessions' handoffs. The session reads it as untrusted text and can't write to it, apart from `record.toml`, the runner's migrated copy of the repo's own record, which a flow obeys.
 _Avoid_: Context, input, cache
 
 **Claims**:
