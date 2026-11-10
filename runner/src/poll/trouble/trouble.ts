@@ -170,7 +170,7 @@ export class Trouble {
         for (const issue of cleared === null ? [] : entry.issues) {
           const repo = context.repos.get(issue.repo);
           if (repo === undefined) continue;
-          const comment = runnerComment({ statusLine: cleared!.statusLine, sentences: cleared!.sentence, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses });
+          const comment = await runnerComment({ statusLine: cleared!.statusLine, sentences: cleared!.sentence, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses });
           await this.attempt(log, `${issue.identifier}: cleared comment`, () => context.tracker.post({ id: issue.id, repo }, comment.body, { flag: false }));
         }
       }
@@ -238,7 +238,7 @@ export class Trouble {
       if (issue !== undefined && reopened !== null) {
         const unassigned = reopened.get(issue.id) === false;
         if (unassigned) await this.rememberFlag(context, issue);
-        const comment = runnerComment({ statusLine: `🟡 Needs your help: ${issue.title}`, sentences: null, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses });
+        const comment = await runnerComment({ statusLine: `🟡 Needs your help: ${issue.title}`, sentences: null, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses });
         const target = issue;
         const posted = await this.attempt(log, `${issue.identifier}: reopened comment`, () => context.tracker.post({ id: target.id, repo }, comment.body, { flag: unassigned }));
         if (posted !== null && unassigned) issue.flagged = true;

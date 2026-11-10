@@ -95,6 +95,8 @@ export const paths = {
 
   /** The binary in a version folder, which a session's helpers run. */
   bin: (versionFolder: string) => join(versionFolder, "bin", "flight-deck"),
+  /** The pinned Betterleaks in a version folder, which the secret scan runs (ADR 0007). */
+  betterleaks: (versionFolder: string) => join(versionFolder, "vendor", "betterleaks"),
 
   /** The folder Claude Code makes for a worktree: its path with every character but a letter or digit as `-`. */
   claudeProject: (f: Folders, worktree: string) => join(f.home, ".claude", "projects", worktree.replace(/[^A-Za-z0-9]/g, "-")),

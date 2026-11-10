@@ -251,7 +251,7 @@ export class ApplyWaiting {
     const issue = await this.tracker.issue({ id: entry.issue_id, repo });
     const working = WORKING[entry.stage];
     if (working === undefined || issue.role !== working) return this.moved(now, repo, entry);
-    const comment = runnerComment(linearWrite(entry.apply!.folder), this.facts(entry), { version: this.options.version, statuses: repo.statuses });
+    const comment = await runnerComment(linearWrite(entry.apply!.folder), this.facts(entry), { version: this.options.version, statuses: repo.statuses });
     const result = await this.comments(now).post({ ...issue, role: working }, comment);
     await this.paused(now, repo, entry, result);
   }

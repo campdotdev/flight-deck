@@ -151,6 +151,24 @@ describe("a second failure", () => {
     });
   });
 
+  test("leaves out a last error that matches a secret rule, and says so", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    // A made-up GitHub token that Betterleaks' default github-pat rule matches.
+    const token = "ghp_4f8Xq2Lm9Rt7Vb3Nc6Hj1Kp5Wd0Zs8Ya2Ue4";
+    await failTwice(issue, { exit: { kind: "exited", code: 1 }, error: `git push failed: https://${token}@github.com/campdotdev/shaders` });
+    const body = world.tracker.writes.find((write) => write.kind === "comment");
+    expect(body).toEqual({
+      kind: "comment",
+      issue: issue.identifier,
+      body: comment("Plan ran twice, and neither session handed off. The second one stopped with an error. Its transcript path is under Details.", [
+        ...facts("`exited` with code 1"),
+        "",
+        "Error message left out: it matched a secret rule.",
+      ]),
+    });
+    expect(JSON.stringify(world.tracker.writes)).not.toContain(token);
+  });
+
   test("says the session couldn't start when prepare failed twice, with prepare's message and no transcript", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     // A session folder can't be made under a read-only sessions folder, so prepare fails.

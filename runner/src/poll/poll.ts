@@ -13,7 +13,7 @@ import { paths, sessionParts } from "../folders/index.ts";
 import { buildLaunch, type Auth, type Exit, type ExitKind, type Harness, type HarnessSession, type Launch } from "../harness/index.ts";
 import { hasWorkspace, othersCanRead, readConfig, readCredentials, writeEtc, type Config, type Credentials, type Registration } from "../install/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
-import { Outbox } from "../outbox/index.ts";
+import { Outbox, SecretScan } from "../outbox/index.ts";
 import { blockerPause } from "../outbox/runner-comments/blocker.ts";
 import { failedTwice, type FailedExit } from "../outbox/runner-comments/failed-twice.ts";
 import { portPause } from "../outbox/runner-comments/port.ts";
@@ -100,6 +100,8 @@ export class Poll {
   private readonly tokens: LinearTokens;
   private readonly applyWaiting: ApplyWaiting;
   private readonly usage: Usage;
+  /** The secret scan every apply and every runner comment's facts go through (ADR 0007). */
+  private readonly secrets: SecretScan;
   /** Exits queue as they happen, and the next tick handles them first. */
   private readonly exits: QueuedExit[] = [];
   /** The `[machine_user]` that `etc/` was last written from, or `null` before this runner's first write. */
@@ -128,6 +130,7 @@ export class Poll {
     this.folders = options.folders;
     this.version = options.version;
     this.versionFolder = options.versionFolder;
+    this.secrets = new SecretScan({ folders: options.folders, versionFolder: options.versionFolder });
     this.tracker = options.tracker;
     this.harness = options.harness;
     this.path = options.path ?? process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -593,7 +596,7 @@ export class Poll {
   }
 
   private outbox(now: Date, config: Config): Outbox {
-    return new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => repoNamed(config, name) });
+    return new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => repoNamed(config, name), secrets: this.secrets });
   }
 
   /** The session is over: its workspace goes, and so does its entry. */
@@ -642,7 +645,7 @@ export class Poll {
       await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, no pause posted`);
       return;
     }
-    const comment = runnerComment(text, facts, { version: this.version, statuses: repo.statuses });
+    const comment = await runnerComment(text, facts, { version: this.version, statuses: repo.statuses, secrets: { scan: this.secrets, repo: repo.name } });
     const result = await this.comments(now).post({ ...issue, role: issue.role }, comment);
     await this.state.log(now, `${entry.id} ${entry.issue}: runner pause ${result}: ${comment.statusLine}`);
   }
@@ -1082,7 +1085,7 @@ export class Poll {
     // Recorded first, so the other issues wait even while the comment waits for Linear.
     await this.state.writePortPause(repo, pause);
     pauses.set(repo, pause);
-    const comment = runnerComment(portPause(port), {}, { version: this.version, statuses: poll.tracker.statuses });
+    const comment = await runnerComment(portPause(port), {}, { version: this.version, statuses: poll.tracker.statuses });
     const result = await this.comments(now).post(issue, comment);
     await this.state.log(now, `${issue.identifier}: port pause ${result}: ${comment.statusLine}`);
     return true;
@@ -1100,7 +1103,7 @@ export class Poll {
       const test = blockerTest(issue);
       if (test.kind === "wait") poll.waitingForBlockers.push({ issue, open: test.open });
       if (test.kind !== "pause") continue;
-      const comment = runnerComment(blockerPause(test), {}, { version: this.version, statuses: poll.tracker.statuses });
+      const comment = await runnerComment(blockerPause(test), {}, { version: this.version, statuses: poll.tracker.statuses });
       const result = await this.comments(now).post(issue, comment);
       await this.state.log(now, `${issue.identifier}: blocker pause ${result}: ${comment.statusLine}`);
     }

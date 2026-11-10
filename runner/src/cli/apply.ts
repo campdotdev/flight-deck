@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { paths, sessionParts } from "../folders/index.ts";
 import { readConfig, readCredentials, workspaceKey, type Registration } from "../install/index.ts";
-import { Outbox } from "../outbox/index.ts";
+import { Outbox, SecretScan } from "../outbox/index.ts";
 import { trackerRepo } from "../poll/index.ts";
 import { readRecord, resolveSlots, type RepoRecord } from "../record/index.ts";
 import { State } from "../state/index.ts";
@@ -68,6 +68,7 @@ async function apply(folder: string, dryRun: boolean, context: CommandContext): 
     clock: context.clock,
     repo: (name) => (name === registration.name ? repo : null),
     memory: handRunMemory(context.folders, context.answerMs ?? ANSWER_MS),
+    secrets: new SecretScan({ folders: context.folders, versionFolder: context.versionFolder }),
   });
   const result = await outbox.apply(folder, {
     identity: context.adapters.maintainerTracker({ folders: context.folders, workspace, setupKey }),
