@@ -25,4 +25,5 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: vendor/sandbox-runtime
       - run: bun run typecheck
-      - run: bun test
+      # Scenarios run real git, sandbox-runtime, and APFS clones, so one can pass Bun's 5-second default.
+      - run: bun run test
