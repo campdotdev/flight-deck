@@ -1,7 +1,7 @@
 // State keeps the runner's files in the data folder. Each kind has a typed read and write, every file is
 // JSON, and every write is one atomic rename (spec 1, "State").
 import { paths, type Folders } from "../folders/index.ts";
-import type { Role } from "../record/index.ts";
+import type { RepoRecord, Role } from "../record/index.ts";
 import { readdir } from "node:fs/promises";
 import { appendLine, readJson, writeJson } from "./files.ts";
 import type { RateLimitEvent } from "../harness/index.ts";
@@ -133,6 +133,15 @@ export interface IssueMemory {
   restart: Restart | null;
 }
 
+/** The last valid record the runner read on a repo's default branch, for the stale-take limits (spec 1, "Poll"). */
+export interface LastRecord {
+  /** The default branch's commit it was read at. */
+  commit: string;
+  /** ISO time of the read. */
+  read_at: string;
+  record: RepoRecord;
+}
+
 const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, restart: null };
 
 /** One hold `state/holds.json` keeps: a usage hold, with when it ends (spec 1, "Holds"). */
@@ -213,6 +222,15 @@ export class State {
 
   async writeSpend(spend: Spend): Promise<void> {
     await writeJson(paths.spend(this.folders), spend);
+  }
+
+  /** The last valid record the runner read for the repo, or `null` when it never read one. */
+  async lastRecord(repo: string): Promise<LastRecord | null> {
+    return readJson<LastRecord | null>(paths.lastRecord(this.folders, repo), null);
+  }
+
+  async writeLastRecord(repo: string, last: LastRecord): Promise<void> {
+    await writeJson(paths.lastRecord(this.folders, repo), last);
   }
 
   /** The time of the last poll, written every poll. */
