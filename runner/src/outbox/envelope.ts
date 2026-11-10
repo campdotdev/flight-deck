@@ -13,14 +13,16 @@ export interface Outcome {
   answers?: Answer[];
   /** A pause's need: `answer` when a one-word reply decides it, `help` when the maintainer acts first. */
   needs?: "answer" | "help";
+  /** A duplicate's original: an issue identifier. The Outbox checks that it names an open issue on the team. */
+  of?: string;
 }
 
 export interface Envelope {
   outcome: Outcome;
   /** `summary.md`, or `null` when the session left none. */
   summary: string | null;
-  /** The handoff file's name and text, such as `brief.md`. */
-  handoff: { name: string; text: string };
+  /** The handoff file's name and text, such as `brief.md`, or `null` for a duplicate, which holds none. */
+  handoff: { name: string; text: string } | null;
 }
 
 /** The handoff file each move names. */
@@ -36,9 +38,8 @@ const MAX_ANSWERS = 3;
 const OUTCOME_KEYS: Partial<Record<Role, readonly string[]>> = {
   ready_to_build: ["version", "stage", "move"],
   paused: ["version", "stage", "move", "answers", "needs"],
+  duplicate: ["version", "stage", "move", "of"],
 };
-/** The moves this Outbox applies so far. FLD-97 adds `duplicate` and follow-up issues. */
-const APPLIES: readonly Role[] = ["ready_to_build", "paused"];
 
 export type EnvelopeResult = { ok: true; envelope: Envelope } | { ok: false; rule: string };
 
@@ -73,7 +74,7 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   const role = move as Role;
   if (!(STAGE_MOVES[context.stage] ?? []).includes(role)) return fail(`${context.stage} can't move an issue to ${role}`);
   if (!context.lifecycle.allows(context.role, role)) return fail(`Lifecycle doesn't allow ${context.role} to ${role}`);
-  if (!APPLIES.includes(role)) return fail(`the Outbox can't apply a move to ${role} yet`);
+  if (!(role in OUTCOME_KEYS)) return fail(`the Outbox can't apply a move to ${role} yet`);
 
   const extraKey = Object.keys(outcome).find((key) => !(OUTCOME_KEYS[role] ?? []).includes(key));
   if (extraKey !== undefined) return fail(`outcome.json holds ${extraKey}, which a move to ${role} doesn't take`);
@@ -83,21 +84,31 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
     if (typeof pause === "string") return fail(pause);
     Object.assign(checkedOutcome, pause);
   }
+  if (role === "duplicate") {
+    if (typeof outcome.of !== "string" || outcome.of.trim() === "") return fail("a move to duplicate needs of, an issue identifier");
+    checkedOutcome.of = outcome.of.trim();
+  }
 
-  const handoffName = HANDOFF_FILES[role];
+  // Exactly one handoff file, the one the move names. A duplicate holds none.
+  const handoffName = HANDOFF_FILES[role] ?? null;
   const handoffs = names.filter((name) => HANDOFF_NAMES.has(name));
-  if (handoffName === undefined || !handoffs.includes(handoffName)) return fail(`a move to ${role} needs ${handoffName ?? "a handoff file"}`);
+  if (handoffName === null && handoffs.length > 0) return fail(`a move to ${role} holds no handoff file, but the outbox holds ${handoffs.join(", ")}`);
+  if (handoffName !== null && !handoffs.includes(handoffName)) return fail(`a move to ${role} needs ${handoffName}`);
   if (handoffs.length > 1) return fail(`the outbox holds ${handoffs.length} handoff files: ${handoffs.join(", ")}`);
   const stray = names.find((name) => !["outcome.json", "summary.md", "media", "follow-ups", ...handoffs].includes(name));
   if (stray !== undefined) return fail(`${stray} isn't part of the outbox's envelope`);
 
-  const text = await readFile(join(outbox, handoffName), "utf8");
-  if (handoffName === "brief.md") {
-    const rule = briefRule(text);
-    if (rule !== null) return fail(rule);
+  let handoff: Envelope["handoff"] = null;
+  if (handoffName !== null) {
+    const text = await readFile(join(outbox, handoffName), "utf8");
+    if (handoffName === "brief.md") {
+      const rule = briefRule(text);
+      if (rule !== null) return fail(rule);
+    }
+    handoff = { name: handoffName, text };
   }
   const summary = names.includes("summary.md") ? await readFile(join(outbox, "summary.md"), "utf8") : null;
-  return { ok: true, envelope: { outcome: checkedOutcome, summary, handoff: { name: handoffName, text } } };
+  return { ok: true, envelope: { outcome: checkedOutcome, summary, handoff } };
 }
 
 /** A pause's checked `answers` and `needs`, or the broken rule. */

@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { readJson, writeJson, type State } from "../state/index.ts";
-import type { IssueRef, Tracker, TrackerRepo } from "../tracker/index.ts";
+import { IssueNotFoundError, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
-import { handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
+import { duplicateLine, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope } from "./envelope.ts";
 
 export type ApplyResult =
@@ -38,7 +38,11 @@ export interface OutboxOptions {
 }
 
 /** The name `applied.json` records for each write. */
-type WriteName = "writeBrief" | "post" | "move" | "pause";
+type WriteName = "detach" | "writeBrief" | "post" | "move" | "pause";
+type Step = [WriteName, () => Promise<string | null>];
+
+/** The status types of an open issue: factory statuses included, done, canceled, and duplicate not. */
+const OPEN_TYPES = new Set(["backlog", "unstarted", "started", "triage"]);
 
 export class Outbox {
   constructor(private readonly options: OutboxOptions) {}
@@ -62,28 +66,42 @@ export class Outbox {
     });
     if (!checked.ok) return { result: "failed", rule: checked.rule, writes: [] };
     const { envelope } = checked;
+    const { move, answers = [], needs } = envelope.outcome;
+
+    let original: TrackerIssue | null = null;
+    if (move === "duplicate") {
+      const of = await originalOf(tracker, repo, issue, envelope.outcome.of ?? "");
+      if (typeof of === "string") return { result: "failed", rule: of, writes: [] };
+      original = of;
+    }
 
     const ref: IssueRef = { id: issue.id, repo };
     const state = this.options.state;
-    const { move, answers = [], needs } = envelope.outcome;
     const phrase = statusPhrase(move, needs);
     const comment = handoffComment({
       phrase,
       summary: envelope.summary,
+      ...(original === null ? {} : { line: duplicateLine(original) }),
       answers: answers.map((answer) => ({ word: answer.word, does: answer.does, status: repo.statuses[answer.move] })),
-      handoff: envelope.handoff.text,
+      handoff: envelope.handoff?.text ?? null,
       footer: sessionFooter(this.options.version, session.stage, session.session),
     });
-    const moveStep: [WriteName, () => Promise<string | null>] = [
+    const cause = move === "paused" ? "pause" : move === "duplicate" ? "duplicate" : "handoff";
+    const moveStep: Step = [
       "move",
       async () => {
-        const moved = await lifecycle.move({ ...ref, role: issue.role }, move, move === "paused" ? "pause" : "handoff");
+        const of = original === null ? {} : { of: { id: original.id, repo } };
+        const moved = await lifecycle.move({ ...ref, role: issue.role }, move, cause, of);
         return moved.ok ? null : moved.violation;
       },
     ];
+    // A synced issue is detached before its brief and before a duplicate mark, so neither reaches GitHub (ADR 0008).
+    const attachment = issue.sync_attachment;
+    const detachSteps: Step[] = issue.synced && attachment !== null ? [["detach", async () => (await tracker.detach({ ...ref, sync_attachment: attachment }), null)]] : [];
+    const postStep = (flag: boolean): Step => ["post", async () => (await tracker.post(ref, comment, { flag }), null)];
 
     // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
-    let steps: [WriteName, () => Promise<string | null>][];
+    let steps: Step[];
     if (move === "paused") {
       let commentAt: string | null = null;
       steps = [
@@ -110,18 +128,22 @@ export class Outbox {
           },
         ],
       ];
+    } else if (move === "duplicate") {
+      steps = [...detachSteps, postStep(false), moveStep];
     } else {
+      const brief = envelope.handoff?.text ?? "";
       steps = [
+        ...detachSteps,
         [
           "writeBrief",
           async () => {
             const memory = await state.issueMemory(session.repo, issue.id);
-            await tracker.writeBrief(ref, envelope.handoff.text, { runnerWroteBrief: memory.brief !== null });
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, brief: envelope.handoff.text });
+            await tracker.writeBrief(ref, brief, { runnerWroteBrief: memory.brief !== null });
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, brief });
             return null;
           },
         ],
-        ["post", async () => (await tracker.post(ref, comment, { flag: false }), null)],
+        postStep(false),
         moveStep,
       ];
     }
@@ -142,4 +164,22 @@ export class Outbox {
     if (move === "paused") return { result: "paused", reason: opening(phrase, envelope.summary).statusLine, writes };
     return { result: "applied", writes };
   }
+}
+
+/**
+ * The open issue a duplicate's `of` names, or the broken rule: it must exist, sit on the same team, be open
+ * (its status type is backlog, unstarted, started, or triage), and not be the issue itself.
+ */
+async function originalOf(tracker: Tracker, repo: TrackerRepo, issue: TrackerIssue, of: string): Promise<TrackerIssue | string> {
+  let original: TrackerIssue;
+  try {
+    original = await tracker.issue({ id: of, repo });
+  } catch (error) {
+    if (error instanceof IssueNotFoundError) return `outcome.json's of ${of} names no issue Flight Deck can read`;
+    throw error;
+  }
+  if (original.id === issue.id) return `outcome.json's of ${of} is the issue itself`;
+  if (original.team !== repo.team) return `outcome.json's of ${of} is on team ${original.team}, not ${repo.team}`;
+  if (!OPEN_TYPES.has(original.status_type)) return `outcome.json's of ${of} is in ${original.status}, which isn't open`;
+  return original;
 }
