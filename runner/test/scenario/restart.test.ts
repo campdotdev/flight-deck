@@ -117,9 +117,17 @@ describe("at a restart", () => {
   test("an entry left starting before the take is dropped with no retry used, and the issue is taken afresh", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     world.send(issue);
-    // The runner dies between the entry and the take: Linear never takes the move.
-    world.tracker.refuse("move", { times: 1, reason: "network" });
-    await expect(world.tick()).rejects.toThrow();
+    // The runner dies between the entry and the take: the take's move never answers, and the poll never ends.
+    const move = world.tracker.move;
+    let taking: () => void = () => {};
+    const taken = new Promise<void>((resolve) => (taking = resolve));
+    world.tracker.move = () => {
+      taking();
+      return new Promise<never>(() => {});
+    };
+    void world.tick();
+    await taken;
+    world.tracker.move = move;
     expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
 
     world.restart();

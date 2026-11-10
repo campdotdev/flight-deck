@@ -1182,9 +1182,50 @@ export class Poll {
       state: "starting",
     };
 
+    // 1. The entry first, then the take, so the issue never sits in Planning unseen (ADR 0002). A retry's fresh
+    // session takes the waiting entry's place.
+    if (retry === undefined) await this.state.writeSessions([...(await this.state.sessions()), entry]);
+    else await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
+    try {
+      await this.launch(now, config, poll, issue, workspace, trouble, entry, memory, retry);
+    } catch (error) {
+      await this.startCutShort(now, repo, entry, workspace, error);
+      if (!isUnavailable(error)) throw error;
+    }
+  }
+
+  /**
+   * A start that threw before its session ran, such as a take or an issue read Linear didn't take, holds no place
+   * under the cap. Its entry waits as `retry_waiting` with the attempt it had, so no retry is used: the next poll
+   * starts it in place when the take landed, and step 4 drops it when the issue never left Ready to plan, so the
+   * issue is taken again.
+   */
+  private async startCutShort(now: Date, repo: TrackerRepo, entry: SessionEntry, workspace: Workspace, error: unknown): Promise<void> {
+    const listed = (await this.state.sessions()).find((each) => each.id === entry.id);
+    if (listed?.state !== "starting") return;
+    await workspace.dispose({ session: entry.id, worktree: entry.worktree });
+    await this.tracker.revoke({ id: entry.id, repo });
+    await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? { ...entry, state: "retry_waiting" } : each)));
+    await this.state.log(now, `${entry.id} ${entry.issue}: start cut short (${(error as Error).message}), attempt ${entry.attempt} waits to start again`);
+  }
+
+  /** A start's steps after its entry is listed: the take, the record, prepare and the launch, the Reader token, and the session. */
+  private async launch(
+    now: Date,
+    config: Config,
+    poll: RepoPoll,
+    issue: SnapshotIssue,
+    workspace: Workspace,
+    trouble: Trouble,
+    entry: SessionEntry,
+    memory: IssueMemory,
+    retry: SessionEntry | undefined,
+  ): Promise<void> {
+    if (poll.tip === null || poll.tracker === null) return;
+    const { registration } = poll;
+    const repo = poll.tracker;
+    const { id, stage } = entry;
     if (retry === undefined) {
-      // 1. The entry first, then the take, so the issue never sits in Planning unseen (ADR 0002).
-      await this.state.writeSessions([...(await this.state.sessions()), entry]);
       const taken = await this.lifecycle.move(issue, "planning", "take");
       if (!taken.ok) {
         await this.state.log(now, `${id} ${issue.identifier}: take refused: ${taken.violation}`);
@@ -1192,8 +1233,6 @@ export class Poll {
         return;
       }
       if (memory.restart !== null) await this.state.writeIssueMemory(registration.name, issue.id, { ...memory, restart: null });
-    } else {
-      await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
     }
 
     // 2. The record at the commit the session starts from: the default branch's tip at this poll, or the last

@@ -42,7 +42,7 @@ export async function movedOut(context: MovedOutContext): Promise<void> {
         break;
       case "starting":
       case "shutdown":
-        // A restart handles these (FLD-108). A live runner never leaves an entry `starting` between ticks.
+        // A restart handles these. A live runner never leaves an entry `starting` between ticks.
         break;
     }
   }
