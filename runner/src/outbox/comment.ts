@@ -21,6 +21,11 @@ export function sessionFooter(version: string, stage: string, session: string): 
   return `Flight Deck ${version} · ${stage} · session ${session}`;
 }
 
+/** "Flight Deck <version> · <stage> · follow-up", the footer of a follow-up issue's description (ADR 0019). */
+export function followUpFooter(version: string, stage: string): string {
+  return `Flight Deck ${version} · ${stage} · follow-up`;
+}
+
 function length(text: string): number {
   return [...text].length;
 }
@@ -68,16 +73,23 @@ export interface HandoffComment {
   summary: string | null;
   /** A pause's answers. A pause with none, and every other handoff, leaves the answer lines out. */
   answers?: readonly AnswerLine[];
-  /** The handoff file as it stands. */
-  handoff: string;
+  /** A line after the rest of `summary.md` that survives a fallback, such as a duplicate's link to its original. */
+  line?: string;
+  /** The handoff file as it stands, or `null` for a duplicate, whose footer then ends the comment. */
+  handoff: string | null;
   footer: string;
 }
 
 export function handoffComment(input: HandoffComment): string {
   const { statusLine, rest } = opening(input.phrase, input.summary);
-  const details = fold("Details", `${flattenFolds(input.handoff)}\n\n${input.footer}`);
   const answers = input.answers === undefined || input.answers.length === 0 ? [] : [answerLines(input.answers)];
-  return [statusLine, ...(rest === null ? [] : [rest]), ...answers, details].join("\n\n");
+  const end = input.handoff === null ? input.footer : fold("Details", `${flattenFolds(input.handoff)}\n\n${input.footer}`);
+  return [statusLine, ...(rest === null ? [] : [rest]), ...(input.line === undefined ? [] : [input.line]), ...answers, end].join("\n\n");
+}
+
+/** "Duplicate of [<title>](<url>)." for the issue a duplicate's `of` names (ADR 0019). */
+export function duplicateLine(original: { title: string; url: string }): string {
+  return `Duplicate of [${original.title}](${original.url}).`;
 }
 
 /** Markdown emphasis markers that sit outside a word, so `snake_case` keeps its underscore. */
