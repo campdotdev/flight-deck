@@ -35,6 +35,9 @@ const OPEN_TYPES: ReadonlySet<StatusType> = new Set(["triage", "backlog", "unsta
 /** The causes that file a trouble issue. The others only notify. FLD-109 adds its own. */
 const FILES: ReadonlySet<TroubleCause> = new Set(["missing_status", "claude_code_version", "github_token", "claude_login", "claude_login_soon"]);
 
+/** `linear_token` files its issue only once a mint works, after a failure this long or longer (ADR 0005). */
+const FILE_AFTER_MS = 15 * 60_000;
+
 /** `claude_login_soon` stops nothing. Every other cause holds sessions. */
 const HOLDS_NOTHING: ReadonlySet<TroubleCause> = new Set(["claude_login_soon"]);
 
@@ -97,20 +100,22 @@ export class Trouble {
    */
   holds(now: Date): StatusHold[] {
     const at = now.toISOString();
-    const open = new Map<string, { cause: TroubleCause; scope: TroubleEntry["scope"]; repos: string[]; since: string }>();
+    const open = new Map<string, { cause: TroubleCause; id: string; scope: TroubleEntry["scope"]; repos: string[]; since: string }>();
     for (const entry of this.entries) {
       if (!this.isOpen(entry.cause, entry.id)) continue;
       const finding = this.opened.get(key(entry.cause, entry.id))?.finding;
-      open.set(key(entry.cause, entry.id), { cause: entry.cause, scope: entry.scope, repos: finding?.repos ?? entry.repos, since: entry.open ? entry.since : at });
+      open.set(key(entry.cause, entry.id), { cause: entry.cause, id: entry.id, scope: entry.scope, repos: finding?.repos ?? entry.repos, since: entry.open ? entry.since : at });
     }
-    for (const [k, { cause, finding }] of this.opened) {
-      if (!open.has(k)) open.set(k, { cause, scope: finding.scope, repos: finding.repos, since: at });
+    for (const [k, { cause, id, finding }] of this.opened) {
+      if (!open.has(k)) open.set(k, { cause, id, scope: finding.scope, repos: finding.repos, since: at });
     }
     return [...open.values()]
       .filter((each) => !HOLDS_NOTHING.has(each.cause))
       .flatMap((each): StatusHold[] => {
         const cause = each.cause as StatusHold["cause"];
         if (each.scope === "runner") return [{ cause, scope: "runner", name: null, since: each.since, until: null }];
+        // A workspace's cause, such as `linear_token`, holds every repo in it, and names the workspace.
+        if (each.scope === "workspace") return [{ cause, scope: "workspace", name: each.id, since: each.since, until: null }];
         return each.repos.map((repo) => ({ cause, scope: each.scope, name: repo, since: each.since, until: null }));
       });
   }
@@ -156,6 +161,11 @@ export class Trouble {
       } else if (this.cleared.has(k) && entry.open) {
         entry.open = false;
         await log(`trouble ${entry.cause} cleared${entry.repos.length > 0 ? ` for ${entry.repos.join(", ")}` : ""}`);
+        if (entry.cause === "linear_token") {
+          // `linear_token` files only now, once a mint works, and only after a failure of 15 minutes or more.
+          entry.facts = { ...entry.facts, ended: this.cleared.get(k)?.ended ?? at };
+          if (Date.parse(entry.facts.ended!) - Date.parse(entry.since) >= FILE_AFTER_MS) entry.unfiled = [...entry.repos];
+        }
         const cleared = clearedText(entry, this.cleared.get(k) ?? {});
         for (const issue of cleared === null ? [] : entry.issues) {
           const repo = context.repos.get(issue.repo);
@@ -164,9 +174,10 @@ export class Trouble {
           await this.attempt(log, `${issue.identifier}: cleared comment`, () => context.tracker.post({ id: issue.id, repo }, comment.body, { flag: false }));
         }
       }
+      if (!entry.open && entry.unfiled !== undefined && entry.unfiled.length > 0) await this.fileLate(context, entry, assigned, save);
       await save();
     }
-    this.entries = this.entries.filter((entry) => entry.open || entry.issues.length > 0);
+    this.entries = this.entries.filter((entry) => entry.open || entry.issues.length > 0 || (entry.unfiled?.length ?? 0) > 0);
     await save();
   }
 
@@ -250,6 +261,19 @@ export class Trouble {
         await save();
       }
     }
+  }
+
+  /**
+   * Files the issue a cause owes once it cleared, in each repo still owed one. A repo whose earlier issue for the
+   * cause is still open gets "🟡 Needs your help: " and the title there instead of a second issue.
+   */
+  private async fileLate(context: SettleContext, entry: TroubleEntry, assigned: Map<string, boolean>, save: () => Promise<void>): Promise<void> {
+    const text = troubleText(entry, context.version);
+    if (text.body === null) return;
+    const owed = entry.unfiled ?? [];
+    await this.file(context, { ...entry, repos: owed }, text.title, text.body, assigned, save);
+    entry.unfiled = owed.filter((repo) => !entry.issues.some((issue) => issue.repo === repo && issue.flagged));
+    if (entry.unfiled.length === 0) delete entry.unfiled;
   }
 
   /** The flag goes into issue memory before the write, as every runner flag does. Its status line is the title. */

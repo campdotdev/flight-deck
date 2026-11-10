@@ -2,8 +2,8 @@
 // runner's own comments"). A later try may land, so callers keep what they meant to write and try again. Any
 // other error is a bug or a refusal, and the caller doesn't retry it.
 
-/** Why Linear didn't take the call. */
-export type UnavailableReason = "network" | "server" | "rate_limited";
+/** Why Linear didn't take the call. `mint` is a token mint that failed (`MintFailed`). */
+export type UnavailableReason = "network" | "server" | "rate_limited" | "mint";
 
 export class TrackerUnavailable extends Error {
   constructor(
