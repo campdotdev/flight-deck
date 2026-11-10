@@ -242,13 +242,13 @@ describe("after a restart", () => {
     await world.writeConfig();
     const fiveHourReset = later(3 * HOUR);
     const weekReset = later(100 * HOUR);
-    sendReporting("First", usageEvent([0.85, fiveHourReset], [0.3, weekReset]));
+    const first = sendReporting("First", usageEvent([0.85, fiveHourReset], [0.3, weekReset]));
     await world.tick();
     const held = (await world.status()).runner;
     expect(held.state).toBe("held");
 
     world.restart();
-    sendReporting("Second");
+    const second = sendReporting("Second");
     await world.tick();
     expect(world.harness.started).toHaveLength(1);
     const status = await world.status();
@@ -260,7 +260,13 @@ describe("after a restart", () => {
     });
 
     await world.tick(fiveHourReset);
-    expect(world.harness.started).toHaveLength(2);
+    // The restart killed the first session, which the old runner started, so its retry starts first (FLD-108).
+    expect(world.harness.started.map(({ session, sessionJson }) => [session.issue, sessionJson.attempt])).toEqual([
+      [first.identifier, 1],
+      [first.identifier, 2],
+      [second.identifier, 1],
+    ]);
+    expect(world.harness.kills).toEqual([world.harness.started[0]!.handle]);
   });
 
   test("a new Poll keeps a rate_limited exit's hold until its resetsAt", async () => {
