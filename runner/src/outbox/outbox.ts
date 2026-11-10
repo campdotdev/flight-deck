@@ -7,8 +7,9 @@ import { Lifecycle } from "../lifecycle/index.ts";
 import { readJson, writeJson, type State } from "../state/index.ts";
 import { IssueNotFoundError, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
-import { duplicateLine, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
+import { duplicateLine, followUpFooter, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope } from "./envelope.ts";
+import { contentType, embedImages, nameImages } from "./media.ts";
 
 export type ApplyResult =
   /** Every write landed. */
@@ -37,9 +38,21 @@ export interface OutboxOptions {
   repo(name: string): TrackerRepo | null;
 }
 
-/** The name `applied.json` records for each write. */
-type WriteName = "detach" | "writeBrief" | "post" | "move" | "pause";
-type Step = [WriteName, () => Promise<string | null>];
+/**
+ * `applied.json` in the session folder: the name of each write that landed, in order, such as `post` or
+ * `file follow-ups/1.md`, and what a later write needs from an earlier one, so a second apply skips the
+ * writes that landed and still finishes the rest.
+ */
+interface Applied {
+  writes: string[];
+  /** Each follow-up's filed issue UUID, by its path in the outbox. */
+  filed: Record<string, string>;
+  /** Each image's upload URL, by its file name in `media/`, so each image is uploaded once. */
+  uploads: Record<string, string>;
+}
+
+/** One write: its name in `applied.json`, and the write, which returns a broken rule or `null`. */
+type Step = [string, (applied: Applied) => Promise<string | null>];
 
 /** The status types of an open issue: factory statuses included, done, canceled, and duplicate not. */
 const OPEN_TYPES = new Set(["backlog", "unstarted", "started", "triage"]);
@@ -58,11 +71,14 @@ export class Outbox {
     if (role === null) return { result: "failed", rule: `${read.identifier}'s status ${read.status} has no role in ${repo.name}'s record`, writes: [] };
     const issue = { ...read, role };
 
+    const appliedFile = join(sessionFolder, "applied.json");
+    const applied = await readJson<Applied>(appliedFile, { writes: [], filed: {}, uploads: {} });
     const checked = await readEnvelope(sessionParts(sessionFolder).outbox, {
       version: this.options.version,
       stage: session.stage,
       role: issue.role,
       lifecycle,
+      moved: applied.writes.includes("move"),
     });
     if (!checked.ok) return { result: "failed", rule: checked.rule, writes: [] };
     const { envelope } = checked;
@@ -78,14 +94,17 @@ export class Outbox {
     const ref: IssueRef = { id: issue.id, repo };
     const state = this.options.state;
     const phrase = statusPhrase(move, needs);
-    const comment = handoffComment({
-      phrase,
-      summary: envelope.summary,
-      ...(original === null ? {} : { line: duplicateLine(original) }),
-      answers: answers.map((answer) => ({ word: answer.word, does: answer.does, status: repo.statuses[answer.move] })),
-      handoff: envelope.handoff?.text ?? null,
-      footer: sessionFooter(this.options.version, session.stage, session.session),
-    });
+    // Each image is embedded once: in the description for a brief, whose fold then names it, and in the fold otherwise (ADR 0019).
+    const handoff = envelope.handoff;
+    const comment = (uploads: Applied["uploads"]) =>
+      handoffComment({
+        phrase,
+        summary: envelope.summary === null ? null : embedImages(envelope.summary, uploads),
+        ...(original === null ? {} : { line: duplicateLine(original) }),
+        answers: answers.map((answer) => ({ word: answer.word, does: answer.does, status: repo.statuses[answer.move] })),
+        handoff: handoff === null ? null : handoff.name === "brief.md" ? nameImages(handoff.text) : embedImages(handoff.text, uploads),
+        footer: sessionFooter(this.options.version, session.stage, session.session),
+      });
     const cause = move === "paused" ? "pause" : move === "duplicate" ? "duplicate" : "handoff";
     const moveStep: Step = [
       "move",
@@ -98,7 +117,39 @@ export class Outbox {
     // A synced issue is detached before its brief and before a duplicate mark, so neither reaches GitHub (ADR 0008).
     const attachment = issue.sync_attachment;
     const detachSteps: Step[] = issue.synced && attachment !== null ? [["detach", async () => (await tracker.detach({ ...ref, sync_attachment: attachment }), null)]] : [];
-    const postStep = (flag: boolean): Step => ["post", async () => (await tracker.post(ref, comment, { flag }), null)];
+    const postStep = (flag: boolean): Step => ["post", async (applied) => (await tracker.post(ref, comment(applied.uploads), { flag }), null)];
+    // Every image goes up first, so each write that names one can embed its URL.
+    const uploadSteps: Step[] = envelope.images.map((name): Step => [
+      `upload ${name}`,
+      async (applied) => {
+        const data = new Uint8Array(await readFile(join(sessionParts(sessionFolder).outbox, "media", name)));
+        applied.uploads[name] = await tracker.upload({ name, contentType: contentType(name), data });
+        return null;
+      },
+    ]);
+
+    // Follow-up issues come last for every outcome, filed in the intake role and related, with no flag (ADRs 0007, 0011, and 0013).
+    const followUpSteps: Step[] = envelope.followUps.flatMap((followUp): Step[] => [
+      [
+        `file ${followUp.name}`,
+        async (applied) => {
+          const footer = followUpFooter(this.options.version, session.stage);
+          const text = embedImages(followUp.description, applied.uploads);
+          const description = text === "" ? footer : `${text}\n\n${footer}`;
+          applied.filed[followUp.name] = (await tracker.file({ repo, title: followUp.title, description }, "intake")).id;
+          return null;
+        },
+      ],
+      [
+        `relate ${followUp.name}`,
+        async (applied) => {
+          const filed = applied.filed[followUp.name];
+          if (filed === undefined) return `applied.json lost the issue filed for ${followUp.name}`;
+          await tracker.relate({ id: filed, repo }, ref, "related");
+          return null;
+        },
+      ],
+    ]);
 
     // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
     let steps: Step[];
@@ -107,12 +158,12 @@ export class Outbox {
       steps = [
         [
           "post",
-          async () => {
+          async (applied) => {
             // The flag goes into issue memory first, so the next poll never takes the assignee for one the runner didn't set.
             const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since: this.options.clock().toISOString() };
             const memory = await state.issueMemory(session.repo, issue.id);
             await state.writeIssueMemory(session.repo, issue.id, { ...memory, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } });
-            commentAt = (await tracker.post(ref, comment, { flag: true })).created_at;
+            commentAt = (await tracker.post(ref, comment(applied.uploads), { flag: true })).created_at;
             return null;
           },
         ],
@@ -127,36 +178,36 @@ export class Outbox {
             return null;
           },
         ],
+        ...followUpSteps,
       ];
     } else if (move === "duplicate") {
-      steps = [...detachSteps, postStep(false), moveStep];
+      steps = [...detachSteps, postStep(false), moveStep, ...followUpSteps];
     } else {
       const brief = envelope.handoff?.text ?? "";
       steps = [
         ...detachSteps,
         [
           "writeBrief",
-          async () => {
+          async (applied) => {
             const memory = await state.issueMemory(session.repo, issue.id);
-            await tracker.writeBrief(ref, brief, { runnerWroteBrief: memory.brief !== null });
+            await tracker.writeBrief(ref, embedImages(brief, applied.uploads), { runnerWroteBrief: memory.brief !== null });
             await state.writeIssueMemory(session.repo, issue.id, { ...memory, brief });
             return null;
           },
         ],
         postStep(false),
         moveStep,
+        ...followUpSteps,
       ];
     }
 
-    const appliedFile = join(sessionFolder, "applied.json");
-    const applied = await readJson<WriteName[]>(appliedFile, []);
     const writes: string[] = [];
-    for (const [name, write] of steps) {
-      if (applied.includes(name)) continue;
+    for (const [name, write] of [...uploadSteps, ...steps]) {
+      if (applied.writes.includes(name)) continue;
       if (options.dryRun !== true) {
-        const violation = await write();
+        const violation = await write(applied);
         if (violation !== null) return { result: "failed", rule: violation, writes };
-        applied.push(name);
+        applied.writes.push(name);
         await writeJson(appliedFile, applied);
       }
       writes.push(name);

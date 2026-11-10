@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Lifecycle } from "../lifecycle/index.ts";
 import { ROLES, type Role } from "../record/index.ts";
 import type { Answer, Stage } from "../state/index.ts";
+import { imageTargets, mediaRule } from "./media.ts";
 
 export interface Outcome {
   version: string;
@@ -23,6 +24,18 @@ export interface Envelope {
   summary: string | null;
   /** The handoff file's name and text, such as `brief.md`, or `null` for a duplicate, which holds none. */
   handoff: { name: string; text: string } | null;
+  /** `follow-ups/<n>.md`, in the order of their numbers. */
+  followUps: FollowUp[];
+  /** Each image file name the posted files name, once, in order. Each one sits in `media/`. */
+  images: string[];
+}
+
+/** One follow-up issue: `follow-ups/<n>.md`, with `# <title>` on its first line and the description after. */
+export interface FollowUp {
+  /** Its path in the outbox, such as `follow-ups/1.md`. */
+  name: string;
+  title: string;
+  description: string;
 }
 
 /** The handoff file each move names. */
@@ -49,12 +62,14 @@ export interface CheckContext {
   /** The issue's role now. */
   role: Role;
   lifecycle: Lifecycle;
+  /** Whether an earlier apply on the same folder made the move, so the issue already sits where the outbox moves it. */
+  moved: boolean;
 }
 
 /** Reads the outbox and checks it (spec 1, "Checks"). The first broken rule fails it. */
 export async function readEnvelope(outbox: string, context: CheckContext): Promise<EnvelopeResult> {
   const fail = (rule: string): EnvelopeResult => ({ ok: false, rule });
-  const names = await readdir(outbox).catch(() => null);
+  const names = (await readdir(outbox).catch(() => null))?.sort() ?? null;
   if (names === null) return fail("the outbox is missing");
   if (!names.includes("outcome.json")) return fail("the outbox holds no outcome.json");
 
@@ -73,7 +88,9 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   if (typeof move !== "string" || !(ROLES as readonly string[]).includes(move)) return fail(`outcome.json's move ${String(move)} isn't a role`);
   const role = move as Role;
   if (!(STAGE_MOVES[context.stage] ?? []).includes(role)) return fail(`${context.stage} can't move an issue to ${role}`);
-  if (!context.lifecycle.allows(context.role, role)) return fail(`Lifecycle doesn't allow ${context.role} to ${role}`);
+  if (context.moved ? context.role !== role : !context.lifecycle.allows(context.role, role)) {
+    return fail(context.moved ? `the issue left ${role} after an earlier apply moved it there` : `Lifecycle doesn't allow ${context.role} to ${role}`);
+  }
   if (!(role in OUTCOME_KEYS)) return fail(`the Outbox can't apply a move to ${role} yet`);
 
   const extraKey = Object.keys(outcome).find((key) => !(OUTCOME_KEYS[role] ?? []).includes(key));
@@ -107,8 +124,38 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
     }
     handoff = { name: handoffName, text };
   }
+  const followUps = names.includes("follow-ups") ? await readFollowUps(join(outbox, "follow-ups")) : [];
+  if (typeof followUps === "string") return fail(followUps);
   const summary = names.includes("summary.md") ? await readFile(join(outbox, "summary.md"), "utf8") : null;
-  return { ok: true, envelope: { outcome: checkedOutcome, summary, handoff } };
+
+  // Every image a posted file names is a bare file name in media/.
+  const posted = [
+    ...(summary === null ? [] : [{ name: "summary.md", text: summary }]),
+    ...(handoff === null ? [] : [handoff]),
+    ...followUps.map((followUp) => ({ name: followUp.name, text: followUp.description })),
+  ];
+  const media = names.includes("media") ? await readdir(join(outbox, "media"), { withFileTypes: true }).catch(() => []) : [];
+  const mediaRuleBroken = mediaRule(posted, new Set(media.filter((entry) => entry.isFile()).map((entry) => entry.name)));
+  if (mediaRuleBroken !== null) return fail(mediaRuleBroken);
+  const images = [...new Set(posted.flatMap((file) => imageTargets(file.text)))];
+  return { ok: true, envelope: { outcome: checkedOutcome, summary, handoff, followUps, images } };
+}
+
+/** Each `follow-ups/<n>.md`, in the order of their numbers, or the broken rule. */
+async function readFollowUps(folder: string): Promise<FollowUp[] | string> {
+  const entries = await readdir(folder, { withFileTypes: true }).catch(() => null);
+  if (entries === null) return "follow-ups isn't a folder";
+  const numbered: [number, FollowUp][] = [];
+  for (const entry of entries) {
+    const name = `follow-ups/${entry.name}`;
+    const match = /^([1-9]\d*)\.md$/.exec(entry.name);
+    if (match === null || !entry.isFile()) return `${name} isn't named follow-ups/<n>.md`;
+    const [first = "", ...rest] = (await readFile(join(folder, entry.name), "utf8")).split("\n");
+    const title = /^# (.*)$/.exec(first)?.[1]?.trim() ?? "";
+    if (title === "") return `${name} doesn't open with # <title>`;
+    numbered.push([Number(match[1]), { name, title, description: rest.join("\n").trim() }]);
+  }
+  return numbered.sort(([a], [b]) => a - b).map(([, followUp]) => followUp);
 }
 
 /** A pause's checked `answers` and `needs`, or the broken rule. */

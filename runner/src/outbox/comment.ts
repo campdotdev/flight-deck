@@ -21,6 +21,11 @@ export function sessionFooter(version: string, stage: string, session: string): 
   return `Flight Deck ${version} · ${stage} · session ${session}`;
 }
 
+/** "Flight Deck <version> · <stage> · follow-up", the footer of a follow-up issue's description (ADR 0019). */
+export function followUpFooter(version: string, stage: string): string {
+  return `Flight Deck ${version} · ${stage} · follow-up`;
+}
+
 function length(text: string): number {
   return [...text].length;
 }
