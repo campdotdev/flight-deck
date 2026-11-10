@@ -402,7 +402,7 @@ export class Poll {
     await this.starts(now, config, repos, workspace, trouble);
     // 10. Trouble.
     const reachable = new Map(repos.flatMap((poll) => (poll.tracker === null ? [] : [[poll.registration.name, poll.tracker] as const])));
-    await trouble.settle({ now, tracker: this.tracker, state: this.state, version: this.version, path: this.path, repos: reachable });
+    await trouble.settle({ now, tracker: this.tracker, state: this.state, version: this.version, path: this.path, repos: reachable, secrets: this.secrets });
     // 11. Usage.
     await this.usage.update(now, config);
     await this.publish(now, config, repos, trouble, workspace);

@@ -30,10 +30,16 @@ const CLOSING = "Flight Deck comments here once it works again. Close the issue 
 /** What a cause's texts read: its facts, and when it opened. */
 type Opened = Pick<TroubleEntry, "since" | "facts">;
 
+/** How the texts treat what the runner saw. */
+export interface TextOptions {
+  /** The facts' error matched the secret scan, or the scan couldn't run, so the body leaves it out. */
+  errorLeftOut?: boolean;
+}
+
 /** One cause's texts. */
 interface CauseTexts {
   /** The trouble issue's title and body, and the notification, when the cause opens. */
-  opening(entry: Opened, version: string): TroubleText;
+  opening(entry: Opened, version: string, options: TextOptions): TroubleText;
   /** The comment once the cause clears, or `null` for a cause whose issue gets none. `now` holds what the clearing poll saw. */
   cleared: ((entry: Opened, now: TroubleFacts) => ClearedText) | null;
 }
@@ -81,13 +87,13 @@ const TEXTS: Record<TroubleCause, CauseTexts> = {
     cleared: (entry, now) => ({ statusLine: `🟢 Fixed: Claude Code ${now.version ?? entry.facts.version} works with Flight Deck.`, sentence: AGAIN }),
   },
   github_token: {
-    opening: (entry, version) => {
+    opening: (entry, version, options) => {
       const { facts } = entry;
       const title = "Flight Deck can't sign in to GitHub: run flight-deck login github";
       const body = issueBody({
         what: `Flight Deck stopped starting sessions on this Mac at ${when(entry.since)}. GitHub refused the machine user's login when Flight Deck fetched ${facts.repo}.`,
         steps: ["In a terminal on the Mac, run `flight-deck login github`.", "Sign in as the machine user, not as yourself."],
-        details: [`- Repo: \`${facts.repo}\``, ...(facts.error === undefined ? [] : ["", `The fetch failed with:\n\n${codeBlock(facts.error)}`])],
+        details: [`- Repo: \`${facts.repo}\``, ...errorPart(facts.error, "The fetch failed with:", options)],
         cause: "github_token",
         version,
       });
@@ -112,13 +118,13 @@ const TEXTS: Record<TroubleCause, CauseTexts> = {
     cleared: null,
   },
   claude_login: {
-    opening: (entry, version) => {
+    opening: (entry, version, options) => {
       const { facts } = entry;
       const title = "Claude Code's login expired: run claude, then /login";
       const body = issueBody({
         what: `Flight Deck stopped starting sessions on this Mac at ${when(entry.since)}. Claude Code's login expired, so a session ended without finishing. Flight Deck starts a trial run every 15 minutes, and sessions start again once one passes.`,
         steps: LOGIN_STEPS,
-        details: [`- Session: \`${facts.session}\``, ...(facts.error === undefined ? [] : ["", `The session ended with:\n\n${codeBlock(facts.error)}`])],
+        details: [`- Session: \`${facts.session}\``, ...errorPart(facts.error, "The session ended with:", options)],
         cause: "claude_login",
         version,
       });
@@ -142,16 +148,23 @@ const TEXTS: Record<TroubleCause, CauseTexts> = {
     cleared: () => ({ statusLine: "🟢 Fixed: Claude Code's login was renewed.", sentence: "Nothing had stopped." }),
   },
   // Its issue is filed once a mint works again, so it gets no cleared comment.
-  linear_token: { opening: (entry, version) => linearToken(entry, version), cleared: null },
+  linear_token: { opening: linearToken, cleared: null },
 };
 
-export function troubleText(entry: Pick<TroubleEntry, "cause" | "since" | "facts">, version: string): TroubleText {
-  return TEXTS[entry.cause].opening(entry, version);
+/** The cause's opening texts. The caller runs the facts' error through the secret scan first (ADR 0007). */
+export function troubleText(entry: Pick<TroubleEntry, "cause" | "since" | "facts">, version: string, options: TextOptions = {}): TroubleText {
+  return TEXTS[entry.cause].opening(entry, version, options);
 }
 
 /** The comment on the trouble issue once the cause clears. `now` holds what the runner sees at the clearing poll. */
 export function clearedText(entry: Pick<TroubleEntry, "cause" | "since" | "facts">, now: TroubleFacts): ClearedText | null {
   return TEXTS[entry.cause].cleared?.(entry, now) ?? null;
+}
+
+/** The error the runner saw, in a code block under `intro`, or the line that says the scan left it out. */
+function errorPart(error: string | undefined, intro: string, options: TextOptions): string[] {
+  if (error === undefined) return [];
+  return ["", options.errorLeftOut === true ? "Error message left out: it matched a secret rule." : `${intro}\n\n${codeBlock(error)}`];
 }
 
 /** A cause the runner can't file an issue for: its title is the notification. */
@@ -164,7 +177,7 @@ function notifyOnly(title: string): TroubleText {
  * in the past tense, and its issue gets no cleared comment (ADR 0005). Before a mint works, its title is only for
  * the log. The body names the four causes that look alike from the Mac, and ends with its own last sentence.
  */
-function linearToken(entry: Opened, version: string): TroubleText {
+function linearToken(entry: Opened, version: string, options: TextOptions): TroubleText {
   const { workspace, app, ended } = entry.facts;
   const notification = `Flight Deck can't get a Linear token for ${workspace}. It keeps trying.`;
   if (ended === undefined) return { title: `Flight Deck can't get a Linear token for ${workspace}`, body: null, notification };
@@ -193,7 +206,7 @@ function linearToken(entry: Opened, version: string): TroubleText {
         "- Cause: `linear_token`",
         `- Workspace: \`${workspace}\``,
         `- App: ${appName}`,
-        ...(entry.facts.error === undefined ? [] : ["", `The last mint failed with:\n\n${codeBlock(entry.facts.error)}`]),
+        ...errorPart(entry.facts.error, "The last mint failed with:", options),
         "",
         runnerFooter(version),
       ].join("\n"),

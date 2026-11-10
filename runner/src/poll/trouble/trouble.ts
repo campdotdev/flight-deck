@@ -4,10 +4,11 @@
 // its state. Step 10, `settle`, then files, flags, and notifies for each cause that opened, comments on each
 // issue whose cause cleared, and writes `state/trouble.json`.
 import { runnerComment } from "../../outbox/runner-comments/frame.ts";
+import { SecretScanFailed, type SecretScan } from "../../outbox/secret-scan.ts";
 import type { State, StatusHold, TroubleCause, TroubleEntry, TroubleFacts, TroubleIssue } from "../../state/index.ts";
 import { isUnavailable, IssueNotFoundError, type StatusType, type Tracker, type TrackerRepo } from "../../tracker/index.ts";
 import { notify } from "./notify.ts";
-import { clearedText, troubleText } from "./texts.ts";
+import { clearedText, troubleText, type TroubleText } from "./texts.ts";
 
 /** What a step found when it opened a cause. */
 export interface TroubleFinding {
@@ -27,6 +28,8 @@ export interface SettleContext {
   path: string;
   /** Each registered repo the Tracker can reach this poll, by name. */
   repos: Map<string, TrackerRepo>;
+  /** The scan the error text a trouble issue quotes goes through, as the runner's own comments' does (ADR 0007). */
+  secrets: SecretScan;
 }
 
 /** An issue counts as open in a backlog, unstarted, started, or triage status (spec 1, "Trouble issues"). */
@@ -51,6 +54,8 @@ export class Trouble {
   private readonly cleared = new Map<string, TroubleFacts>();
   /** The repos a trouble issue can be filed in this poll: the team reads and has its `intake` status. */
   private readonly fileable = new Set<string>();
+  /** Whether the secret scan matched each error text this poll, so each one is scanned once. */
+  private readonly scanned = new Map<string, boolean>();
 
   private constructor(private entries: TroubleEntry[]) {}
 
@@ -153,7 +158,7 @@ export class Trouble {
           entry.facts = opening.finding.facts;
         }
         entry.repos = opening.finding.repos;
-        const text = troubleText(entry, context.version);
+        const text = await this.text(context, entry);
         if (reopened) {
           await log(`trouble ${entry.cause} opened${entry.repos.length > 0 ? ` for ${entry.repos.join(", ")}` : ""}: ${text.title}${entry.facts.mode === undefined ? "" : ` (mode ${entry.facts.mode})`}`);
           const posted = await notify(text.notification, { path: context.path });
@@ -263,7 +268,7 @@ export class Trouble {
    * cause is still open gets "🟡 Needs your help: " and the title there instead of a second issue.
    */
   private async fileLate(context: SettleContext, entry: TroubleEntry, assigned: Map<string, boolean>, save: () => Promise<void>): Promise<void> {
-    const text = troubleText(entry, context.version);
+    const text = await this.text(context, entry);
     if (text.body === null) return;
     const owed = entry.unfiled ?? [];
     await this.file(context, { ...entry, repos: owed }, text.title, text.body, assigned, save);
@@ -288,6 +293,30 @@ export class Trouble {
     delete issue.unposted;
     if (comment.flag) issue.flagged = true;
     await save();
+  }
+
+  /**
+   * The cause's texts, with the error it quotes left out when the secret scan matches it: Betterleaks, or the
+   * exact value of a file copied for any repo the issue may be filed in. A scan that can't run counts as a match,
+   * so nothing unscanned is posted.
+   */
+  private async text(context: SettleContext, entry: TroubleEntry): Promise<TroubleText> {
+    const error = entry.facts.error;
+    if (error === undefined) return troubleText(entry, context.version);
+    let leftOut = this.scanned.get(error);
+    if (leftOut === undefined) {
+      const repos = new Set([...context.repos.keys(), ...entry.repos, ...(entry.facts.repo === undefined ? [] : [entry.facts.repo])]);
+      try {
+        leftOut = false;
+        // With no repo, nothing is filed, so nothing needs the scan.
+        for (const repo of repos) if (!leftOut && (await context.secrets.matches(repo, error))) leftOut = true;
+      } catch (scanError) {
+        if (!(scanError instanceof SecretScanFailed)) throw scanError;
+        leftOut = true;
+      }
+      this.scanned.set(error, leftOut);
+    }
+    return troubleText(entry, context.version, { errorLeftOut: leftOut });
   }
 
   /** The flag goes into issue memory before the write, as every runner flag does. Its status line is the title. */
