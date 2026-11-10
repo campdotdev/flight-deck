@@ -1,6 +1,6 @@
 // Install writes etc/ against a temporary root (spec 1, "Folders and files", "Other module tests").
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Folders } from "../../src/folders/index.ts";
@@ -27,6 +27,20 @@ function gitConfig(file: string, key: string): string | null {
   const result = Bun.spawnSync(["git", "config", "--file", file, "--get", key]);
   return result.exitCode === 0 ? result.stdout.toString().replace(/\n$/, "") : null;
 }
+
+describe("the session root", () => {
+  test("is made with mode 0700, so no other user on the Mac can read a session", async () => {
+    await writeEtc(folders, MACHINE_USER);
+    expect((await stat(folders.sessionRoot)).mode & 0o777).toBe(0o700);
+  });
+
+  test("loses a looser mode it had before", async () => {
+    await mkdir(folders.sessionRoot, { recursive: true });
+    await chmod(folders.sessionRoot, 0o755);
+    await writeEtc(folders, MACHINE_USER);
+    expect((await stat(folders.sessionRoot)).mode & 0o777).toBe(0o700);
+  });
+});
 
 describe("etc/gitconfig", () => {
   test("holds the machine user's identity, no hooks, no credential helper, and main as the default branch", async () => {

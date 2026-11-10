@@ -75,7 +75,15 @@ export function reportOf(description: string, runnerWroteBrief: boolean): string
 
 /** The description `writeBrief` writes: the brief, then a `+++ Report` fold that holds the report. */
 export function briefDescription(brief: string, description: string, runnerWroteBrief: boolean): string {
-  return `${plusFolds(brief.trim())}\n\n${fold("Report", reportOf(description, runnerWroteBrief))}`;
+  return `${briefText(brief)}\n\n${fold("Report", reportOf(description, runnerWroteBrief))}`;
+}
+
+/**
+ * The brief as `writeBrief` writes it above the report fold: trimmed, with `+++` folds and unsigned URLs. Issue
+ * memory keeps this, so a re-plan's `previous-brief.md` compares with the description's brief (ADR 0026).
+ */
+export function briefText(brief: string): string {
+  return unsigned(plusFolds(brief.trim()));
 }
 
 /**

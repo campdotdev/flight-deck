@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { TEST_NOTIFICATION, TRIAL_STOPPED_BY, trialStoppedBy, type TrialResult } from "../../src/poll/index.ts";
+import { TRIAL_STOPPED_BY, trialStoppedBy, type TrialResult } from "../../src/poll/index.ts";
 import type { HoldCause } from "../../src/state/index.ts";
 import { World } from "./world.ts";
 
@@ -137,11 +137,10 @@ describe("a trial", () => {
     expect(world.tracker.writes).toEqual([]);
   });
 
-  test("records a pass in state/trial.json with the version it ran on, and deletes its repo outright", async () => {
+  test("passes, and deletes its repo outright", async () => {
     world.harness.script("", PASSES);
     const result = await runTrial();
     const start = world.harness.started[0]!;
-    expect(await world.trialRecord()).toEqual({ version: world.version, claude_code_version: "2.1.321", session: start.session.id, passed_at: world.now.toISOString() });
     expect(existsSync(start.session.worktree)).toBe(false);
     expect(existsSync(start.session.sessionFolder)).toBe(false);
     // The transcript stays.
@@ -167,7 +166,6 @@ describe("a trial", () => {
     expect(await runTrial()).toEqual({ result: "failed", session: expect.any(String), exit: { kind: "exited", code: 1 } });
     world.harness.script("", { exit: { kind: "no_init" } });
     expect(await runTrial()).toEqual({ result: "failed", session: expect.any(String), exit: { kind: "no_init" } });
-    expect(await world.trialRecord()).toBeNull();
   });
 
   test("runs with no repo registered, as install's first trial does", async () => {
@@ -265,13 +263,6 @@ describe("the cap", () => {
     expect(result).toMatchObject({ result: "passed" });
     expect(world.harness.started.map((each) => each.session.stage)).toEqual(["plan", "trial", "plan"]);
     expect(world.tracker.stored(queued.id).status).toBe("Ready to plan");
-  });
-});
-
-describe("the test notification", () => {
-  test("is posted the way trouble notifications are", async () => {
-    expect(await world.poll.notify(TEST_NOTIFICATION)).toEqual({ ok: true });
-    expect(await world.notifications()).toEqual(["Flight Deck can notify you."]);
   });
 });
 

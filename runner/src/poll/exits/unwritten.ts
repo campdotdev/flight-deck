@@ -9,6 +9,6 @@ export async function waitToApply(context: ExitContext, result: Extract<ApplyRes
   const { entry, now, state } = context;
   await context.workspace.dispose({ session: entry.id, worktree: entry.worktree }, { keepFolder: true });
   const waiting = waitingEntry(entry, { folder: context.sessionFolder, phase: phaseAfter("apply", result), now });
-  await state.writeSessions((await state.sessions()).map((each) => (each.id === entry.id ? waiting : each)));
+  await state.updateSession(entry.id, () => waiting);
   await context.log(`Linear didn't take every write, the outbox waits to apply again (${waiting.apply?.phase})`);
 }

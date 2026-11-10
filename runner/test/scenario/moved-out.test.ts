@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { StoredIssue } from "../../src/tracker/index.ts";
-import { outbox, STATUSES, World } from "./world.ts";
+import { outbox, World } from "./world.ts";
+import { STATUSES } from "../statuses.ts";
 
 let world: World;
 

@@ -29,7 +29,7 @@ export function handRunMemory(folders: Folders, answerMs: number): IssueMemoryWr
         runnerAnswers = false;
       }
       const file = paths.issueMemory(folders, repo, uuid);
-      await locked(`${file}.lock`, async () => state.writeIssueMemory(repo, uuid, { ...(await state.issueMemory(repo, uuid)), ...fields }));
+      await locked(`${file}.lock`, async () => state.mergeIssueMemory(repo, uuid, fields));
     },
   };
 }

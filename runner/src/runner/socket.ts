@@ -1,12 +1,14 @@
 // The runner's answers on `runner.sock` (spec 1, "The runner's socket"). Each op calls the Poll, which runs
 // `hold`, `start`, and `stop` in its serial queue, so a request that comes in while a tick runs waits for it.
 import { paths, type Folders } from "../folders/index.ts";
-import type { Poll } from "../poll/index.ts";
+import { notify, type Poll } from "../poll/index.ts";
 import { listen, type Reply, type Request } from "../socket/index.ts";
 
 export interface RunnerSocketOptions {
   folders: Folders;
   poll: Poll;
+  /** The runner's `PATH`, for the `osascript` the `notify` op runs. */
+  path: string;
   clock: () => Date;
 }
 
@@ -19,7 +21,7 @@ export async function listenRunnerSocket(options: RunnerSocketOptions): Promise<
   return listen(paths.socket(options.folders), (request) => answer(options, request));
 }
 
-async function answer({ poll, clock }: RunnerSocketOptions, request: Request): Promise<Reply> {
+async function answer({ poll, path, clock }: RunnerSocketOptions, request: Request): Promise<Reply> {
   switch (request.op) {
     case "hold":
       // `flight-deck update` holds with the cause `update`. The maintainer's hold has no cause.
@@ -48,7 +50,7 @@ async function answer({ poll, clock }: RunnerSocketOptions, request: Request): P
       return { ok: true, ...(await poll.trial()) };
     case "notify": {
       if (typeof request.text !== "string") return { ok: false, error: "notify needs a text" };
-      return poll.notify(request.text);
+      return notify(request.text, { path });
     }
     case "issue_memory": {
       const { repo, issue, write } = request;

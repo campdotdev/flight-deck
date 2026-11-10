@@ -4,7 +4,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { IssueNotFoundError, TrackerRefused, type LinearTracker } from "../../../src/tracker/index.ts";
 import { notFound, type FakeLinear } from "./fake-linear.ts";
-import { commentNode, issueNode, page, repo, stateId, STATUSES, TEAM_ID, teamReply, uuid, world } from "./linear-world.ts";
+import { commentNode, issueNode, page, repo, stateId, TEAM_ID, teamReply, uuid, world } from "./linear-world.ts";
+import { STATUS_NAMES } from "../../statuses.ts";
 
 let linear: FakeLinear;
 let tracker: LinearTracker;
@@ -111,7 +112,7 @@ describe("checkTeam", () => {
 
   test("lists the roles whose status is missing, in the record's role order", async () => {
     start();
-    linear.on("FlightDeckTeam", teamReply(Object.values(STATUSES).filter((name) => name !== "Paused" && name !== "Triage")));
+    linear.on("FlightDeckTeam", teamReply(Object.values(STATUS_NAMES).filter((name) => name !== "Paused" && name !== "Triage")));
     expect(await tracker.checkTeam(repo)).toEqual({ ok: false, reason: "missing", roles: ["intake", "paused"] });
   });
 
@@ -242,6 +243,23 @@ describe("the writes", () => {
     const filed = await tracker.file({ repo, title: "Follow-up", description: "Text." }, "intake");
     expect(filed).toEqual({ id: uuid(5), repo, identifier: "SHA-5", url: "https://linear.app/campdotdev/issue/SHA-5/x" });
     expect(writes()).toEqual([["FlightDeckFile", { input: { teamId: TEAM_ID, stateId: stateId("Triage"), title: "Follow-up", description: "Text." } }]]);
+  });
+
+  test("post, writeBrief, and file strip ?signature= from every URL they write", async () => {
+    start();
+    const signed = "![x](https://uploads.linear.app/ws/abc/x.png?signature=eyJhbGciOi)";
+    const plain = "![x](https://uploads.linear.app/ws/abc/x.png)";
+    linear.on("FlightDeckFlagState", flagState(null, false));
+    linear.on("FlightDeckDescription", { data: { issue: { id: uuid(1), description: "The button is blue." } } });
+    linear.on("FlightDeckFile", { data: { issueCreate: { success: true, issue: { id: uuid(5), identifier: "SHA-5", url: "https://linear.app/campdotdev/issue/SHA-5/x" } } } });
+    await tracker.post(ref, `See ${signed}`, { flag: false });
+    await tracker.writeBrief(ref, `## Summary\n\n${signed}`, { runnerWroteBrief: false });
+    await tracker.file({ repo, title: "Follow-up", description: signed }, "intake");
+    expect(writes()).toEqual([
+      ["FlightDeckComment", { input: { issueId: uuid(1), body: `See ${plain}` } }],
+      ["FlightDeckUpdate", { id: uuid(1), input: { description: `## Summary\n\n${plain}\n\n+++ Report\n\nThe button is blue.\n\n+++` } }],
+      ["FlightDeckFile", { input: { teamId: TEAM_ID, stateId: stateId("Triage"), title: "Follow-up", description: plain } }],
+    ]);
   });
 
   test("relate makes a related relation", async () => {

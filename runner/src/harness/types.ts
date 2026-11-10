@@ -86,7 +86,7 @@ export interface SessionEvents {
   rateLimit(event: RateLimitEvent): void;
   /**
    * Claude Code warned that its login expires soon, with the warning's text. Reported at most once per session.
-   * The runner opens the trouble cause `claude_login_soon` on it (FLD-106 passes it).
+   * The runner opens the trouble cause `claude_login_soon` on it.
    */
   loginExpiring?(warning: string): void;
 }

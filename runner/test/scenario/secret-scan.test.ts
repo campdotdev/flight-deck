@@ -28,8 +28,9 @@ function afterTake(issue: StoredIssue) {
   return writes.slice(take + 1);
 }
 
-/** The secret-scan pause's comment, with `found` as the sentences that name each hit. */
+/** The secret-scan pause's comment, with `found` as the sentences that name each hit, and the last session's facts. */
 function pauseBody(found: string): string {
+  const session = world.harness.started.at(-1)!.session;
   return [
     "🟡 Needs your help: plan's handoff held what looks like a secret",
     "",
@@ -42,6 +43,11 @@ function pauseBody(found: string): string {
     "Any other reply leaves the issue paused until you move it.",
     "",
     "+++ Details",
+    "",
+    "- Exit: `exited` with code 0",
+    `- Session: \`${session.id}\``,
+    "- Attempt: 1",
+    `- Transcript: \`${session.transcript}\``,
     "",
     `Flight Deck ${world.version} · runner`,
     "",

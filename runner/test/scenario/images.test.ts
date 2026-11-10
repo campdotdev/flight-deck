@@ -55,6 +55,19 @@ describe("an image in a brief", () => {
     ]);
   });
 
+  test("reaches the next re-plan's previous-brief.md as the description shows it above the report fold", async () => {
+    const issue = world.issue({ title: "Save button is blue", description: "It should be red." });
+    await planned(issue, { ...outbox.brief({ summary: SUMMARY, brief: `${BRIEF}\n\n>>> Notes\n\nTwo reds fit.\n\n>>>\n` }), "media/before.png": PNG });
+    const description = world.tracker.stored(issue.id).description;
+    const above = description.slice(0, description.indexOf("\n\n+++ Report"));
+    expect(above).toContain(`![Before](${uploads()[0]!.url})`);
+
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    expect(world.harness.started[1]!.inbox["previous-brief.md"]).toBe(above);
+  });
+
   test("named twice is uploaded once", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     const brief = `${BRIEF}\n\nAgain: ![Before](before.png)`;

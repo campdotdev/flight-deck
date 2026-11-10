@@ -3,7 +3,7 @@
 // shaped "<what broke>: <the fix>", because the phone shows "assigned to you" and the title. A long workspace or
 // status name may push it past 79 characters, and it stays whole.
 import { codeBlock, runnerFooter } from "../../outbox/runner-comments/frame.ts";
-import type { TroubleEntry, TroubleFacts } from "../../state/index.ts";
+import type { TroubleCause, TroubleEntry, TroubleFacts } from "../../state/index.ts";
 import { duration } from "../../outbox/runner-comments/stale-take.ts";
 import { fold } from "../../tracker/index.ts";
 
@@ -27,92 +27,149 @@ const LOGIN_STEPS = ["In a terminal on the Mac, run `claude`.", "Type `/login`, 
 
 const CLOSING = "Flight Deck comments here once it works again. Close the issue then.";
 
-export function troubleText(entry: Pick<TroubleEntry, "cause" | "since" | "facts">, version: string): TroubleText {
-  const { facts } = entry;
-  const since = when(entry.since);
-  switch (entry.cause) {
-    case "missing_status": {
+/** What a cause's texts read: its facts, and when it opened. */
+type Opened = Pick<TroubleEntry, "since" | "facts">;
+
+/** How the texts treat what the runner saw. */
+export interface TextOptions {
+  /** The facts' error matched the secret scan, or the scan couldn't run, so the body leaves it out. */
+  errorLeftOut?: boolean;
+}
+
+/** One cause's texts. */
+interface CauseTexts {
+  /** The trouble issue's title and body, and the notification, when the cause opens. */
+  opening(entry: Opened, version: string, options: TextOptions): TroubleText;
+  /** The comment once the cause clears, or `null` for a cause whose issue gets none. `now` holds what the clearing poll saw. */
+  cleared: ((entry: Opened, now: TroubleFacts) => ClearedText) | null;
+}
+
+const AGAIN = "Sessions start again at the next poll.";
+
+/** Each cause's texts, by cause. */
+const TEXTS: Record<TroubleCause, CauseTexts> = {
+  missing_status: {
+    opening: (entry, version) => {
+      const { facts } = entry;
       const missing = facts.missing ?? [];
       const first = missing[0]?.name ?? "";
       const title = `Linear status ${first} is missing: rename it back or rerun setup`;
       // The trouble issue goes in the `intake` role's status, so a missing `intake` status can only notify.
       if (missing[0]?.role === "intake") return { title, body: null, notification: title };
       const body = issueBody({
-        what: `Flight Deck stopped starting sessions for ${facts.repo} at ${since}. The repo's record names Linear statuses that team ${facts.team} doesn't have:\n\n${missing.map((each) => `- ${each.name}, for the \`${each.role}\` role`).join("\n")}`,
+        what: `Flight Deck stopped starting sessions for ${facts.repo} at ${when(entry.since)}. The repo's record names Linear statuses that team ${facts.team} doesn't have:\n\n${missing.map((each) => `- ${each.name}, for the \`${each.role}\` role`).join("\n")}`,
         steps: [
           `In Linear, open team ${facts.team}'s settings, then its issue statuses.`,
           "Give each status above its old name again, or add it back.",
           "If you renamed a status on purpose, rerun setup, so the record names the new name.",
         ],
         details: [`- Repo: \`${facts.repo}\``, `- Team: \`${facts.team}\``, `- Missing roles: ${missing.map((each) => `\`${each.role}\``).join(", ")}`],
-        cause: entry.cause,
+        cause: "missing_status",
         version,
       });
       return { title, body, notification: title };
-    }
-    case "claude_code_version": {
+    },
+    cleared: (entry) => ({ statusLine: `🟢 Fixed: Linear status ${entry.facts.missing?.[0]?.name} is back.`, sentence: "This repo's sessions start again at the next poll." }),
+  },
+  claude_code_version: {
+    opening: (entry, version) => {
+      const { facts } = entry;
       const title = `Claude Code ${facts.version} is too old for Flight Deck: run claude update`;
       const body = issueBody({
-        what: `Flight Deck stopped starting sessions on this Mac at ${since}. It needs Claude Code ${facts.minVersion} or later, and the Mac has ${facts.version}.`,
+        what: `Flight Deck stopped starting sessions on this Mac at ${when(entry.since)}. It needs Claude Code ${facts.minVersion} or later, and the Mac has ${facts.version}.`,
         steps: ["In a terminal on the Mac, run `claude update`.", `Run \`claude --version\`, and check that it prints ${facts.minVersion} or later.`],
         details: [`- Installed: \`${facts.version}\``, `- Needed: \`${facts.minVersion}\` or later`],
-        cause: entry.cause,
+        cause: "claude_code_version",
         version,
       });
       return { title, body, notification: title };
-    }
-    case "github_token": {
+    },
+    cleared: (entry, now) => ({ statusLine: `🟢 Fixed: Claude Code ${now.version ?? entry.facts.version} works with Flight Deck.`, sentence: AGAIN }),
+  },
+  github_token: {
+    opening: (entry, version, options) => {
+      const { facts } = entry;
       const title = "Flight Deck can't sign in to GitHub: run flight-deck login github";
       const body = issueBody({
-        what: `Flight Deck stopped starting sessions on this Mac at ${since}. GitHub refused the machine user's login when Flight Deck fetched ${facts.repo}.`,
+        what: `Flight Deck stopped starting sessions on this Mac at ${when(entry.since)}. GitHub refused the machine user's login when Flight Deck fetched ${facts.repo}.`,
         steps: ["In a terminal on the Mac, run `flight-deck login github`.", "Sign in as the machine user, not as yourself."],
-        details: [`- Repo: \`${facts.repo}\``, ...(facts.error === undefined ? [] : ["", `The fetch failed with:\n\n${codeBlock(facts.error)}`])],
-        cause: entry.cause,
+        details: [`- Repo: \`${facts.repo}\``, ...errorPart(facts.error, "The fetch failed with:", options)],
+        cause: "github_token",
         version,
       });
       return { title, body, notification: title };
-    }
-    case "linear_login": {
-      const title = `No Linear login for ${facts.workspace}: run flight-deck login linear ${facts.workspace}`;
-      return { title, body: null, notification: title };
-    }
-    case "team_unreadable": {
-      const title = `Flight Deck can't read Linear team ${facts.team}: check the team and both apps' access`;
-      return { title, body: null, notification: title };
-    }
-    case "shared_team": {
-      const title = `Two repos use Linear team ${facts.team}: run flight-deck register for one team per repo`;
-      return { title, body: null, notification: title };
-    }
-    case "credentials": {
-      const title = "Flight Deck stopped: others can read credentials.env. Run chmod 600 on it.";
-      return { title, body: null, notification: title };
-    }
-    case "claude_login": {
+    },
+    cleared: () => ({ statusLine: "🟢 Fixed: Flight Deck can sign in to GitHub again.", sentence: AGAIN }),
+  },
+  linear_login: {
+    opening: ({ facts }) => notifyOnly(`No Linear login for ${facts.workspace}: run flight-deck login linear ${facts.workspace}`),
+    cleared: null,
+  },
+  team_unreadable: {
+    opening: ({ facts }) => notifyOnly(`Flight Deck can't read Linear team ${facts.team}: check the team and both apps' access`),
+    cleared: null,
+  },
+  shared_team: {
+    opening: ({ facts }) => notifyOnly(`Two repos use Linear team ${facts.team}: run flight-deck register for one team per repo`),
+    cleared: null,
+  },
+  credentials: {
+    opening: () => notifyOnly("Flight Deck stopped: others can read credentials.env. Run chmod 600 on it."),
+    cleared: null,
+  },
+  claude_login: {
+    opening: (entry, version, options) => {
+      const { facts } = entry;
       const title = "Claude Code's login expired: run claude, then /login";
       const body = issueBody({
-        what: `Flight Deck stopped starting sessions on this Mac at ${since}. Claude Code's login expired, so a session ended without finishing. Flight Deck starts a trial run every 15 minutes, and sessions start again once one passes.`,
+        what: `Flight Deck stopped starting sessions on this Mac at ${when(entry.since)}. Claude Code's login expired, so a session ended without finishing. Flight Deck starts a trial run every 15 minutes, and sessions start again once one passes.`,
         steps: LOGIN_STEPS,
-        details: [`- Session: \`${facts.session}\``, ...(facts.error === undefined ? [] : ["", `The session ended with:\n\n${codeBlock(facts.error)}`])],
-        cause: entry.cause,
+        details: [`- Session: \`${facts.session}\``, ...errorPart(facts.error, "The session ended with:", options)],
+        cause: "claude_login",
         version,
       });
       return { title, body, notification: title };
-    }
-    case "claude_login_soon": {
+    },
+    cleared: () => ({ statusLine: "🟢 Fixed: Claude Code is signed in again.", sentence: AGAIN }),
+  },
+  claude_login_soon: {
+    opening: (entry, version) => {
+      const { facts } = entry;
       const title = "Claude Code's login expires soon: run claude, then /login";
       const body = issueBody({
-        what: `Claude Code warned at ${since} that its login expires soon. Nothing has stopped yet. Once the login expires, Flight Deck stops starting sessions on this Mac.`,
+        what: `Claude Code warned at ${when(entry.since)} that its login expires soon. Nothing has stopped yet. Once the login expires, Flight Deck stops starting sessions on this Mac.`,
         steps: LOGIN_STEPS,
         details: [`- Session: \`${facts.session}\``, ...(facts.warning === undefined ? [] : ["", `Claude Code's warning:\n\n${codeBlock(facts.warning)}`])],
-        cause: entry.cause,
+        cause: "claude_login_soon",
         version,
       });
       return { title, body, notification: title };
-    }
-    case "linear_token":
-      return linearToken(entry, version);
-  }
+    },
+    cleared: () => ({ statusLine: "🟢 Fixed: Claude Code's login was renewed.", sentence: "Nothing had stopped." }),
+  },
+  // Its issue is filed once a mint works again, so it gets no cleared comment.
+  linear_token: { opening: linearToken, cleared: null },
+};
+
+/** The cause's opening texts. The caller runs the facts' error through the secret scan first (ADR 0007). */
+export function troubleText(entry: Pick<TroubleEntry, "cause" | "since" | "facts">, version: string, options: TextOptions = {}): TroubleText {
+  return TEXTS[entry.cause].opening(entry, version, options);
+}
+
+/** The comment on the trouble issue once the cause clears. `now` holds what the runner sees at the clearing poll. */
+export function clearedText(entry: Pick<TroubleEntry, "cause" | "since" | "facts">, now: TroubleFacts): ClearedText | null {
+  return TEXTS[entry.cause].cleared?.(entry, now) ?? null;
+}
+
+/** The error the runner saw, in a code block under `intro`, or the line that says the scan left it out. */
+function errorPart(error: string | undefined, intro: string, options: TextOptions): string[] {
+  if (error === undefined) return [];
+  return ["", options.errorLeftOut === true ? "Error message left out: it matched a secret rule." : `${intro}\n\n${codeBlock(error)}`];
+}
+
+/** A cause the runner can't file an issue for: its title is the notification. */
+function notifyOnly(title: string): TroubleText {
+  return { title, body: null, notification: title };
 }
 
 /**
@@ -120,7 +177,7 @@ export function troubleText(entry: Pick<TroubleEntry, "cause" | "since" | "facts
  * in the past tense, and its issue gets no cleared comment (ADR 0005). Before a mint works, its title is only for
  * the log. The body names the four causes that look alike from the Mac, and ends with its own last sentence.
  */
-function linearToken(entry: Pick<TroubleEntry, "since" | "facts">, version: string): TroubleText {
+function linearToken(entry: Opened, version: string, options: TextOptions): TroubleText {
   const { workspace, app, ended } = entry.facts;
   const notification = `Flight Deck can't get a Linear token for ${workspace}. It keeps trying.`;
   if (ended === undefined) return { title: `Flight Deck can't get a Linear token for ${workspace}`, body: null, notification };
@@ -149,31 +206,13 @@ function linearToken(entry: Pick<TroubleEntry, "since" | "facts">, version: stri
         "- Cause: `linear_token`",
         `- Workspace: \`${workspace}\``,
         `- App: ${appName}`,
-        ...(entry.facts.error === undefined ? [] : ["", `The last mint failed with:\n\n${codeBlock(entry.facts.error)}`]),
+        ...errorPart(entry.facts.error, "The last mint failed with:", options),
         "",
         runnerFooter(version),
       ].join("\n"),
     ),
   ].join("\n\n");
   return { title, body, notification };
-}
-
-/** The comment on the trouble issue once the cause clears. `now` holds what the runner sees at the clearing poll. */
-export function clearedText(entry: Pick<TroubleEntry, "cause" | "facts">, now: TroubleFacts): ClearedText | null {
-  switch (entry.cause) {
-    case "missing_status":
-      return { statusLine: `🟢 Fixed: Linear status ${entry.facts.missing?.[0]?.name} is back.`, sentence: "This repo's sessions start again at the next poll." };
-    case "claude_code_version":
-      return { statusLine: `🟢 Fixed: Claude Code ${now.version ?? entry.facts.version} works with Flight Deck.`, sentence: "Sessions start again at the next poll." };
-    case "github_token":
-      return { statusLine: "🟢 Fixed: Flight Deck can sign in to GitHub again.", sentence: "Sessions start again at the next poll." };
-    case "claude_login":
-      return { statusLine: "🟢 Fixed: Claude Code is signed in again.", sentence: "Sessions start again at the next poll." };
-    case "claude_login_soon":
-      return { statusLine: "🟢 Fixed: Claude Code's login was renewed.", sentence: "Nothing had stopped." };
-    default:
-      return null;
-  }
 }
 
 /** The body's shape: what stopped, the numbered fix, the closing sentence, then the Details fold with the footer. */

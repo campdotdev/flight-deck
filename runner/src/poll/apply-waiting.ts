@@ -146,19 +146,19 @@ export class ApplyWaiting {
     );
     const entry: SessionEntry = { ...waiting, apply: { ...waiting.apply!, tries: 0 } };
     // The entry first, then the take, so the issue never sits in the working status unseen (ADR 0002).
-    await this.state.writeSessions([...(await this.state.sessions()), entry]);
+    await this.state.addSession(entry);
     const working = WORKING[entry.stage] ?? "planning";
     try {
       const taken = await this.lifecycle.move(issue, working, "take");
       if (!taken.ok) {
         await this.log(now, entry, `take refused: ${taken.violation}`);
-        await this.dropEntry(entry.id);
+        await this.state.dropSession(entry.id);
         return true;
       }
     } catch (error) {
       if (!isUnavailable(error)) throw error;
       await this.log(now, entry, `take of the kept outbox waits: ${error.message}`);
-      await this.dropEntry(entry.id);
+      await this.state.dropSession(entry.id);
       return true;
     }
     await this.log(now, entry, "took the issue to apply its kept outbox");
@@ -201,7 +201,7 @@ export class ApplyWaiting {
         return this.discard(entry, workspace);
       }
     }
-    const result = await outbox.apply(wait.folder, { identity: this.tracker });
+    const result = await outbox.apply(wait.folder, { identity: this.tracker, facts: this.facts(entry) });
     await this.log(now, entry, `outbox ${JSON.stringify(result)}`);
     switch (result.result) {
       case "applied":
@@ -217,7 +217,7 @@ export class ApplyWaiting {
       case "unwritten": {
         const next: ApplyWait = { ...wait, phase: phaseAfter(wait.phase, result), tried_at: now.toISOString(), tries: wait.tries + 1 };
         const updated: SessionEntry = { ...entry, apply: next };
-        if (now.getTime() < Date.parse(next.since) + GIVE_UP_MS) return this.writeEntry(updated);
+        if (now.getTime() < Date.parse(next.since) + GIVE_UP_MS) return this.state.updateSession(updated.id, () => updated);
         if (next.phase === "after_move") return this.dropAfterMove(now, outbox, updated, workspace);
         return this.keep(now, repo, updated, workspace);
       }
@@ -247,7 +247,7 @@ export class ApplyWaiting {
     const memory = await this.state.issueMemory(repo.name, entry.issue_id);
     await this.state.writeIssueMemory(repo.name, entry.issue_id, { ...memory, kept: { session: entry.id, at: now.toISOString() } });
     const pausing: SessionEntry = { ...entry, apply: { folder: kept, phase: "pause", since: wait.since, tried_at: now.toISOString(), tries: 1 } };
-    await this.writeEntry(pausing);
+    await this.state.updateSession(pausing.id, () => pausing);
     await this.log(now, entry, `Linear didn't take the outbox for 3 hours, kept in ${kept}`);
     await this.postPause(now, repo, pausing);
   }
@@ -269,7 +269,7 @@ export class ApplyWaiting {
     const memory = await this.state.issueMemory(repo.name, entry.issue_id);
     if (memory.pending === null) {
       if (issue.role === WORKING[entry.stage]) return this.postPause(now, repo, tried);
-      if (issue.role === "paused") return this.dropEntry(entry.id);
+      if (issue.role === "paused") return this.state.dropSession(entry.id);
       return this.moved(now, repo, entry);
     }
     await this.paused(now, repo, tried, (await this.comments(now).retry(repo, entry.issue_id, issue)) ?? "landed");
@@ -278,7 +278,7 @@ export class ApplyWaiting {
   /** After a try of the pause: a landed pause ends the entry, and a pending one waits for the backoff's next try. */
   private async paused(now: Date, repo: TrackerRepo, entry: SessionEntry, result: RunnerWriteResult): Promise<void> {
     await this.log(now, entry, `Linear-write pause ${result}`);
-    if (result === "landed") return this.dropEntry(entry.id);
+    if (result === "landed") return this.state.dropSession(entry.id);
     if (result === "dropped") return this.moved(now, repo, entry);
     // The poll's own retry of pending comments holds off until then.
     const memory = await this.state.issueMemory(repo.name, entry.issue_id);
@@ -290,7 +290,7 @@ export class ApplyWaiting {
   /** The maintainer moved the issue before the pause landed: the kept outbox goes, and so does the entry. */
   private async moved(now: Date, repo: TrackerRepo, entry: SessionEntry): Promise<void> {
     await this.forgetKept(now, repo.name, entry.issue_id, `${entry.id} ${entry.issue}: moved before the Linear-write pause landed, kept outbox deleted`);
-    await this.dropEntry(entry.id);
+    await this.state.dropSession(entry.id);
   }
 
   // Shared steps.
@@ -301,7 +301,7 @@ export class ApplyWaiting {
     const wait = current.apply!;
     if (wait.tried_at === now.toISOString()) return current;
     const updated = { ...current, apply: { ...wait, tried_at: now.toISOString(), tries: wait.tries + 1 } };
-    await this.writeEntry(updated);
+    await this.state.updateSession(updated.id, () => updated);
     return updated;
   }
 
@@ -309,7 +309,7 @@ export class ApplyWaiting {
   private async discard(entry: SessionEntry, workspace: Workspace): Promise<void> {
     await workspace.dispose({ session: entry.id, worktree: entry.worktree });
     await this.discardKept(entry);
-    await this.dropEntry(entry.id);
+    await this.state.dropSession(entry.id);
   }
 
   private async discardKept(entry: SessionEntry): Promise<void> {
@@ -333,14 +333,6 @@ export class ApplyWaiting {
 
   private comments(now: Date): RunnerComments {
     return new RunnerComments({ tracker: this.tracker, state: this.state, clock: () => now });
-  }
-
-  private async writeEntry(entry: SessionEntry): Promise<void> {
-    await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? entry : each)));
-  }
-
-  private async dropEntry(id: string): Promise<void> {
-    await this.state.writeSessions((await this.state.sessions()).filter((each) => each.id !== id));
   }
 
   private async log(now: Date, entry: SessionEntry, message: string): Promise<void> {

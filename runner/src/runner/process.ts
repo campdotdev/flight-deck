@@ -46,6 +46,7 @@ export async function startRunner(options: RunnerOptions): Promise<Runner> {
   const socketPath = paths.socket(folders);
   if ((await ask(socketPath, { op: "sessions" }, 2_000)) !== null) throw new Error(`another runner is answering on ${socketPath}`);
 
+  const path = options.path ?? process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
   const state = new State(folders);
   const poll = new Poll({
     folders,
@@ -53,10 +54,10 @@ export async function startRunner(options: RunnerOptions): Promise<Runner> {
     versionFolder: options.versionFolder,
     tracker: options.tracker,
     harness: options.harness,
-    ...(options.path === undefined ? {} : { path: options.path }),
+    path,
   });
   await state.log(clock(), `runner ${version} started, pid ${process.pid}`);
-  const socket = await listenRunnerSocket({ folders, poll, clock });
+  const socket = await listenRunnerSocket({ folders, poll, path, clock });
 
   let stopping = false;
   let timer: ReturnType<typeof setTimeout> | null = null;

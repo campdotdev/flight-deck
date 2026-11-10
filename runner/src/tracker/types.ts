@@ -234,7 +234,8 @@ export interface Tracker {
   move(issue: IssueRef, role: Role): Promise<void>;
   /**
    * A top-level comment. Flagged, it assigns the maintainer first. Unflagged on an issue the runner hasn't
-   * flagged, it unsubscribes the maintainer first when they're subscribed. Fold lines become `+++`.
+   * flagged, it unsubscribes the maintainer first when they're subscribed. Fold lines become `+++`, and every
+   * URL loses its `?signature=` query (ADR 0019).
    */
   post(issue: IssueRef, comment: string, options: PostOptions): Promise<PostedComment>;
   /**
@@ -246,13 +247,14 @@ export interface Tracker {
   flag(issue: IssueRef): Promise<void>;
   /** Unsubscribes the maintainer, only when they're subscribed. */
   unsubscribe(issue: IssueRef): Promise<void>;
-  /** Replaces the description with the brief, then a `+++ Report` fold that holds the report. */
+  /** Replaces the description with the brief, then a `+++ Report` fold that holds the report, with every URL unsigned. */
   writeBrief(issue: IssueRef, brief: string, options: WriteBriefOptions): Promise<void>;
   /** Makes the duplicate relation and moves the issue to the `duplicate` role. Only Lifecycle calls this. */
   markDuplicate(issue: IssueRef, of: IssueRef): Promise<void>;
   /**
    * Files an issue in the role's status, because Linear sends an issue created through the API to the team's
-   * default status otherwise (ADR 0013). It sets no label, priority, assignee, or delegate (ADR 0006).
+   * default status otherwise (ADR 0013). It sets no label, priority, assignee, or delegate (ADR 0006). The title
+   * and description lose every `?signature=` query.
    */
   file(draft: IssueDraft, role: Role): Promise<FiledIssue>;
   relate(issue: IssueRef, other: IssueRef, kind: RelationKind): Promise<void>;

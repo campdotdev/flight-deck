@@ -4,10 +4,11 @@
 // its state. Step 10, `settle`, then files, flags, and notifies for each cause that opened, comments on each
 // issue whose cause cleared, and writes `state/trouble.json`.
 import { runnerComment } from "../../outbox/runner-comments/frame.ts";
+import { SecretScanFailed, type SecretScan } from "../../outbox/secret-scan.ts";
 import type { State, StatusHold, TroubleCause, TroubleEntry, TroubleFacts, TroubleIssue } from "../../state/index.ts";
 import { isUnavailable, IssueNotFoundError, type StatusType, type Tracker, type TrackerRepo } from "../../tracker/index.ts";
 import { notify } from "./notify.ts";
-import { clearedText, troubleText } from "./texts.ts";
+import { clearedText, troubleText, type TroubleText } from "./texts.ts";
 
 /** What a step found when it opened a cause. */
 export interface TroubleFinding {
@@ -27,12 +28,14 @@ export interface SettleContext {
   path: string;
   /** Each registered repo the Tracker can reach this poll, by name. */
   repos: Map<string, TrackerRepo>;
+  /** The scan the error text a trouble issue quotes goes through, as the runner's own comments' does (ADR 0007). */
+  secrets: SecretScan;
 }
 
 /** An issue counts as open in a backlog, unstarted, started, or triage status (spec 1, "Trouble issues"). */
 const OPEN_TYPES: ReadonlySet<StatusType> = new Set(["triage", "backlog", "unstarted", "started"]);
 
-/** The causes that file a trouble issue. The others only notify. FLD-109 adds its own. */
+/** The causes that file a trouble issue when they open. `linear_token` files later (`FILE_AFTER_MS`), and the others only notify. */
 const FILES: ReadonlySet<TroubleCause> = new Set(["missing_status", "claude_code_version", "github_token", "claude_login", "claude_login_soon"]);
 
 /** `linear_token` files its issue only once a mint works, after a failure this long or longer (ADR 0005). */
@@ -51,6 +54,8 @@ export class Trouble {
   private readonly cleared = new Map<string, TroubleFacts>();
   /** The repos a trouble issue can be filed in this poll: the team reads and has its `intake` status. */
   private readonly fileable = new Set<string>();
+  /** Whether the secret scan matched each error text this poll, so each one is scanned once. */
+  private readonly scanned = new Map<string, boolean>();
 
   private constructor(private entries: TroubleEntry[]) {}
 
@@ -121,7 +126,7 @@ export class Trouble {
   }
 
   /** `status.json`'s `trouble`: each open cause. */
-  status(): { cause: string; repos: string[]; issue_url: string | null; since: string }[] {
+  status(): { cause: TroubleCause; repos: string[]; issue_url: string | null; since: string }[] {
     return this.entries
       .filter((entry) => entry.open)
       .map((entry) => ({ cause: entry.cause, repos: entry.repos, issue_url: entry.issues[0]?.url ?? null, since: entry.since }));
@@ -142,6 +147,8 @@ export class Trouble {
     for (const entry of this.entries) {
       const k = key(entry.cause, entry.id);
       const assigned = await this.sync(context, entry);
+      // A cleared or reopened comment an earlier poll couldn't post goes first.
+      for (const issue of entry.issues) if (issue.unposted !== undefined) await this.comment(context, issue, issue.unposted, save);
       const opening = this.opened.get(k);
       if (opening !== undefined) {
         const reopened = !entry.open;
@@ -151,7 +158,7 @@ export class Trouble {
           entry.facts = opening.finding.facts;
         }
         entry.repos = opening.finding.repos;
-        const text = troubleText(entry, context.version);
+        const text = await this.text(context, entry);
         if (reopened) {
           await log(`trouble ${entry.cause} opened${entry.repos.length > 0 ? ` for ${entry.repos.join(", ")}` : ""}: ${text.title}${entry.facts.mode === undefined ? "" : ` (mode ${entry.facts.mode})`}`);
           const posted = await notify(text.notification, { path: context.path });
@@ -168,10 +175,8 @@ export class Trouble {
         }
         const cleared = clearedText(entry, this.cleared.get(k) ?? {});
         for (const issue of cleared === null ? [] : entry.issues) {
-          const repo = context.repos.get(issue.repo);
-          if (repo === undefined) continue;
-          const comment = await runnerComment({ statusLine: cleared!.statusLine, sentences: cleared!.sentence, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses });
-          await this.attempt(log, `${issue.identifier}: cleared comment`, () => context.tracker.post({ id: issue.id, repo }, comment.body, { flag: false }));
+          const comment = await runnerComment({ statusLine: cleared!.statusLine, sentences: cleared!.sentence, flag: null, answers: null }, {}, { version: context.version });
+          await this.comment(context, issue, { body: comment.body, flag: false }, save);
         }
       }
       if (!entry.open && entry.unfiled !== undefined && entry.unfiled.length > 0) await this.fileLate(context, entry, assigned, save);
@@ -236,13 +241,8 @@ export class Trouble {
       if (repo === undefined) continue;
       let issue = entry.issues.find((each) => each.repo === name);
       if (issue !== undefined && reopened !== null) {
-        const unassigned = reopened.get(issue.id) === false;
-        if (unassigned) await this.rememberFlag(context, issue);
-        const comment = await runnerComment({ statusLine: `🟡 Needs your help: ${issue.title}`, sentences: null, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses });
-        const target = issue;
-        const posted = await this.attempt(log, `${issue.identifier}: reopened comment`, () => context.tracker.post({ id: target.id, repo }, comment.body, { flag: unassigned }));
-        if (posted !== null && unassigned) issue.flagged = true;
-        await save();
+        const comment = await runnerComment({ statusLine: `🟡 Needs your help: ${issue.title}`, sentences: null, flag: null, answers: null }, {}, { version: context.version });
+        await this.comment(context, issue, { body: comment.body, flag: reopened.get(issue.id) === false }, save);
         continue;
       }
       if (issue === undefined) {
@@ -268,12 +268,55 @@ export class Trouble {
    * cause is still open gets "🟡 Needs your help: " and the title there instead of a second issue.
    */
   private async fileLate(context: SettleContext, entry: TroubleEntry, assigned: Map<string, boolean>, save: () => Promise<void>): Promise<void> {
-    const text = troubleText(entry, context.version);
+    const text = await this.text(context, entry);
     if (text.body === null) return;
     const owed = entry.unfiled ?? [];
     await this.file(context, { ...entry, repos: owed }, text.title, text.body, assigned, save);
     entry.unfiled = owed.filter((repo) => !entry.issues.some((issue) => issue.repo === repo && issue.flagged));
     if (entry.unfiled.length === 0) delete entry.unfiled;
+  }
+
+  /**
+   * Posts a cleared or reopened comment on a trouble issue. One Linear doesn't take, or one for a repo Linear
+   * can't reach this poll, stays in `unposted`, and the next poll tries it again. A flagging comment flags the
+   * issue once it lands.
+   */
+  private async comment(context: SettleContext, issue: TroubleIssue, comment: { body: string; flag: boolean }, save: () => Promise<void>): Promise<void> {
+    issue.unposted = comment;
+    await save();
+    const repo = context.repos.get(issue.repo);
+    if (repo === undefined) return;
+    if (comment.flag) await this.rememberFlag(context, issue);
+    const log = (message: string) => context.state.log(context.now, message);
+    const posted = await this.attempt(log, `${issue.identifier}: trouble comment`, () => context.tracker.post({ id: issue.id, repo }, comment.body, { flag: comment.flag }));
+    if (posted === null) return;
+    delete issue.unposted;
+    if (comment.flag) issue.flagged = true;
+    await save();
+  }
+
+  /**
+   * The cause's texts, with the error it quotes left out when the secret scan matches it: Betterleaks, or the
+   * exact value of a file copied for any repo the issue may be filed in. A scan that can't run counts as a match,
+   * so nothing unscanned is posted.
+   */
+  private async text(context: SettleContext, entry: TroubleEntry): Promise<TroubleText> {
+    const error = entry.facts.error;
+    if (error === undefined) return troubleText(entry, context.version);
+    let leftOut = this.scanned.get(error);
+    if (leftOut === undefined) {
+      const repos = new Set([...context.repos.keys(), ...entry.repos, ...(entry.facts.repo === undefined ? [] : [entry.facts.repo])]);
+      try {
+        leftOut = false;
+        // With no repo, nothing is filed, so nothing needs the scan.
+        for (const repo of repos) if (!leftOut && (await context.secrets.matches(repo, error))) leftOut = true;
+      } catch (scanError) {
+        if (!(scanError instanceof SecretScanFailed)) throw scanError;
+        leftOut = true;
+      }
+      this.scanned.set(error, leftOut);
+    }
+    return troubleText(entry, context.version, { errorLeftOut: leftOut });
   }
 
   /** The flag goes into issue memory before the write, as every runner flag does. Its status line is the title. */

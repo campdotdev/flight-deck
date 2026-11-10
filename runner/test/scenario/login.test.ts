@@ -1,10 +1,7 @@
 // Claude Code's login (spec 1, "Exits", "Trouble issues", ADR 0005): an expired login holds the runner until a
 // trial run passes, and a warning that it expires soon files a trouble issue and holds nothing.
-import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { outbox, World } from "./world.ts";
-
-// Each scenario runs many ticks, and each tick fetches with real git.
-setDefaultTimeout(30_000);
 
 let world: World;
 
@@ -106,6 +103,29 @@ describe("login_expired", () => {
     ]);
     expect((await world.status()).runner).toEqual({ state: "working", holds: [] });
     expect(world.harness.started[3]!.sessionJson.attempt).toBe(1);
+  });
+
+  test("leaves the session's error out of the trouble issue when it matches a secret rule, and says so", async () => {
+    const sent = world.issue({ title: "Save button is blue" });
+    world.send(sent);
+    world.harness.script(sent.identifier, { exit: { kind: "login_expired" }, error: "OAuth token ghp_4f8Xq2Lm9Rt7Vb3Nc6Hj1Kp5Wd0Zs8Ya2Ue4 has expired" });
+    await world.tick();
+
+    const filed = ((await nextTick()) as { kind: string; description?: string }[]).find((write) => write.kind === "file")!;
+    expect(filed.description).toContain(`- Session: \`${world.harness.started[0]!.session.id}\`\n\nError message left out: it matched a secret rule.\n\nFlight Deck 0.1.0 · runner`);
+    expect(filed.description).not.toContain("ghp_");
+  });
+
+  test("leaves the session's error out of the trouble issue when it holds a copied file's value", async () => {
+    await world.copyFile(".env", "STRIPE_KEY=sk_test_value_from_the_env_file\n");
+    const sent = world.issue({ title: "Save button is blue" });
+    world.send(sent);
+    world.harness.script(sent.identifier, { exit: { kind: "login_expired" }, error: "login failed for sk_test_value_from_the_env_file" });
+    await world.tick();
+
+    const filed = ((await nextTick()) as { kind: string; description?: string }[]).find((write) => write.kind === "file")!;
+    expect(filed.description).toContain("Error message left out: it matched a secret rule.");
+    expect(filed.description).not.toContain("sk_test_value_from_the_env_file");
   });
 
   test("the next take keeps the attempt the session had", async () => {

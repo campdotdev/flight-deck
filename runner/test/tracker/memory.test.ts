@@ -1,29 +1,12 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import type { Role } from "../../src/record/index.ts";
 import { InMemoryTracker, IssueNotFoundError, MintFailed, TrackerUnavailable, unsigned, type IssueRef, type TrackerRepo } from "../../src/tracker/index.ts";
-
-const STATUSES: Record<Role, string> = {
-  intake: "Triage",
-  backlog: "Backlog",
-  ready_to_plan: "Ready to plan",
-  planning: "Planning",
-  ready_to_build: "Ready to build",
-  building: "Building",
-  ready_to_check: "Ready to check",
-  checking: "Checking",
-  landed: "Landed",
-  paused: "Paused",
-  in_review: "In Review",
-  done: "Done",
-  canceled: "Canceled",
-  duplicate: "Duplicate",
-};
+import { STATUS_NAMES } from "../statuses.ts";
 
 const repo: TrackerRepo = {
   name: "campdotdev/shaders",
   workspace: "campdotdev",
   team: "SHA",
-  statuses: STATUSES,
+  statuses: STATUS_NAMES,
   maintainer: "maintainer",
 };
 
@@ -35,7 +18,7 @@ beforeEach(() => {
   tracker = new InMemoryTracker({ clock: () => now, appUser: "app" });
   tracker.addUser({ id: "maintainer", name: "Hunter" });
   tracker.addUser({ id: "stranger", name: "Sam" });
-  tracker.addTeam({ key: "SHA", name: "Shaders", statuses: Object.values(STATUSES).map((name) => ({ name, type: "started" })) });
+  tracker.addTeam({ key: "SHA", name: "Shaders", statuses: Object.values(STATUS_NAMES).map((name) => ({ name, type: "started" })) });
 });
 
 function issue(description = "The button is blue.", status = "Planning"): IssueRef & { identifier: string } {
@@ -80,7 +63,7 @@ describe("what the in-memory Tracker models", () => {
 
   test("intake and backlog may name one status, which reads back as intake", async () => {
     const one = issue("x", "Backlog");
-    const shared = { ...repo, statuses: { ...STATUSES, intake: "Backlog" } };
+    const shared = { ...repo, statuses: { ...STATUS_NAMES, intake: "Backlog" } };
     expect((await tracker.issue({ id: one.id, repo: shared })).role).toBe("intake");
   });
 });
@@ -329,6 +312,29 @@ describe("upload", () => {
     expect(unsigned("https://uploads.linear.app/a/b.png?signature=x")).toBe("https://uploads.linear.app/a/b.png");
     expect(unsigned("https://uploads.linear.app/a/b.png?w=2&signature=x&h=3")).toBe("https://uploads.linear.app/a/b.png?w=2&h=3");
     expect(unsigned("![x](https://uploads.linear.app/a/b.png?signature=x)")).toBe("![x](https://uploads.linear.app/a/b.png)");
+  });
+});
+
+describe("signed upload URLs", () => {
+  const SIGNED = "![before](https://uploads.linear.app/ws/abc/before.png?signature=eyJhbGciOi)";
+  const UNSIGNED = "![before](https://uploads.linear.app/ws/abc/before.png)";
+
+  test("post strips ?signature= from the comment", async () => {
+    const one = issue();
+    await tracker.post(one, `It looks like this.\n\n${SIGNED}`, { flag: false });
+    expect(tracker.writes.at(-1)).toEqual({ kind: "comment", issue: one.identifier, body: `It looks like this.\n\n${UNSIGNED}` });
+  });
+
+  test("writeBrief strips ?signature= from the description", async () => {
+    const one = issue(`The button is blue.\n\n${SIGNED}`);
+    await tracker.writeBrief(one, `## Summary\n\n${SIGNED}`, { runnerWroteBrief: false });
+    expect(tracker.stored(one.id).description).toBe(`## Summary\n\n${UNSIGNED}\n\n+++ Report\n\nThe button is blue.\n\n${UNSIGNED}\n\n+++`);
+  });
+
+  test("file strips ?signature= from the title and the description", async () => {
+    const filed = await tracker.file({ repo, title: "See https://uploads.linear.app/ws/abc/a.png?signature=x", description: SIGNED }, "intake");
+    const read = await tracker.issue({ id: filed.id, repo });
+    expect([read.title, read.description]).toEqual(["See https://uploads.linear.app/ws/abc/a.png", UNSIGNED]);
   });
 });
 

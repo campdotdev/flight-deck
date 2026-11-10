@@ -140,7 +140,7 @@ export interface PendingComment {
 
 /**
  * Why the runner put an issue back in its queue without using the stage's retry: a plan limit, an expired
- * login, a failed Reader mint, or a shutdown (spec 1, "Exits"). Each ticket that requeues adds its exit here.
+ * login, a failed Reader mint, or a shutdown (spec 1, "Exits").
  */
 export type RestartCause = "rate_limited" | "login_expired" | "linear_token" | "shutdown";
 
@@ -150,9 +150,9 @@ export interface Restart {
   after: RestartCause;
 }
 
-/** One issue's memory, keyed by Linear's UUID. Later tickets add more. */
+/** One issue's memory, keyed by Linear's UUID. */
 export interface IssueMemory {
-  /** The brief the runner last wrote for the issue, or `null`. */
+  /** The brief the runner last wrote for the issue, as the description shows it above the report fold, or `null`. */
   brief: string | null;
   /** The current flag, or `null`. */
   flag: Flag | null;
@@ -267,6 +267,21 @@ export class State {
     await writeJson(paths.sessionList(this.folders), sessions);
   }
 
+  /** Adds an entry at the end of the session list. */
+  async addSession(entry: SessionEntry): Promise<void> {
+    await this.writeSessions([...(await this.sessions()), entry]);
+  }
+
+  /** Replaces the entry with this ID by what `change` makes of it. An ID the list doesn't hold changes nothing. */
+  async updateSession(id: string, change: (entry: SessionEntry) => SessionEntry): Promise<void> {
+    await this.writeSessions((await this.sessions()).map((each) => (each.id === id ? change(each) : each)));
+  }
+
+  /** Drops the entry with this ID from the session list. */
+  async dropSession(id: string): Promise<void> {
+    await this.writeSessions((await this.sessions()).filter((each) => each.id !== id));
+  }
+
   async issueMemory(repo: string, uuid: string): Promise<IssueMemory> {
     return { ...EMPTY_MEMORY, ...(await readJson<Partial<IssueMemory>>(paths.issueMemory(this.folders, repo, uuid), {})) };
   }
@@ -283,6 +298,11 @@ export class State {
 
   async writeIssueMemory(repo: string, uuid: string, memory: IssueMemory): Promise<void> {
     await writeJson(paths.issueMemory(this.folders, repo, uuid), memory);
+  }
+
+  /** Merges the fields over the issue's memory as the file holds it now. */
+  async mergeIssueMemory(repo: string, uuid: string, fields: Partial<IssueMemory>): Promise<void> {
+    await this.writeIssueMemory(repo, uuid, { ...(await this.issueMemory(repo, uuid)), ...fields });
   }
 
   /** Where the repo's last snapshot read comments to: an ISO creation time, or `null` before the first. */

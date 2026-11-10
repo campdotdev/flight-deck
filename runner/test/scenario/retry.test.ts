@@ -132,6 +132,23 @@ describe("a second failure", () => {
     });
   });
 
+  test("leaves out a refused rule that quotes what matches a secret rule, and says so", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const token = "ghp_4f8Xq2Lm9Rt7Vb3Nc6Hj1Kp5Wd0Zs8Ya2Ue4";
+    const refused = { "outcome.json": JSON.stringify({ version: world.version, stage: token, move: "ready_to_build" }), "summary.md": "Brief ready", "brief.md": "## Summary\n\nRed." };
+    await failTwice(issue, { outbox: refused, exit: { kind: "exited", code: 0 } });
+    const body = world.tracker.writes.find((write) => write.kind === "comment");
+    expect(body).toEqual({
+      kind: "comment",
+      issue: issue.identifier,
+      body: comment(
+        "Plan ran twice, and neither session handed off. The second one wrote a handoff Flight Deck refused, and the rule it broke is left out: it matched a secret rule. Its transcript path is under Details.",
+        facts("`exited` with code 0"),
+      ),
+    });
+    expect(JSON.stringify(world.tracker.writes)).not.toContain(token);
+  });
+
   test("says the session stopped with an error, and shows the result event's last error, when it left no handoff", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     await failTwice(issue, { exit: { kind: "exited", code: 1 }, error: "API Error: 500 Internal server error" });
@@ -375,6 +392,22 @@ describe("a runner comment Linear refuses with a 5xx", () => {
     expect(afterTake(issue).map((write) => write.kind)).toEqual(["assign", "comment", "move"]);
     expect(world.tracker.stored(issue.id).status).toBe("Paused");
     world.reply(issue, "retry");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+  });
+
+  test("counts a reply the maintainer posted after the comment, before its move landed", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "no_init" } });
+    await world.tick();
+    world.tracker.refuse("move");
+    await world.tick();
+    expect(afterTake(issue).map((write) => write.kind)).toEqual(["assign", "comment"]);
+    world.reply(issue, "retry");
+    world.reply(issue, "Thanks.");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
     await world.tick();
     expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
   });

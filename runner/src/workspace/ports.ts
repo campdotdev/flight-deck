@@ -1,5 +1,6 @@
 // Each session's port (spec 1's "Workspace" and "Starts", ADR 0003). A session of a repo with an app gets a port
-// of its own. A single-instance app always runs on its `default_port`, which Poll tests before each take.
+// of its own. A single-instance app always runs on its `default_port`, which Poll tests before each take. Both
+// use one in-use test, `portInUse`.
 import { connect, createServer } from "node:net";
 import type { RepoRecord } from "../record/index.ts";
 
@@ -10,13 +11,13 @@ type App = NonNullable<RepoRecord["app"]>;
 
 /**
  * The session's port: `default_port` for a single-instance app, which "Starts" has already tested. Otherwise the
- * lowest port in 4400 to 4999 that no listed session holds and that a test bind on `127.0.0.1` accepts. Throws when
- * none is free, which fails `prepare`.
+ * lowest port in 4400 to 4999 that no listed session holds and that `portInUse` finds free. Throws when none is
+ * free, which fails `prepare`.
  */
 export async function sessionPort(app: App, held: ReadonlySet<number>): Promise<number> {
   if (app.single_instance) return app.default_port;
   for (let port = SESSION_PORTS.from; port <= SESSION_PORTS.to; port++) {
-    if (!held.has(port) && (await binds("127.0.0.1", port))) return port;
+    if (!held.has(port) && !(await portInUse(port))) return port;
   }
   throw new Error(`no port in ${SESSION_PORTS.from} to ${SESSION_PORTS.to} is free for the app`);
 }
@@ -27,7 +28,7 @@ export function appUrl(app: App, port: number): string {
 }
 
 /**
- * Whether something already uses a single-instance app's port: a bind on `0.0.0.0` or `::` fails, or a connect to
+ * Whether something already uses a port: a bind on `0.0.0.0` or `::` fails, or a connect to
  * `127.0.0.1` or `::1` succeeds, because a dev server may listen on any of them (spec 1's "Starts", ADR 0003).
  * The connects matter on macOS, where a bind on a wildcard address succeeds beside a listener on a loopback one.
  */

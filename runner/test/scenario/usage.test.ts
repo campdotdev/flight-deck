@@ -1,13 +1,10 @@
 // The usage holds (spec 1's "Holds" and "Exits", ADRs 0002 and 0007): the runner holds itself short of the
 // plan limits on a subscription, keeps under the spending caps on an API key, and restarts a session that hit a
 // plan limit without using the stage's retry.
-import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { RateLimitEvent } from "../../src/harness/index.ts";
 import type { StoredIssue } from "../../src/tracker/index.ts";
 import { outbox, World } from "./world.ts";
-
-// Each scenario runs many ticks, and each tick fetches with real git.
-setDefaultTimeout(30_000);
 
 let world: World;
 
@@ -374,6 +371,18 @@ describe("on an API key", () => {
     await world.tick();
     expect(world.harness.started).toHaveLength(2);
     expect((await world.status()).runner.holds).toEqual([]);
+  });
+
+  test("a session the runner lost at a restart ended with no result event, so it counts its whole budget", async () => {
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+    const issue = world.issue({ title: "First" });
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    world.harness.lose(world.harness.started[0]!.session.id);
+    world.restart();
+    await world.tick();
+    expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 5, month_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
   });
 
   test("spending survives a restart", async () => {

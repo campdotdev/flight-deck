@@ -49,8 +49,8 @@ export interface RunnerComment {
 export interface FrameOptions {
   /** The running version. */
   version: string;
-  /** The team's status names, for the answer lines. */
-  statuses: Record<Role, string>;
+  /** The team's status names, for the answer lines. A comment with answers needs them. */
+  statuses?: Record<Role, string>;
   /** The scan the error and prepare messages go through, with the repo whose copied files count. A comment whose facts hold either needs it. */
   secrets?: { scan: SecretScan; repo: string };
 }
@@ -66,7 +66,9 @@ export function runnerFooter(version: string): string {
  */
 export async function runnerComment(text: RunnerText, facts: RunnerFacts, options: FrameOptions): Promise<RunnerComment> {
   const answers = text.answers ?? [];
-  const lines = answers.length === 0 ? [] : [answerLines(answers.map(({ word, does, move }) => ({ word, does, status: options.statuses[move] })))];
+  const statuses = options.statuses;
+  if (answers.length > 0 && statuses === undefined) throw new Error("a runner comment with answers needs the team's status names");
+  const lines = answers.length === 0 ? [] : [answerLines(answers.map(({ word, does, move }) => ({ word, does, status: statuses![move] })))];
   const inFold = [await factsText(facts, options), text.details ?? ""].filter((part) => part.trim() !== "").join("\n\n");
   const footer = runnerFooter(options.version);
   const details = fold("Details", inFold === "" ? footer : `${flattenFolds(inFold)}\n\n${footer}`);

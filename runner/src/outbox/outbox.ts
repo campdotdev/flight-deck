@@ -5,12 +5,13 @@ import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { readJson, writeJson, type Answer, type IssueMemory, type State } from "../state/index.ts";
-import { IssueNotFoundError, isUnavailable, TrackerRefused, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
+import { briefText, IssueNotFoundError, isUnavailable, TrackerRefused, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
 import { duplicateLine, followUpFooter, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope, type Envelope } from "./envelope.ts";
 import { contentType, embedImages, nameImages } from "./media.ts";
-import { runnerComment } from "./runner-comments/frame.ts";
+import { repliesAfter } from "./replies.ts";
+import { runnerComment, type RunnerFacts } from "./runner-comments/frame.ts";
 import { secretScanPause } from "./runner-comments/secret-scan.ts";
 import { SecretScanFailed, type ScanText, type SecretHit, type SecretScan } from "./secret-scan.ts";
 
@@ -31,6 +32,11 @@ export interface ApplyOptions {
   dryRun?: boolean;
   /** Called with each write's name as it lands, or, on a dry run, as it would. */
   onWrite?: (name: string) => void;
+  /**
+   * The runner's facts for the fold of a pause the Outbox posts in the runner's words, the secret scan's. The
+   * session ID from `session.json` by default, which is all a hand run has.
+   */
+  facts?: RunnerFacts;
 }
 
 /** Where the Outbox's writes to issue memory go. The runner writes the file, and a hand run asks the runner. */
@@ -77,7 +83,7 @@ export class Outbox {
 
   constructor(private readonly options: OutboxOptions) {
     const state = options.state;
-    this.memory = options.memory ?? { write: async (repo, uuid, fields) => state.writeIssueMemory(repo, uuid, { ...(await state.issueMemory(repo, uuid)), ...fields }) };
+    this.memory = options.memory ?? { write: async (repo, uuid, fields) => state.mergeIssueMemory(repo, uuid, fields) };
   }
 
   /**
@@ -218,7 +224,9 @@ export class Outbox {
             const memory = await state.issueMemory(session.repo, issue.id);
             // A resumed apply lost the comment's time, and the flag's start comes just before it.
             const at = commentAt ?? memory.flag?.since ?? this.options.clock().toISOString();
-            await this.memory.write(session.repo, issue.id, { pause: { answers: [...pauseAnswers], comment_at: at, replies: [] } });
+            // A reply posted after the comment, before the move landed, counts too.
+            const replies = repliesAfter(await tracker.issue(ref), at);
+            await this.memory.write(session.repo, issue.id, { pause: { answers: [...pauseAnswers], comment_at: at, replies } });
             return null;
           },
         ],
@@ -230,7 +238,11 @@ export class Outbox {
     let reason: string | null = null;
     if (hits.length > 0) {
       // A hit pauses the issue with the runner's own text, and posts, uploads, and files nothing from the session.
-      const paused = await runnerComment(secretScanPause(hits), {}, { version: this.options.version, statuses: repo.statuses });
+      const paused = await runnerComment(secretScanPause(hits), options.facts ?? { session: session.session }, {
+        version: this.options.version,
+        statuses: repo.statuses,
+        secrets: { scan: this.options.secrets, repo: session.repo },
+      });
       const toPaused: Step = [
         "move",
         async () => {
@@ -253,8 +265,10 @@ export class Outbox {
           "writeBrief",
           async (applied) => {
             const memory = await state.issueMemory(session.repo, issue.id);
-            await tracker.writeBrief(ref, embedImages(brief, applied.uploads), { runnerWroteBrief: memory.brief !== null });
-            await this.memory.write(session.repo, issue.id, { brief });
+            const embedded = embedImages(brief, applied.uploads);
+            await tracker.writeBrief(ref, embedded, { runnerWroteBrief: memory.brief !== null });
+            // The brief as the description shows it, so the next re-plan tells the maintainer's edits from plan's text.
+            await this.memory.write(session.repo, issue.id, { brief: briefText(embedded) });
             return null;
           },
         ],

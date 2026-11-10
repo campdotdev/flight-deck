@@ -1,7 +1,7 @@
 // The Linear adapter: the Tracker's production adapter, which speaks Linear's GraphQL API behind the interface
 // the in-memory adapter also passes (spec 1, "Tracker (Linear)"). It hides Linear's rules from its callers: the
 // role-to-name map, one filtered query per repo per poll, `+++` folds, top-level comments only, the order of the
-// flag and unsubscribe writes, the brief's report rules, unsigned upload URLs, and the token mints. Where the real
+// flag and unsubscribe writes, the brief's report rules, unsigned upload URLs in everything it writes, and the token mints. Where the real
 // API's behavior isn't documented, a comment says "the contract suite pins" it: FLD-116 runs this adapter against
 // real Linear and settles each one.
 import { ROLES, type Role } from "../../record/index.ts";
@@ -154,7 +154,7 @@ export class LinearTracker implements Tracker {
     }
     // Always top-level: no `parentId`, so the comment never lands in a synced thread (ADR 0008).
     const answer = await this.query<{ commentCreate: { success: boolean; comment: { id: string; createdAt: string } | null } }>(ref.repo.workspace, Q.COMMENT, {
-      input: { issueId: state.id, body: plusFolds(body) },
+      input: { issueId: state.id, body: unsigned(plusFolds(body)) },
     });
     const posted = answer.commentCreate;
     if (!posted.success || posted.comment === null) throw new TrackerRefused(`Linear didn't create the comment on ${state.identifier}`);
@@ -180,7 +180,7 @@ export class LinearTracker implements Tracker {
 
   async writeBrief(ref: IssueRef, brief: string, options: WriteBriefOptions): Promise<void> {
     const answer = await this.query<{ issue: { id: string; description: string | null } }>(ref.repo.workspace, Q.DESCRIPTION, { id: ref.id });
-    const description = briefDescription(brief, answer.issue.description ?? "", options.runnerWroteBrief);
+    const description = unsigned(briefDescription(brief, answer.issue.description ?? "", options.runnerWroteBrief));
     await this.update({ ...ref, id: answer.issue.id }, { description });
   }
 
@@ -202,7 +202,7 @@ export class LinearTracker implements Tracker {
     const team = await this.team(draft.repo);
     const stateId = await this.stateId(draft.repo, role);
     const answer = await this.query<{ issueCreate: { success: boolean; issue: { id: string; identifier: string; url: string } | null } }>(draft.repo.workspace, Q.CREATE, {
-      input: { teamId: team.id, stateId, title: draft.title, description: draft.description },
+      input: { teamId: team.id, stateId, title: unsigned(draft.title), description: unsigned(draft.description) },
     });
     const filed = answer.issueCreate.issue;
     if (!answer.issueCreate.success || filed === null) throw new TrackerRefused(`Linear didn't file "${draft.title}"`);

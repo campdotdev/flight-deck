@@ -36,13 +36,13 @@ export async function movedOut(context: MovedOutContext): Promise<void> {
       case "apply_waiting":
         // Before the status move landed, the outbox is discarded (ADR 0007). Once it landed, the stage handed off,
         // and the writes after it keep retrying. A `pause` entry's issue may sit in Paused while the Linear-write
-        // pause's comment waits, and its kept outbox must outlive that, so `ApplyWaiting` settles it (FLD-100).
+        // pause's comment waits, and its kept outbox must outlive that, so `ApplyWaiting` settles it.
         if (entry.apply !== undefined && entry.apply.phase !== "apply") break;
         await context.discard(entry);
         break;
       case "starting":
       case "shutdown":
-        // A restart handles these (FLD-108). A live runner never leaves an entry `starting` between ticks.
+        // A restart handles these. A live runner never leaves an entry `starting` between ticks.
         break;
     }
   }
@@ -65,5 +65,5 @@ export async function stillWorking(tracker: Tracker, repo: TrackerRepo, entry: S
 }
 
 async function drop(state: State, entry: SessionEntry): Promise<void> {
-  await state.writeSessions((await state.sessions()).filter((each) => each.id !== entry.id));
+  await state.dropSession(entry.id);
 }

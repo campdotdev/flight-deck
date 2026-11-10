@@ -5,8 +5,11 @@ import type { RunnerText } from "./frame.ts";
 export type FailedExit =
   /** The session ran past the stage's time limit, in milliseconds. */
   | { kind: "timed_out"; limitMs: number }
-  /** `Outbox.apply` returned `failed` with this rule. */
-  | { kind: "refused"; rule: string }
+  /**
+   * `Outbox.apply` returned `failed` with this rule, or `null` when the secret scan matched the rule's text, which
+   * can quote what the session wrote.
+   */
+  | { kind: "refused"; rule: string | null }
   /** `Workspace.prepare` failed with this message, so no session started. */
   | { kind: "prepare"; message: string }
   /** Any other exit without a handoff. */
@@ -37,6 +40,7 @@ function secondExit(failure: FailedExit): string {
     case "timed_out":
       return `ran past plan's ${limit(failure.limitMs)} limit`;
     case "refused":
+      if (failure.rule === null) return "wrote a handoff Flight Deck refused, and the rule it broke is left out: it matched a secret rule";
       return `wrote a handoff Flight Deck refused, because ${failure.rule.replace(/[.\s]+$/, "")}`;
     case "prepare":
       return "couldn't start, because Flight Deck couldn't prepare its worktree";

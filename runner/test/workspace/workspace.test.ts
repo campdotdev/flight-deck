@@ -73,8 +73,13 @@ describe("the clone", () => {
     await workspace.fetch(registration());
     const gone = { ...registration(), remote: join(world.root, "nowhere.git") };
     const result = await workspace.fetch(gone);
-    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ ok: false, auth: false, last: { branch: "main", head: world.commit } });
     expect(await workspace.head(registration())).toBe(world.commit);
+  });
+
+  test("a failed first fetch has no last fetched commit", async () => {
+    const gone = { ...registration(), name: "campdotdev/never-fetched", remote: join(world.root, "nowhere.git") };
+    expect(await workspace.fetch(gone)).toMatchObject({ ok: false, last: null });
   });
 });
 

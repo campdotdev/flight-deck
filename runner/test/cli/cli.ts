@@ -106,5 +106,5 @@ export function cli(world: World, adapters: Partial<Adapters> = {}, options: Par
 
 /** The runner's socket over the world's Poll, as `flight-deck runner` listens on it. */
 export function listen(world: World): Promise<RunnerSocket> {
-  return listenRunnerSocket({ folders: world.folders, poll: world.poll, clock: () => world.now });
+  return listenRunnerSocket({ folders: world.folders, poll: world.poll, path: world.path, clock: () => world.now });
 }

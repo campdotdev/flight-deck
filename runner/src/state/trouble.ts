@@ -50,6 +50,11 @@ export interface TroubleIssue {
   title: string;
   /** Whether `Tracker.flag` landed. A flag Linear didn't take is tried again at the next poll. */
   flagged: boolean;
+  /**
+   * The cleared or reopened comment Linear didn't take, tried again at each later poll until it lands, with
+   * whether it flags the issue. A newer comment replaces it.
+   */
+  unposted?: { body: string; flag: boolean };
 }
 
 /**
