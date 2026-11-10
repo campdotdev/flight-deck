@@ -201,7 +201,7 @@ export class ApplyWaiting {
         return this.discard(entry, workspace);
       }
     }
-    const result = await outbox.apply(wait.folder, { identity: this.tracker });
+    const result = await outbox.apply(wait.folder, { identity: this.tracker, facts: this.facts(entry) });
     await this.log(now, entry, `outbox ${JSON.stringify(result)}`);
     switch (result.result) {
       case "applied":

@@ -586,7 +586,7 @@ export class Poll {
         workspace,
         sessionFolder,
         facts,
-        apply: () => outbox.apply(sessionFolder, { identity: this.tracker }),
+        apply: () => outbox.apply(sessionFolder, { identity: this.tracker, facts }),
         finish: () => this.finish(entry, workspace),
         fail: (failure) => this.fail(now, repo, entry, failure, facts, workspace),
         pause: (text) => this.runnerPause(now, repo, entry, text, facts, workspace),

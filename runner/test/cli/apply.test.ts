@@ -344,3 +344,14 @@ describe("a hand run's second apply on the same folder", () => {
     expect(world.tracker.writes.length).toBe(before);
   });
 });
+
+describe("a hand run's secret-scan pause", () => {
+  test("lists the hand run's session ID in its Details fold, the one fact a hand run has", async () => {
+    await world.tick();
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    const folder = await handRun(issue, briefWith({ "summary.md": `${KEYED_SUMMARY}\n\nghp_4f8Xq2Lm9Rt7Vb3Nc6Hj1Kp5Wd0Zs8Ya2Ue4` }));
+    expect(await cli(world).run("apply", folder)).toBe(0);
+    const comment = world.tracker.writes.find((write) => write.kind === "comment" && write.issue === issue.identifier) as { body: string };
+    expect(comment.body).toEndWith("+++ Details\n\n- Session: `hnd001`\n\nFlight Deck 0.1.0 · runner\n\n+++");
+  });
+});

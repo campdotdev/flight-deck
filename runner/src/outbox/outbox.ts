@@ -10,7 +10,7 @@ import type { SessionJson } from "../workspace/index.ts";
 import { duplicateLine, followUpFooter, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope, type Envelope } from "./envelope.ts";
 import { contentType, embedImages, nameImages } from "./media.ts";
-import { runnerComment } from "./runner-comments/frame.ts";
+import { runnerComment, type RunnerFacts } from "./runner-comments/frame.ts";
 import { secretScanPause } from "./runner-comments/secret-scan.ts";
 import { SecretScanFailed, type ScanText, type SecretHit, type SecretScan } from "./secret-scan.ts";
 
@@ -31,6 +31,11 @@ export interface ApplyOptions {
   dryRun?: boolean;
   /** Called with each write's name as it lands, or, on a dry run, as it would. */
   onWrite?: (name: string) => void;
+  /**
+   * The runner's facts for the fold of a pause the Outbox posts in the runner's words, the secret scan's. The
+   * session ID from `session.json` by default, which is all a hand run has.
+   */
+  facts?: RunnerFacts;
 }
 
 /** Where the Outbox's writes to issue memory go. The runner writes the file, and a hand run asks the runner. */
@@ -230,7 +235,11 @@ export class Outbox {
     let reason: string | null = null;
     if (hits.length > 0) {
       // A hit pauses the issue with the runner's own text, and posts, uploads, and files nothing from the session.
-      const paused = await runnerComment(secretScanPause(hits), {}, { version: this.options.version, statuses: repo.statuses });
+      const paused = await runnerComment(secretScanPause(hits), options.facts ?? { session: session.session }, {
+        version: this.options.version,
+        statuses: repo.statuses,
+        secrets: { scan: this.options.secrets, repo: session.repo },
+      });
       const toPaused: Step = [
         "move",
         async () => {
