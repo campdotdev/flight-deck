@@ -54,11 +54,17 @@ describe("a sent issue gets a brief", () => {
     world.send(issue);
     world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: SUMMARY, brief: BRIEF }), exit: { kind: "exited", code: 0 } });
 
+    // The poll unsubscribes the maintainer from the sent issue before it takes it.
     await world.tick();
-    expect(world.tracker.writes).toEqual([{ kind: "move", issue: issue.identifier, status: "Planning" }]);
+    expect(world.tracker.writes).toEqual([
+      { kind: "unsubscribe", issue: issue.identifier, user: world.maintainer.id },
+      { kind: "move", issue: issue.identifier, status: "Planning" },
+    ]);
     expect(world.harness.started.map((start) => start.session.issue)).toEqual([issue.identifier]);
     const session = world.harness.started[0]!.session.id;
 
+    // A comment while plan runs subscribes the maintainer again, so the handoff unsubscribes them before its comment.
+    world.reply(issue, "Thanks.");
     await world.tick();
     const description = `${BRIEF}\n\n+++ Report\n\n${REPORT}\n\n+++`;
     const comment = [
@@ -74,7 +80,7 @@ describe("a sent issue gets a brief", () => {
       "",
       "+++",
     ].join("\n");
-    expect(world.tracker.writes.slice(1)).toEqual([
+    expect(world.tracker.writes.slice(2)).toEqual([
       { kind: "description", issue: issue.identifier, description },
       { kind: "unsubscribe", issue: issue.identifier, user: world.maintainer.id },
       { kind: "comment", issue: issue.identifier, body: comment },
@@ -119,7 +125,7 @@ describe("issues the maintainer hasn't sent", () => {
     world.issue({ title: "In triage", status: "Triage" });
     world.issue({ title: "In the backlog", status: "Backlog" });
     world.issue({ title: "Already done", status: "Done" });
-    world.issue({ title: "Being built by hand", status: "Building" });
+    world.issue({ title: "In review", status: "In Review" });
     await world.tick();
     await world.tick();
     expect(world.tracker.writes).toEqual([]);
@@ -247,7 +253,10 @@ describe("a handoff the Outbox refuses", () => {
     world.harness.script(issue.identifier, { outbox: files(), exit: { kind: "exited", code: 0 } });
     await world.tick();
     await world.tick();
-    expect(world.tracker.writes).toEqual([{ kind: "move", issue: issue.identifier, status: "Planning" }]);
+    expect(world.tracker.writes).toEqual([
+      { kind: "unsubscribe", issue: issue.identifier, user: world.maintainer.id },
+      { kind: "move", issue: issue.identifier, status: "Planning" },
+    ]);
   });
 
   test("an accepted break passes", async () => {
