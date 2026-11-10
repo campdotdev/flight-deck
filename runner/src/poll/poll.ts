@@ -2,20 +2,25 @@
 // registered repo, then starts sessions and publishes `status.json`. Everything it does shows through the
 // Tracker and Harness ports and the state file, so scenarios test it there.
 //
-// This is the tracer bullet's poll: fetch, snapshot, and starts. Later tickets add the team check, moved-out
-// issues, answers, flags, subscriptions, stale takes, trouble, usage, holds, retries, and the start order.
+// Each kind of exit has its handler in `exits/`, and each comment the runner writes on its own has its text in
+// `../outbox/runner-comments/`. Later tickets add the team check, moved-out issues, stale takes, trouble,
+// usage, holds, and the start order.
 import { basename } from "node:path";
 import type { Folders } from "../folders/index.ts";
 import { paths, sessionParts } from "../folders/index.ts";
-import { buildLaunch, type Auth, type Exit, type Harness, type HarnessSession, type Launch } from "../harness/index.ts";
+import { buildLaunch, type Auth, type Exit, type ExitKind, type Harness, type HarnessSession, type Launch } from "../harness/index.ts";
 import { readConfig, writeEtc, type Config, type Registration } from "../install/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
-import { durationMs, readRecord, type RecordResult, type RepoRecord, type Role } from "../record/index.ts";
+import { failedTwice, type FailedExit } from "../outbox/runner-comments/failed-twice.ts";
+import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from "../outbox/runner-comments/index.ts";
+import { durationMs, readRecord, type RecordResult, type RepoRecord } from "../record/index.ts";
 import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
 import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult, type RefreshJob } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
+import { EXITS, type ExitContext } from "./exits/index.ts";
+import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
 
 export interface PollOptions {
   folders: Folders;
@@ -27,9 +32,6 @@ export interface PollOptions {
   tracker: Tracker;
   harness: Harness;
 }
-
-/** The working status each stage takes its issue to. */
-const WORKING: Partial<Record<Stage, Role>> = { plan: "planning" };
 
 const RECORD_PATH = ".flight-deck/record.toml";
 
@@ -50,6 +52,8 @@ interface RepoPoll {
   record: RecordResult | null;
   snapshot: Snapshot | null;
   waitingForSpecs: SnapshotIssue[];
+  /** The issues with a runner comment that hadn't landed at the start of this poll. Nothing else happens to them. */
+  blocked: Set<string>;
 }
 
 interface QueuedExit {
@@ -132,29 +136,93 @@ export class Poll {
       },
     });
     for (const { session, exit } of queued) {
-      const sessions = await this.state.sessions();
-      const entry = sessions.find((each) => each.id === session);
+      const entry = (await this.state.sessions()).find((each) => each.id === session);
       if (entry === undefined) continue;
       const registration = config.repos.find((repo) => repo.name === entry.repo);
       const repo = registration === undefined ? null : trackerRepo(config, registration, null);
-      if (repo !== null) await this.tracker.revoke({ id: entry.id, repo });
-
-      if (exit.kind === "exited" && repo !== null) {
-        const issue = await this.tracker.issue({ id: entry.issue_id, repo });
-        if (issue.role === WORKING[entry.stage]) {
-          const result = await outbox.apply(paths.sessionFolder(this.folders, entry.id), { identity: this.tracker });
-          await this.state.log(now, `${entry.id} ${entry.issue}: outbox ${JSON.stringify(result)}`);
-        } else {
-          // The issue moved out while the session ran, so its outbox is discarded.
-          await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, outbox discarded`);
-        }
-      } else {
-        await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind}`);
+      if (repo === null) {
+        await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind}, and ${entry.repo} has no Linear sign-in`);
+        await this.finish(entry, workspace);
+        continue;
       }
+      await this.tracker.revoke({ id: entry.id, repo });
 
-      await workspace.dispose({ session: entry.id, worktree: entry.worktree });
-      await this.state.writeSessions((await this.state.sessions()).filter((each) => each.id !== entry.id));
+      const sessionFolder = paths.sessionFolder(this.folders, entry.id);
+      const { transcript, claudeCodeVersion: _, error, ...kind } = exit;
+      const facts: RunnerFacts = { exit: kind as ExitKind, session: entry.id, attempt: entry.attempt, transcript };
+      if (error !== undefined) facts.error = error;
+      const context: ExitContext = {
+        now,
+        entry,
+        exit,
+        repo,
+        tracker: this.tracker,
+        state: this.state,
+        workspace,
+        sessionFolder,
+        facts,
+        apply: () => outbox.apply(sessionFolder, { identity: this.tracker }),
+        finish: () => this.finish(entry, workspace),
+        fail: (failure) => this.fail(now, repo, entry, failure, facts, workspace),
+        pause: (text) => this.runnerPause(now, repo, entry, text, facts, workspace),
+        log: (message) => this.state.log(now, `${entry.id} ${entry.issue}: ${message}`),
+      };
+      await EXITS[exit.kind](context);
     }
+  }
+
+  /** The session is over: its workspace goes, and so does its entry. */
+  private async finish(entry: SessionEntry, workspace: Workspace): Promise<void> {
+    await workspace.dispose({ session: entry.id, worktree: entry.worktree });
+    await this.dropEntry(entry.id);
+  }
+
+  /**
+   * A failed session (spec 1, "Exits"): the session exited without a handoff, the Outbox refused its handoff,
+   * `prepare` failed, or it timed out. The first failure restarts the stage once, in place: the issue stays in
+   * its working status and the entry waits as `retry_waiting` for a free place. A second failure pauses the
+   * issue with the second failure's text (ADRs 0002 and 0019).
+   */
+  private async fail(now: Date, repo: TrackerRepo, entry: SessionEntry, failure: FailedExit, facts: RunnerFacts, workspace: Workspace): Promise<void> {
+    if (entry.attempt < MAX_ATTEMPTS) {
+      await workspace.dispose({ session: entry.id, worktree: entry.worktree });
+      const waiting: SessionEntry = {
+        ...entry,
+        attempt: entry.attempt + 1,
+        pid: null,
+        pid_started_at: null,
+        claude_uuid: null,
+        started_at: null,
+        deadline: null,
+        state: "retry_waiting",
+      };
+      await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? waiting : each)));
+      await this.state.log(now, `${entry.id} ${entry.issue}: failed (${failure.kind}), attempt ${waiting.attempt} waits for a place`);
+      return;
+    }
+    await this.state.log(now, `${entry.id} ${entry.issue}: failed (${failure.kind}) on attempt ${entry.attempt}`);
+    await this.runnerPause(now, repo, entry, failedTwice(failure), facts, workspace);
+  }
+
+  /**
+   * Ends the session and pauses its issue with a runner comment. When the issue no longer sits in the stage's
+   * working status, the maintainer moved it, and nothing is posted.
+   */
+  private async runnerPause(now: Date, repo: TrackerRepo, entry: SessionEntry, text: RunnerText, facts: RunnerFacts, workspace: Workspace): Promise<void> {
+    await this.finish(entry, workspace);
+    const issue = await this.tracker.issue({ id: entry.issue_id, repo });
+    const working = WORKING[entry.stage];
+    if (working === undefined || issue.role !== working) {
+      await this.state.log(now, `${entry.id} ${entry.issue}: left ${working}, no pause posted`);
+      return;
+    }
+    const comment = runnerComment(text, facts, { version: this.version, statuses: repo.statuses });
+    const result = await this.comments(now).post({ ...issue, role: working }, comment);
+    await this.state.log(now, `${entry.id} ${entry.issue}: runner pause ${result}: ${comment.statusLine}`);
+  }
+
+  private comments(now: Date): RunnerComments {
+    return new RunnerComments({ tracker: this.tracker, state: this.state, clock: () => now });
   }
 
   // Each repo.
@@ -175,9 +243,13 @@ export class Poll {
 
     // 3. Snapshot, with the comments since the repo's cursor.
     const snapshot = repo === null ? null : await this.tracker.snapshot(repo, { since: await this.state.cursor(registration.name) });
+    const blocked = new Set<string>();
     if (repo !== null && snapshot !== null) {
+      // A runner comment Linear didn't take yet goes first, and nothing else happens to its issue this poll.
+      for (const issue of await this.pendingComments(now, repo, snapshot)) blocked.add(issue);
       // 5. Answers. FLD-104 adds step 4, moved out.
-      const handled = await this.answers(now, repo, snapshot);
+      const handled = await this.answers(now, repo, snapshot, blocked);
+      for (const issue of blocked) handled.add(issue);
       // The cursor moves only once every comment it passes is in issue memory.
       const latest = snapshot.comments.at(-1)?.created_at;
       if (latest !== undefined) await this.state.writeCursor(registration.name, latest);
@@ -186,7 +258,23 @@ export class Poll {
       await this.subscriptions(repo, snapshot, handled);
     }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
-    return { registration, tracker: repo, fetch, record, snapshot, waitingForSpecs };
+    return { registration, tracker: repo, fetch, record, snapshot, waitingForSpecs, blocked };
+  }
+
+  /**
+   * Tries each runner comment Linear didn't take at an earlier poll again (spec 1, "The runner's own comments").
+   * Returns every issue that had one, landed or not, so nothing else happens to it this poll.
+   */
+  private async pendingComments(now: Date, repo: TrackerRepo, snapshot: Snapshot): Promise<string[]> {
+    const pending: string[] = [];
+    const comments = this.comments(now);
+    for (const { uuid, memory } of await this.state.issueMemories(repo.name)) {
+      if (memory.pending === null) continue;
+      pending.push(uuid);
+      const result = await comments.retry(repo, uuid, snapshot.issues.find((issue) => issue.id === uuid) ?? null);
+      await this.state.log(now, `${memory.pending.issue}: runner comment ${result}`);
+    }
+    return pending;
   }
 
   // The dependency cache.
@@ -248,10 +336,10 @@ export class Poll {
    * snapshot that returned it saw it, then moves the issue when the oldest reply that names an answer does,
    * and clears the flag (ADR 0019). Any other reply leaves the issue paused and flagged.
    */
-  private async answers(now: Date, repo: TrackerRepo, snapshot: Snapshot): Promise<Set<string>> {
+  private async answers(now: Date, repo: TrackerRepo, snapshot: Snapshot, blocked: Set<string>): Promise<Set<string>> {
     const handled = new Set<string>();
     for (const issue of snapshot.issues) {
-      if (issue.role !== "paused") continue;
+      if (issue.role !== "paused" || blocked.has(issue.id)) continue;
       const memory = await this.state.issueMemory(repo.name, issue.id);
       const pause = memory.pause;
       if (pause === null) continue;
@@ -289,7 +377,7 @@ export class Poll {
   private async flags(now: Date, repo: TrackerRepo, snapshot: Snapshot, handled: Set<string>): Promise<void> {
     const inFlight = new Set(snapshot.issues.filter((issue) => FACTORY_ROLES.includes(issue.role)).map((issue) => issue.id));
     for (const { uuid, memory } of await this.state.issueMemories(repo.name)) {
-      if ((memory.flag === null && memory.pause === null) || inFlight.has(uuid)) continue;
+      if ((memory.flag === null && memory.pause === null) || inFlight.has(uuid) || handled.has(uuid)) continue;
       await this.state.writeIssueMemory(repo.name, uuid, { ...memory, flag: null, pause: null });
       await this.state.log(now, `${memory.flag?.issue ?? uuid}: left flight, flag and pause forgotten`);
     }
@@ -327,17 +415,34 @@ export class Poll {
   private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace): Promise<void> {
     const sessions = await this.state.sessions();
     const busy = new Set(sessions.map((entry) => entry.issue_id));
+    let free = config.concurrency_cap - sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
+
+    // A retry waiting for a free place starts before any new take.
+    for (const entry of sessions.filter((each) => each.state === "retry_waiting")) {
+      if (free <= 0) break;
+      const poll = repos.find((each) => each.registration.name === entry.repo);
+      if (poll === undefined || !poll.fetch.ok || poll.record?.ok !== true || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
+      const issue = poll.snapshot.issues.find((each) => each.id === entry.issue_id);
+      if (issue === undefined || issue.role !== WORKING[entry.stage]) {
+        // The issue left its working status while the retry waited. FLD-104's step 4 handles a move out in full.
+        await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, retry dropped`);
+        await this.dropEntry(entry.id);
+        continue;
+      }
+      free--;
+      await this.start(now, config, poll, issue, workspace, entry);
+    }
+
     const candidates: { poll: RepoPoll; issue: SnapshotIssue }[] = [];
     for (const poll of repos) {
       if (!poll.fetch.ok || poll.record?.ok !== true || poll.snapshot === null) continue;
       // Nothing starts for a repo while its cache refresh runs.
       if (this.refreshes.has(poll.registration.name)) continue;
       for (const issue of poll.snapshot.issues) {
-        if (issue.role === "ready_to_plan" && !hasSpec(issue) && !busy.has(issue.id)) candidates.push({ poll, issue });
+        if (issue.role === "ready_to_plan" && !hasSpec(issue) && !busy.has(issue.id) && !poll.blocked.has(issue.id)) candidates.push({ poll, issue });
       }
     }
     candidates.sort((a, b) => priorityRank(a.issue) - priorityRank(b.issue) || a.issue.created_at.localeCompare(b.issue.created_at));
-    let free = config.concurrency_cap - sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
     for (const { poll, issue } of candidates) {
       if (free <= 0) break;
       free--;
@@ -345,7 +450,11 @@ export class Poll {
     }
   }
 
-  private async start(now: Date, config: Config, poll: RepoPoll, issue: SnapshotIssue, workspace: Workspace): Promise<void> {
+  /**
+   * Starts a session: a take, or, with `retry`, the fresh session that takes a `retry_waiting` entry's place.
+   * A retry restarts in place, so the issue already sits in the working status and no take happens.
+   */
+  private async start(now: Date, config: Config, poll: RepoPoll, issue: SnapshotIssue, workspace: Workspace, retry?: SessionEntry): Promise<void> {
     if (!poll.fetch.ok || poll.record?.ok !== true || poll.tracker === null) return;
     const registration = poll.registration;
     const record: RepoRecord = poll.record.record;
@@ -361,7 +470,7 @@ export class Poll {
       title: issue.title,
       stage,
       mode: "issue",
-      attempt: 1,
+      attempt: retry?.attempt ?? 1,
       pid: null,
       pid_started_at: null,
       claude_uuid: null,
@@ -371,13 +480,17 @@ export class Poll {
       state: "starting",
     };
 
-    // 1. The entry first, then the take, so the issue never sits in Planning unseen (ADR 0002).
-    await this.state.writeSessions([...(await this.state.sessions()), entry]);
-    const taken = await this.lifecycle.move(issue, "planning", "take");
-    if (!taken.ok) {
-      await this.state.log(now, `${id} ${issue.identifier}: take refused: ${taken.violation}`);
-      await this.dropEntry(id);
-      return;
+    if (retry === undefined) {
+      // 1. The entry first, then the take, so the issue never sits in Planning unseen (ADR 0002).
+      await this.state.writeSessions([...(await this.state.sessions()), entry]);
+      const taken = await this.lifecycle.move(issue, "planning", "take");
+      if (!taken.ok) {
+        await this.state.log(now, `${id} ${issue.identifier}: take refused: ${taken.violation}`);
+        await this.dropEntry(id);
+        return;
+      }
+    } else {
+      await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
     }
 
     // 2. The record at the commit the session starts from: the default branch's tip at this poll.
@@ -387,7 +500,7 @@ export class Poll {
     const full = await this.tracker.issue(issue);
     const memory = await this.state.issueMemory(registration.name, issue.id);
 
-    // 3. Prepare, then the launch. FLD-98 counts a failure of either as a failed session.
+    // 3. Prepare, then the launch. A failure of either is a failed session.
     let prepared;
     let launch: Launch;
     try {
@@ -428,9 +541,9 @@ export class Poll {
         versionFolder: this.versionFolder,
       });
     } catch (error) {
-      await this.state.log(now, `${id} ${issue.identifier}: prepare failed: ${(error as Error).message}`);
-      await workspace.dispose({ session: id, worktree });
-      await this.dropEntry(id);
+      const message = (error as Error).message;
+      await this.state.log(now, `${id} ${issue.identifier}: prepare failed: ${message}`);
+      await this.fail(now, repo, entry, { kind: "prepare", message }, { session: id, attempt: entry.attempt, prepare: message }, workspace);
       return;
     }
 

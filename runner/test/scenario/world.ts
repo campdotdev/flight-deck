@@ -71,6 +71,13 @@ export const outbox = {
       "pause.md": input.pause,
     };
   },
+  /** A duplicate of the open issue `of` names. */
+  duplicate(input: { summary: string; of: string; version?: string }): Record<string, string> {
+    return {
+      "outcome.json": JSON.stringify({ version: input.version ?? VERSION, stage: "plan", move: "duplicate", of: input.of }),
+      "summary.md": input.summary,
+    };
+  },
 };
 
 const VERSION = "0.1.0";

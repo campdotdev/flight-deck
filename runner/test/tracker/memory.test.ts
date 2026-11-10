@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { Role } from "../../src/record/index.ts";
-import { InMemoryTracker, type IssueRef, type TrackerRepo } from "../../src/tracker/index.ts";
+import { InMemoryTracker, IssueNotFoundError, TrackerUnavailable, unsigned, type IssueRef, type TrackerRepo } from "../../src/tracker/index.ts";
 
 const STATUSES: Record<Role, string> = {
   intake: "Triage",
@@ -247,10 +247,101 @@ describe("writeBrief", () => {
   });
 });
 
+describe("issue", () => {
+  test("returns the team, the status type, and a status with no role as a null role", async () => {
+    tracker.addTeam({ key: "OTH", name: "Other", statuses: [{ name: "Todo", type: "unstarted" }] });
+    const other = tracker.addIssue({ team: "OTH", title: "Elsewhere", status: "Todo", creator: "maintainer" });
+    const read = await tracker.issue({ id: other.identifier, repo });
+    expect([read.team, read.status, read.status_type, read.role]).toEqual(["OTH", "Todo", "unstarted", null]);
+  });
+
+  test("an unknown issue throws IssueNotFoundError", async () => {
+    await expect(tracker.issue({ id: "SHA-99", repo })).rejects.toBeInstanceOf(IssueNotFoundError);
+  });
+
+  test("a synced issue returns its sync attachment, and each comment says whether the sync brought it", async () => {
+    const { id } = tracker.addIssue({ team: "SHA", title: "From GitHub", status: "Planning", creator: "maintainer", synced: true });
+    tracker.addComment(id, { author: "github-user", body: "Me too.", synced: true });
+    const read = await tracker.issue({ id, repo });
+    expect(read.synced).toBe(true);
+    expect(read.sync_attachment).toMatch(/^attachment-/);
+    expect(read.comments.map((comment) => comment.synced)).toEqual([true]);
+    const plain = await tracker.issue(issue());
+    expect([plain.synced, plain.sync_attachment]).toEqual([false, null]);
+  });
+});
+
+describe("detach", () => {
+  test("turns off the sync and keeps the attachment", async () => {
+    const stored = tracker.addIssue({ team: "SHA", title: "From GitHub", status: "Planning", creator: "maintainer", synced: true });
+    const read = await tracker.issue({ id: stored.id, repo });
+    await tracker.detach({ id: stored.id, repo, sync_attachment: read.sync_attachment! });
+    expect((await tracker.issue({ id: stored.id, repo })).synced).toBe(false);
+    expect(tracker.stored(stored.id).sync_attachment).toBe(read.sync_attachment);
+    expect(tracker.writes).toEqual([{ kind: "detach", issue: stored.identifier, attachment: read.sync_attachment! }]);
+  });
+
+  test("refuses an issue that isn't synced", async () => {
+    const one = issue();
+    await expect(tracker.detach({ ...one, sync_attachment: "attachment-1" })).rejects.toThrow("isn't synced");
+  });
+});
+
+describe("upload", () => {
+  test("returns the asset URL without its ?signature= query", async () => {
+    const url = await tracker.upload({ name: "before.png", contentType: "image/png", data: new Uint8Array([1, 2, 3]) });
+    expect(url).toMatch(/^https:\/\/uploads\.linear\.app\/[^?]+\/before\.png$/);
+    expect(tracker.writes).toEqual([{ kind: "upload", name: "before.png", url }]);
+    expect(tracker.uploads.get(url)).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  test("unsigned strips ?signature= wherever it is in the query", () => {
+    expect(unsigned("https://uploads.linear.app/a/b.png?signature=x")).toBe("https://uploads.linear.app/a/b.png");
+    expect(unsigned("https://uploads.linear.app/a/b.png?w=2&signature=x&h=3")).toBe("https://uploads.linear.app/a/b.png?w=2&h=3");
+    expect(unsigned("![x](https://uploads.linear.app/a/b.png?signature=x)")).toBe("![x](https://uploads.linear.app/a/b.png)");
+  });
+});
+
+describe("file", () => {
+  test("files the draft in the role's status as the actor, with no label, priority, assignee, or delegate", async () => {
+    const filed = await tracker.file({ repo, title: "Flaky test", description: "It fails one run in ten." }, "intake");
+    const read = await tracker.issue({ id: filed.id, repo });
+    expect([read.identifier, read.title, read.description, read.status, read.role]).toEqual([filed.identifier, "Flaky test", "It fails one run in ten.", "Triage", "intake"]);
+    expect([read.creator, read.assignee, read.priority, read.subscribers]).toEqual(["app", null, 0, ["app"]]);
+    expect(filed.url).toBe(`https://linear.app/campdotdev/issue/${filed.identifier}`);
+    expect(tracker.writes).toEqual([{ kind: "file", issue: filed.identifier, title: "Flaky test", description: "It fails one run in ten.", status: "Triage" }]);
+  });
+});
+
+describe("relate", () => {
+  test("relates two issues", async () => {
+    const one = issue();
+    const two = issue();
+    await tracker.relate(one, two, "related");
+    expect(tracker.stored(one.id).relations).toEqual([{ kind: "related", issue: two.id }]);
+    expect(tracker.writes).toEqual([{ kind: "relate", issue: one.identifier, other: two.identifier, relation: "related" }]);
+  });
+});
+
 describe("Reader tokens", () => {
   test("a session's token is minted and revoked", async () => {
     const token = await tracker.sessionToken({ id: "abc123", repo });
     await tracker.revoke({ id: "abc123", repo });
     expect(tracker.tokens).toEqual([{ session: "abc123", token, revoked: true }]);
+  });
+});
+
+describe("refuse", () => {
+  test("makes the next calls of a write fail as Linear being unavailable, records nothing for them, then lets one land", async () => {
+    const issue = tracker.addIssue({ team: "SHA", title: "x", status: "Planning", creator: "maintainer" });
+    tracker.refuse("post", { times: 2 });
+    for (let i = 0; i < 2; i++) {
+      const error = await tracker.post({ id: issue.id, repo }, "hi", { flag: true }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(TrackerUnavailable);
+      expect((error as TrackerUnavailable).reason).toBe("server");
+    }
+    expect(tracker.writes).toEqual([]);
+    await tracker.post({ id: issue.id, repo }, "hi", { flag: true });
+    expect(tracker.writes.map((write) => write.kind)).toEqual(["assign", "comment"]);
   });
 });

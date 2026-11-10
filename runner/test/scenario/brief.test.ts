@@ -178,10 +178,10 @@ describe("session.json", () => {
 });
 
 describe("status.json", () => {
-  test("shows the running session while it runs, and the list is empty after its exit", async () => {
+  test("shows the running session while it runs, and the list is empty after its handoff", async () => {
     const issue = world.issue({ title: "Save button is blue", description: REPORT });
     world.send(issue);
-    world.harness.script(issue.identifier, {});
+    world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: SUMMARY, brief: BRIEF }) });
     await world.tick();
     const startedAt = world.now.toISOString();
     const id = world.harness.started[0]!.session.id;
