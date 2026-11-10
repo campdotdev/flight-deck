@@ -35,7 +35,6 @@ import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
 import { staleTakes } from "./stale-takes.ts";
 import { Trouble } from "./trouble/trouble.ts";
 import { MIN_VERSION, tooOld } from "./trouble/version.ts";
-import { notify } from "./trouble/notify.ts";
 import { Trials, type TrialEvents, type TrialResult } from "./trial.ts";
 import { LoginWatch } from "./login.ts";
 import { Usage } from "./usage.ts";
@@ -171,10 +170,6 @@ export class Poll {
     return this.trials.request(events);
   }
 
-  /** Posts a macOS notification the way trouble does, such as install's "Flight Deck can notify you." */
-  notify(text: string): Promise<{ ok: true } | { ok: false; error: string }> {
-    return notify(text, { path: this.path });
-  }
 
   /**
    * The Reader token of a session in the list, for its `headersHelper` (spec 1, "Session credentials", ADR

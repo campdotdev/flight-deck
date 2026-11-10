@@ -320,6 +320,11 @@ export class World {
     await rm(this.root, { recursive: true, force: true });
   }
 
+  /** The runner's `PATH`: the stub `osascript` first. */
+  get path(): string {
+    return `${join(this.root, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`;
+  }
+
   private newPoll(): Poll {
     return new Poll({
       folders: this.folders,
@@ -327,7 +332,7 @@ export class World {
       versionFolder: this.versionFolder,
       tracker: this.tracker,
       harness: this.harness,
-      path: `${join(this.root, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      path: this.path,
     });
   }
 }

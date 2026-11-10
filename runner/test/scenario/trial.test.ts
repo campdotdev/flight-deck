@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { TEST_NOTIFICATION, TRIAL_STOPPED_BY, trialStoppedBy, type TrialResult } from "../../src/poll/index.ts";
+import { TRIAL_STOPPED_BY, trialStoppedBy, type TrialResult } from "../../src/poll/index.ts";
 import type { HoldCause } from "../../src/state/index.ts";
 import { World } from "./world.ts";
 
@@ -263,13 +263,6 @@ describe("the cap", () => {
     expect(result).toMatchObject({ result: "passed" });
     expect(world.harness.started.map((each) => each.session.stage)).toEqual(["plan", "trial", "plan"]);
     expect(world.tracker.stored(queued.id).status).toBe("Ready to plan");
-  });
-});
-
-describe("the test notification", () => {
-  test("is posted the way trouble notifications are", async () => {
-    expect(await world.poll.notify(TEST_NOTIFICATION)).toEqual({ ok: true });
-    expect(await world.notifications()).toEqual(["Flight Deck can notify you."]);
   });
 });
 
