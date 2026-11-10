@@ -10,17 +10,26 @@ export type FailedExit =
   /** `Workspace.prepare` failed with this message, so no session started. */
   | { kind: "prepare"; message: string }
   /** Any other exit without a handoff. */
-  | { kind: "error" };
+  | { kind: "error" }
+  /** The runner stopped while the session ran, and found it ended or killed it at its next start. */
+  | { kind: "cut_off"; transcript: boolean };
 
 /** The second failure's text. Its `retry` restores the stage's retry, so the next take has attempt 1. */
 export function failedTwice(failure: FailedExit): RunnerText {
-  const where = failure.kind === "prepare" ? "Flight Deck's message is under Details." : "Its transcript path is under Details.";
   return {
     statusLine: "🟡 Needs your help: plan failed twice",
-    sentences: `Plan ran twice, and neither session handed off. The second one ${secondExit(failure)}. ${where}`,
+    sentences: `Plan ran twice, and neither session handed off. The second one ${secondExit(failure)}.${where(failure)}`,
     flag: "pause",
     answers: [{ word: "retry", does: "plan runs again, with a fresh retry if it fails", move: "ready_to_plan" }],
   };
+}
+
+/** Where the Details fold points the maintainer, if anywhere. */
+function where(failure: FailedExit): string {
+  if (failure.kind === "prepare") return " Flight Deck's message is under Details.";
+  // A session cut off before it started has no transcript.
+  if (failure.kind === "cut_off" && !failure.transcript) return "";
+  return " Its transcript path is under Details.";
 }
 
 function secondExit(failure: FailedExit): string {
@@ -33,6 +42,8 @@ function secondExit(failure: FailedExit): string {
       return "couldn't start, because Flight Deck couldn't prepare its worktree";
     case "error":
       return "stopped with an error";
+    case "cut_off":
+      return "was still running when Flight Deck's runner stopped";
   }
 }
 
