@@ -23,7 +23,7 @@ import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/
 import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
 import { ISSUE_MEMORY_FIELDS, readJson, State, type IssueMemory, type OpenPause, type PortPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
 import { FACTORY_ROLES, isUnavailable, MintFailed, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
-import { portInUse, Workspace, type FetchResult, type RefreshJob } from "../workspace/index.ts";
+import { portInUse, Workspace, type Fetched, type FetchResult, type RefreshJob } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
 import { ApplyWaiting, waitingEntry as applyWaitingEntry } from "./apply-waiting.ts";
 import { blockerTest } from "./blockers.ts";
@@ -69,6 +69,8 @@ interface RepoPoll {
   registration: Registration;
   tracker: TrackerRepo | null;
   fetch: FetchResult;
+  /** The default branch and the tip sessions start from: this poll's fetch, or the last one that worked. */
+  tip: Fetched | null;
   /** The record on the default branch, or `null` when the branch holds none. */
   record: RecordResult | null;
   snapshot: Snapshot | null;
@@ -668,25 +670,28 @@ export class Poll {
     const fetch = await workspace.fetch(registration);
     if (!fetch.ok) await this.state.log(now, `${registration.name}: fetch failed: ${fetch.error}`);
 
+    // A failed fetch keeps the last fetched commit, and sessions go on starting from it.
+    const tip: Fetched | null = fetch.ok ? { branch: fetch.branch, head: fetch.head } : fetch.last;
+
     // 2. Check the team. The record on the default branch names it, or else the registration's copy does.
     // State keeps the last valid record, for the stale-take limits.
     let record: RecordResult | null = null;
-    if (fetch.ok) {
-      record = await this.recordAt(workspace, registration, fetch.head);
-      if (record?.ok === true && (await this.state.lastRecord(registration.name))?.commit !== fetch.head) {
-        await this.state.writeLastRecord(registration.name, { commit: fetch.head, read_at: now.toISOString(), record: record.record });
+    if (tip !== null) {
+      record = await this.recordAt(workspace, registration, tip.head);
+      if (record?.ok === true && (await this.state.lastRecord(registration.name))?.commit !== tip.head) {
+        await this.state.writeLastRecord(registration.name, { commit: tip.head, read_at: now.toISOString(), record: record.record });
       }
     }
     // The cache refresh needs no Linear call, so it starts even when Linear doesn't take the poll.
-    if (fetch.ok && record?.ok === true) await this.refreshIfDue(now, registration, record.record, fetch.head, workspace);
+    if (tip !== null && record?.ok === true) await this.refreshIfDue(now, registration, record.record, tip.head, workspace);
     // A Linear call this repo's poll needs that Linear didn't take, such as `RATELIMITED`, skips the repo until
     // the next poll, and the other repos poll as usual (ADR 0002).
     try {
-      return await this.pollTracker(now, config, credentials, registration, workspace, trouble, fetch, record);
+      return await this.pollTracker(now, config, credentials, registration, workspace, trouble, fetch, tip, record);
     } catch (error) {
       if (!isUnavailable(error)) throw error;
       await this.state.log(now, `${registration.name}: Linear didn't take the poll (${error.reason}), so the repo waits for the next poll: ${error.message}`);
-      return { registration, tracker: null, fetch, record, snapshot: null, waitingForSpecs: [], waitingForBlockers: [], waitingForPort: null, blocked: new Set(), staleTakes: [] };
+      return { registration, tracker: null, fetch, tip, record, snapshot: null, waitingForSpecs: [], waitingForBlockers: [], waitingForPort: null, blocked: new Set(), staleTakes: [] };
     }
   }
 
@@ -699,6 +704,7 @@ export class Poll {
     workspace: Workspace,
     trouble: Trouble,
     fetch: FetchResult,
+    tip: Fetched | null,
     record: RecordResult | null,
   ): Promise<RepoPoll> {
     const repo = await this.checkTeam(now, config, credentials, registration, record?.ok === true ? record.record : null, trouble);
@@ -745,7 +751,7 @@ export class Poll {
       });
     }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
-    return { registration, tracker: repo?.repo ?? null, fetch, record, snapshot, waitingForSpecs, waitingForBlockers: [], waitingForPort: null, blocked, staleTakes: stale };
+    return { registration, tracker: repo?.repo ?? null, fetch, tip, record, snapshot, waitingForSpecs, waitingForBlockers: [], waitingForPort: null, blocked, staleTakes: stale };
   }
 
   /**
@@ -1007,7 +1013,7 @@ export class Poll {
     for (const entry of sessions.filter((each) => each.state === "retry_waiting")) {
       if (!(await room())) break;
       const poll = startable.find((each) => each.registration.name === entry.repo);
-      if (poll === undefined || !poll.fetch.ok || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
+      if (poll === undefined || poll.tip === null || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
       // Nothing starts for a repo while its cache refresh runs, a retry included.
       if (this.refreshes.has(entry.repo)) continue;
       if (poll.tracker === null || !(await this.tokens.canStart(poll.tracker.workspace))) continue;
@@ -1028,7 +1034,7 @@ export class Poll {
 
     const candidates: { poll: RepoPoll; issue: SnapshotIssue }[] = [];
     for (const poll of startable) {
-      if (!poll.fetch.ok || poll.snapshot === null) continue;
+      if (poll.tip === null || poll.snapshot === null) continue;
       // A workspace whose Reader app can't mint starts nothing (ADR 0005).
       if (poll.tracker === null || !(await this.tokens.canStart(poll.tracker.workspace))) continue;
       for (const issue of queued(poll, busy)) {
@@ -1122,7 +1128,7 @@ export class Poll {
     trouble: Trouble,
     retry?: SessionEntry,
   ): Promise<void> {
-    if (!poll.fetch.ok || poll.tracker === null) return;
+    if (poll.tip === null || poll.tracker === null) return;
     const registration = poll.registration;
     const repo = poll.tracker;
     const stage: Stage = "plan";
@@ -1162,12 +1168,12 @@ export class Poll {
       await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
     }
 
-    // 2. The record at the commit the session starts from: the default branch's tip at this poll. A retry reads
-    // it again at its own commit. A missing, invalid, or too-new record pauses the issue and uses no retry.
-    const commit = poll.fetch.head;
+    // 2. The record at the commit the session starts from: the default branch's tip at this poll, or the last
+    // fetched commit when this poll's fetch failed. A retry reads it again at its own commit. A missing, invalid, or too-new record pauses the issue and uses no retry.
+    const { branch, head: commit } = poll.tip;
     const read = await this.recordAt(workspace, registration, commit);
     if (read?.ok !== true) {
-      await this.runnerPause(now, repo, entry, recordPause(read, poll.fetch.branch, this.version), {}, workspace);
+      await this.runnerPause(now, repo, entry, recordPause(read, branch, this.version), {}, workspace);
       return;
     }
     const record: RepoRecord = read.record;
@@ -1187,8 +1193,8 @@ export class Poll {
         record,
         issue: issue.identifier,
         team: record.tracker.team,
-        branch: poll.fetch.branch,
-        base: poll.fetch.branch,
+        branch,
+        base: branch,
         commit,
         deadline,
         attempt: entry.attempt,

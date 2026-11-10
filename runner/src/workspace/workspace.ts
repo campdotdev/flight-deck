@@ -96,15 +96,21 @@ export interface PreparedWorkspace {
   env: Record<string, string>;
 }
 
-/** A failed fetch says whether git failed to authenticate, which opens the trouble cause `github_token` (ADR 0005). */
-export type FetchResult = { ok: true; branch: string; head: string } | { ok: false; error: string; auth: boolean };
+/** The default branch and its tip, as a fetch left them in the clone. */
+export interface Fetched {
+  branch: string;
+  head: string;
+}
+
+/**
+ * A failed fetch says whether git failed to authenticate, which opens the trouble cause `github_token` (ADR 0005),
+ * and keeps the last fetched commit, or `null` before the first fetch worked (spec 1, "Workspace").
+ */
+export type FetchResult = ({ ok: true } & Fetched) | { ok: false; error: string; auth: boolean; last: Fetched | null };
 
 /** What git prints when a remote refuses its login, over HTTPS or SSH. */
 const AUTH_FAILURE = /Authentication failed|could not read (?:Username|Password)|terminal prompts disabled|Invalid username or (?:password|token)|returned error: 40[13]|Permission denied \(publickey/i;
 
-function fetchFailed(error: string): FetchResult {
-  return { ok: false, error, auth: AUTH_FAILURE.test(error) };
-}
 
 export interface WorkspaceOptions {
   folders: Folders;
@@ -127,6 +133,7 @@ export class Workspace {
    */
   async fetch(repo: Registration): Promise<FetchResult> {
     const clone = paths.clone(this.folders, repo.name);
+    const fetchFailed = async (error: string): Promise<FetchResult> => ({ ok: false, error, auth: AUTH_FAILURE.test(error), last: await this.lastFetched(clone) });
     const symref = await this.git(null, "ls-remote", "--symref", repo.remote, "HEAD");
     if (!symref.ok) return fetchFailed(symref.error);
     const branch = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(symref.out)?.[1];
@@ -141,6 +148,14 @@ export class Workspace {
     if (!fetched.ok) return fetchFailed(fetched.error);
     await this.git(clone, "symbolic-ref", "HEAD", ref);
     return { ok: true, branch, head: await this.head(repo) };
+  }
+
+  /** The branch and tip the clone holds from its last fetch that worked, or `null` when it has none. */
+  private async lastFetched(clone: string): Promise<Fetched | null> {
+    if (!existsSync(join(clone, ".git"))) return null;
+    const branch = await this.git(clone, "symbolic-ref", "--short", "HEAD");
+    const head = await this.git(clone, "rev-parse", "--verify", "-q", "HEAD");
+    return branch.ok && head.ok ? { branch: branch.out.trim(), head: head.out.trim() } : null;
   }
 
   /** The default branch's name, as the last fetch read it. */
