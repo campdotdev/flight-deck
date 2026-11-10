@@ -5,6 +5,7 @@ import type { Harness } from "../harness/index.ts";
 import type { Config } from "../install/index.ts";
 import type { Tracker } from "../tracker/index.ts";
 import type { Prompt } from "./prompt.ts";
+import type { Shell } from "./shell.ts";
 
 /**
  * The production adapters a command builds. The runner gets the Tracker as the Flight Deck app, and
@@ -44,6 +45,8 @@ export interface CommandContext {
   /** The URL Flight Deck's clone of a repo fetches from. `https://github.com/<owner>/<repo>.git` by default. */
   remoteOf?: (repo: string) => string;
   adapters: Adapters;
+  /** The programs install, `login github`, and `update` run: `launchctl`, `gh`, `claude`, and `open`. */
+  shell: Shell;
   /** How long a command waits for the runner's answer before it acts on its own. 10 seconds by default. */
   answerMs?: number;
 }

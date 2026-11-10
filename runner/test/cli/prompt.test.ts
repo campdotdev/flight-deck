@@ -58,4 +58,20 @@ describe("hiddenPrompt", () => {
     expect(await answer).toBe("last");
     await expect(prompt.secret("More")).rejects.toThrow("Canceled.");
   });
+
+  test("ask reads a line the terminal echoes, with raw mode left off", async () => {
+    const { input, written, prompt } = terminal();
+    const answer = prompt.ask("Subscription or API key");
+    input.write("subscription\n");
+    expect(await answer).toBe("subscription");
+    expect(written.join("")).toBe("Subscription or API key: ");
+    expect(input.raw).toEqual([]);
+  });
+
+  test("ask and secret share piped input, one line each", async () => {
+    const { input, prompt } = terminal(false);
+    input.write("api_key\nsk-ant\n");
+    expect(await prompt.ask("Which")).toBe("api_key");
+    expect(await prompt.secret("Key")).toBe("sk-ant");
+  });
 });

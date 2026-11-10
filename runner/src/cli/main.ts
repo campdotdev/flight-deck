@@ -8,6 +8,7 @@ import { State } from "../state/index.ts";
 import { runCommand } from "./commands.ts";
 import { hiddenPrompt } from "./prompt.ts";
 import { PRODUCTION_ADAPTERS, PRODUCTION_RUNNER } from "./production.ts";
+import { MAC_SHELL } from "./shell.ts";
 
 /** The version string the build script stamps with `--define`, such as `0.1.0-dev.20261101T103012Z`. */
 declare const FLIGHT_DECK_VERSION: string | undefined;
@@ -30,6 +31,7 @@ export async function main(argv: string[]): Promise<number> {
     cwd: process.cwd(),
     env: process.env,
     adapters: PRODUCTION_ADAPTERS,
+    shell: MAC_SHELL,
   });
 }
 

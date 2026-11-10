@@ -7,6 +7,7 @@
 import { updateConfig, workspaceKey, writeCredentials } from "../install/index.ts";
 import { isUnavailable, MintFailed, TrackerRefused, type LinearApp, type Viewer } from "../tracker/index.ts";
 import type { CommandContext } from "./context.ts";
+import { loginGithubCommand } from "./login-github.ts";
 import { Canceled } from "./prompt.ts";
 
 const USAGE = "Usage: flight-deck login linear <workspace>, where <workspace> is the URL key in linear.app/<workspace>";
@@ -21,8 +22,9 @@ class LoginFailed extends Error {}
 
 export async function loginCommand(argv: string[], context: CommandContext): Promise<number> {
   const [service, workspace, ...rest] = argv;
+  if (service === "github") return loginGithubCommand(argv.slice(1), context);
   if (service !== "linear") {
-    context.err(service === "github" ? "flight-deck login github comes with flight-deck install." : USAGE);
+    context.err(USAGE);
     return 64;
   }
   if (workspace === undefined || rest.length > 0 || !WORKSPACE.test(workspace)) {

@@ -2,6 +2,7 @@
 // world's folders and clock, and its output kept for the test to read.
 import { runCommand, type Adapters } from "../../src/cli/index.ts";
 import { Canceled, type Prompt } from "../../src/cli/prompt.ts";
+import type { Shell } from "../../src/cli/shell.ts";
 import type { Folders } from "../../src/folders/index.ts";
 import { listenRunnerSocket, type RunnerSocket } from "../../src/runner/index.ts";
 import type { World } from "../scenario/world.ts";
@@ -31,7 +32,23 @@ export interface CliOptions {
   env?: Record<string, string | undefined>;
   /** Where `register` clones a repo from, in place of GitHub. */
   remoteOf?: (repo: string) => string;
+  /** The programs install, `login github`, and `update` run. By default, a shell that refuses every call. */
+  shell?: Shell;
+  /** How long a command waits for the runner. 2 seconds by default. */
+  answerMs?: number;
 }
+
+/** A shell for commands that run no outside program. */
+const NO_SHELL: Shell = {
+  run: async (argv) => {
+    throw new Error(`this test runs no outside program, but the command ran ${argv.join(" ")}`);
+  },
+  open: async (url) => {
+    throw new Error(`this test opens no page, but the command opened ${url}`);
+  },
+  sleep: (ms) => Bun.sleep(ms),
+  uid: 501,
+};
 
 /** The commands over any folders, with a hidden prompt that gives each answer in turn. */
 export function cliAt(options: CliOptions): Cli {
@@ -39,14 +56,13 @@ export function cliAt(options: CliOptions): Cli {
   const err: string[] = [];
   const asked: string[] = [];
   const answers: string[] = [];
-  const prompt: Prompt = {
-    secret: async (question) => {
-      asked.push(question);
-      const answer = answers.shift();
-      if (answer === undefined) throw new Canceled();
-      return answer;
-    },
+  const answer = async (question: string) => {
+    asked.push(question);
+    const next = answers.shift();
+    if (next === undefined) throw new Canceled();
+    return next;
   };
+  const prompt: Prompt = { secret: answer, ask: answer };
   return {
     out,
     err,
@@ -64,8 +80,9 @@ export function cliAt(options: CliOptions): Cli {
         cwd: options.cwd ?? "/nonexistent",
         env: options.env ?? { PATH: "/usr/bin:/bin" },
         ...(options.remoteOf === undefined ? {} : { remoteOf: options.remoteOf }),
-        answerMs: 2_000,
+        answerMs: options.answerMs ?? 2_000,
         adapters: options.adapters,
+        shell: options.shell ?? NO_SHELL,
       }),
   };
 }
