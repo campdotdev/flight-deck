@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { transcriptUuid, writeLaunch } from "./launch.ts";
 import { CLAUDE_CODE, exitOf, Stream, type ClaudeCodeData, type StreamEvent } from "./stream.ts";
-import type { Exit, Handle, Harness, HarnessSession, SessionEvents } from "./types.ts";
+import type { Exit, Handle, Harness, HarnessSession, Leftover, SessionEvents } from "./types.ts";
 
 export interface ClaudeCodeOptions {
   /** `config.toml`'s `[paths]` `claude`. */
@@ -150,6 +150,24 @@ export class ClaudeCodeHarness implements Harness {
     const match = /\d+\.\d+\.\d+[\w.+-]*/.exec(output);
     if (!result.success || match === null) throw new Error(`${this.claude} --version printed no version: ${output.trim() || result.stderr.toString().trim()}`);
     return match[0];
+  }
+
+  async killLeftover(leftover: Leftover): Promise<boolean> {
+    const { pid, pidStartedAt } = leftover.handle;
+    const live = processStartedAt(pid) === pidStartedAt;
+    if (live) {
+      // `claude` runs in its own process group, so a negative ID names it.
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+    }
+    // Something the session started, such as a dev server, can outlive it, so the sweep runs either way.
+    await killLeftovers([leftover.worktree, sessionParts(leftover.sessionFolder).deps], this.lsof);
+    return live;
   }
 
   /** Lets `caffeinate` go. Sessions still running keep running. */
