@@ -4,6 +4,7 @@
 // status name may push it past 79 characters, and it stays whole.
 import { codeBlock, runnerFooter } from "../../outbox/runner-comments/frame.ts";
 import type { TroubleEntry, TroubleFacts } from "../../state/index.ts";
+import { duration } from "../../outbox/runner-comments/stale-take.ts";
 import { fold } from "../../tracker/index.ts";
 
 export interface TroubleText {
@@ -84,12 +85,56 @@ export function troubleText(entry: Pick<TroubleEntry, "cause" | "since" | "facts
       const title = "Flight Deck stopped: others can read credentials.env. Run chmod 600 on it.";
       return { title, body: null, notification: title };
     }
+    case "linear_token":
+      return linearToken(entry, version);
     case "claude_login":
     case "claude_login_soon":
-    case "linear_token":
-      // FLD-109 and FLD-112 add these causes' texts.
+      // FLD-112 adds these causes' texts.
       throw new Error(`no trouble text for ${entry.cause} yet`);
   }
+}
+
+/**
+ * `linear_token` notifies when a mint fails, and files only once a mint works again, so its title and body are
+ * in the past tense, and its issue gets no cleared comment (ADR 0005). Before a mint works, its title is only for
+ * the log. The body names the four causes that look alike from the Mac, and ends with its own last sentence.
+ */
+function linearToken(entry: Pick<TroubleEntry, "since" | "facts">, version: string): TroubleText {
+  const { workspace, app, ended } = entry.facts;
+  const notification = `Flight Deck can't get a Linear token for ${workspace}. It keeps trying.`;
+  if (ended === undefined) return { title: `Flight Deck can't get a Linear token for ${workspace}`, body: null, notification };
+  const title = `Flight Deck couldn't get a Linear token for ${duration(Date.parse(ended) - Date.parse(entry.since))}`;
+  const appName = app === "reader" ? "Flight Deck Reader" : "Flight Deck";
+  const held =
+    app === "reader"
+      ? "Sessions in the workspace's repos waited to start, because each session reads Linear through that app's token."
+      : "Flight Deck skipped every Linear step for the workspace's repos while it waited.";
+  const login = `\`flight-deck login linear ${workspace}\``;
+  // The end time leaves out the date when the failure ended on the day it began.
+  const to = when(ended).slice(0, 10) === when(entry.since).slice(0, 10) ? when(ended).slice(11) : when(ended);
+  const body = [
+    `Flight Deck held new work in ${workspace} from ${when(entry.since)} to ${to}, because Linear refused to mint a token from the ${appName} app. ${held} A mint works again, so the factory runs as usual.`,
+    "From the Mac, four causes look the same. If it happens again, check each one:",
+    [
+      "1. A full token pool. Linear holds at most 1,000 active tokens per app. A runner that crashes leaves its sessions' Reader tokens live until they expire after 30 days, so check `runner.log` for restarts.",
+      `2. A rotated client secret. If someone rotated the app's secret in Linear, run ${login} and enter the new one.`,
+      `3. A deleted app. If the app is gone from the workspace's settings in Linear, create it again, then run ${login}.`,
+      "4. A Linear outage. Check Linear's status page. Flight Deck keeps trying on its own.",
+    ].join("\n"),
+    "Close the issue once you've read it.",
+    fold(
+      "Details",
+      [
+        "- Cause: `linear_token`",
+        `- Workspace: \`${workspace}\``,
+        `- App: ${appName}`,
+        ...(entry.facts.error === undefined ? [] : ["", `The last mint failed with:\n\n${codeBlock(entry.facts.error)}`]),
+        "",
+        runnerFooter(version),
+      ].join("\n"),
+    ),
+  ].join("\n\n");
+  return { title, body, notification };
 }
 
 /** The comment on the trouble issue once the cause clears. `now` holds what the runner sees at the clearing poll. */
