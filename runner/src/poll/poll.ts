@@ -21,8 +21,8 @@ import { stopPause } from "../outbox/runner-comments/stop.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from "../outbox/runner-comments/index.ts";
 import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/record.ts";
 import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
-import { readJson, State, type OpenPause, type PortPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
-import { FACTORY_ROLES, MintFailed, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
+import { ISSUE_MEMORY_FIELDS, readJson, State, type IssueMemory, type OpenPause, type PortPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
+import { FACTORY_ROLES, isUnavailable, MintFailed, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { portInUse, Workspace, type FetchResult, type RefreshJob } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
 import { ApplyWaiting, waitingEntry as applyWaitingEntry } from "./apply-waiting.ts";
@@ -117,6 +117,12 @@ export class Poll {
   private readonly trials: Trials;
   /** Claude Code's login: `claude_login` after an expired login, and `claude_login_soon` after its warning. */
   private readonly login = new LoginWatch();
+  /** The sessions this runner started whose exit hasn't come yet, trials included. */
+  private readonly live = new Set<string>();
+  /** Each `sessionsEnded` call still waiting for `live` to empty. */
+  private endedWaiters: (() => void)[] = [];
+  /** When `flight-deck update` asked this runner to hold, or `null`. */
+  private updateHold: string | null = null;
 
   constructor(options: PollOptions) {
     this.folders = options.folders;
@@ -142,11 +148,14 @@ export class Poll {
       harness: options.harness,
       version: options.version,
       versionFolder: options.versionFolder,
-      events: (id) => ({
-        exit: (exit) => void this.exits.push({ session: id, exit }),
-        rateLimit: (event) => this.usage.report(event),
-        loginExpiring: (warning) => this.login.expiring(id, warning),
-      }),
+      events: (id) => {
+        this.live.add(id);
+        return {
+          exit: (exit) => this.exited(id, exit),
+          rateLimit: (event) => this.usage.report(event),
+          loginExpiring: (warning) => this.login.expiring(id, warning),
+        };
+      },
     });
   }
 
@@ -161,6 +170,43 @@ export class Poll {
   /** Posts a macOS notification the way trouble does, such as install's "Flight Deck can notify you." */
   notify(text: string): Promise<{ ok: true } | { ok: false; error: string }> {
     return notify(text, { path: this.path });
+  }
+
+  /**
+   * The Reader token of a session in the list, for its `headersHelper` (spec 1, "Session credentials", ADR
+   * 0005). Only a `starting` or `running` entry gets one, because no other has a process to ask. A second ask
+   * returns the same token, or a replacement when Linear rejects it. It doesn't wait for a running tick, so a
+   * session's Linear call never waits for a poll.
+   */
+  async linearToken(session: string): Promise<string> {
+    const entry = (await this.state.sessions()).find((each) => each.id === session);
+    const config = entry === undefined || entry.stage === "trial" || (entry.state !== "starting" && entry.state !== "running") ? null : await readConfig(this.folders);
+    const repo = entry === undefined || config === null ? null : repoOf(config, entry.repo);
+    if (repo === null) throw new Error(`no session ${session} is running`);
+    return this.tracker.sessionToken({ id: session, repo });
+  }
+
+  /**
+   * Resolves once every session this runner started has reported its exit, or after `timeoutMs`, so the runner
+   * process can let the Harness go after `shutdown` (spec 1, "Exits").
+   */
+  sessionsEnded(timeoutMs: number): Promise<void> {
+    if (this.live.size === 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      this.endedWaiters.push(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  /** A session's exit: it queues for the next tick. */
+  private exited(session: string, exit: Exit): void {
+    this.exits.push({ session, exit });
+    this.live.delete(session);
+    if (this.live.size > 0) return;
+    for (const resolve of this.endedWaiters.splice(0)) resolve();
   }
 
   /** Runs one poll for every registered repo. */
@@ -187,6 +233,46 @@ export class Poll {
       if ((await this.state.holdMarker()) === null) return;
       await this.state.writeHoldMarker(null);
       await this.state.log(now, "hold ended by flight-deck start");
+    });
+  }
+
+  /**
+   * `flight-deck update`'s hold, with the cause `update`, while it checks the session list (spec 1, "Install").
+   * It lives only in this runner's memory, so the runner the update starts doesn't keep it.
+   */
+  holdForUpdate(now: Date): Promise<void> {
+    return this.serial(async () => {
+      if (this.updateHold !== null) return;
+      this.updateHold = now.toISOString();
+      await this.state.log(now, "held by flight-deck update");
+    });
+  }
+
+  /** Ends `flight-deck update`'s hold, when it refuses because a session is listed. */
+  releaseUpdate(now: Date): Promise<void> {
+    return this.serial(async () => {
+      if (this.updateHold === null) return;
+      this.updateHold = null;
+      await this.state.log(now, "flight-deck update's hold ended");
+    });
+  }
+
+  /** The session list, after any tick that's running, so a session that tick started is in it. */
+  sessions(): Promise<SessionEntry[]> {
+    return this.serial(() => this.state.sessions());
+  }
+
+  /**
+   * A hand run's write to issue memory, from `flight-deck apply` (spec 1, "The runner's socket"): the fields
+   * merge over the issue's memory between ticks, so the runner never writes the same file at the same time.
+   */
+  writeIssueMemory(repo: string, uuid: string, fields: Partial<IssueMemory>): Promise<void> {
+    return this.serial(async () => {
+      const config = await readConfig(this.folders);
+      if (!config.repos.some((registration) => registration.name === repo)) throw new Error(`${repo} isn't registered on this Mac`);
+      if (!/^[A-Za-z0-9-]+$/.test(uuid)) throw new Error(`issue ${JSON.stringify(uuid)} isn't an issue UUID`);
+      for (const key of Object.keys(fields)) if (!ISSUE_MEMORY_FIELDS.has(key)) throw new Error(`issue memory has no field ${key}`);
+      await this.state.writeIssueMemory(repo, uuid, { ...(await this.state.issueMemory(repo, uuid)), ...fields });
     });
   }
 
@@ -588,7 +674,30 @@ export class Poll {
         await this.state.writeLastRecord(registration.name, { commit: fetch.head, read_at: now.toISOString(), record: record.record });
       }
     }
+    // The cache refresh needs no Linear call, so it starts even when Linear doesn't take the poll.
     if (fetch.ok && record?.ok === true) await this.refreshIfDue(now, registration, record.record, fetch.head, workspace);
+    // A Linear call this repo's poll needs that Linear didn't take, such as `RATELIMITED`, skips the repo until
+    // the next poll, and the other repos poll as usual (ADR 0002).
+    try {
+      return await this.pollTracker(now, config, credentials, registration, workspace, trouble, fetch, record);
+    } catch (error) {
+      if (!isUnavailable(error)) throw error;
+      await this.state.log(now, `${registration.name}: Linear didn't take the poll (${error.reason}), so the repo waits for the next poll: ${error.message}`);
+      return { registration, tracker: null, fetch, record, snapshot: null, waitingForSpecs: [], waitingForBlockers: [], waitingForPort: null, blocked: new Set(), staleTakes: [] };
+    }
+  }
+
+  /** Steps 2 to 8 of a repo's poll: every step that reads or writes Linear. */
+  private async pollTracker(
+    now: Date,
+    config: Config,
+    credentials: Credentials | null,
+    registration: Registration,
+    workspace: Workspace,
+    trouble: Trouble,
+    fetch: FetchResult,
+    record: RecordResult | null,
+  ): Promise<RepoPoll> {
     const repo = await this.checkTeam(now, config, credentials, registration, record?.ok === true ? record.record : null, trouble);
 
     // 3. Snapshot, with the comments since the repo's cursor.
@@ -1135,11 +1244,17 @@ export class Poll {
       versionFolder: this.versionFolder,
       launch,
     };
-    const handle = await this.harness.start(session, {
-      exit: (exit) => void this.exits.push({ session: id, exit }),
-      rateLimit: (event) => this.usage.report(event),
-      loginExpiring: (warning) => this.login.expiring(id, warning),
-    });
+    this.live.add(id);
+    const handle = await this.harness
+      .start(session, {
+        exit: (exit) => this.exited(id, exit),
+        rateLimit: (event) => this.usage.report(event),
+        loginExpiring: (warning) => this.login.expiring(id, warning),
+      })
+      .catch((error: unknown) => {
+        this.live.delete(id);
+        throw error;
+      });
     const running: SessionEntry = {
       ...entry,
       pid: handle.pid,
@@ -1180,7 +1295,7 @@ export class Poll {
   }
 
   private holdContext(now: Date, config: Config, trouble: Trouble): HoldContext {
-    return { now, state: this.state, config, trouble };
+    return { now, state: this.state, config, trouble, update: this.updateHold };
   }
 
   private async dropEntry(id: string): Promise<void> {
@@ -1257,7 +1372,7 @@ function repoNamed(config: Config, name: string): TrackerRepo | null {
 }
 
 /** The repo as the Tracker needs it: the record's `[tracker]` when it's valid, or else the registration's copy. */
-function trackerRepo(config: Config, registration: Registration, record: RepoRecord | null): TrackerRepo | null {
+export function trackerRepo(config: Config, registration: Registration, record: RepoRecord | null): TrackerRepo | null {
   const tracker = record?.tracker ?? registration.tracker;
   const linear = config.linear[tracker.workspace];
   // Step 2 opens `linear_login` for a workspace `login linear` hasn't signed in.

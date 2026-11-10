@@ -133,8 +133,8 @@ interface Team {
 /** The status types of an issue that's still open: not done, canceled, or a duplicate. */
 const CLOSED_TYPES = new Set<StatusType>(["completed", "canceled", "duplicate"]);
 
-/** The writes a scenario can make Linear refuse. */
-export type RefusableWrite = "move" | "post" | "flag" | "clearFlag" | "unsubscribe" | "writeBrief" | "markDuplicate" | "file" | "relate" | "detach" | "upload";
+/** The writes a scenario can make Linear refuse, and `snapshot`, the poll's read. */
+export type RefusableWrite = "snapshot" | "move" | "post" | "flag" | "clearFlag" | "unsubscribe" | "writeBrief" | "markDuplicate" | "file" | "relate" | "detach" | "upload";
 
 /** Roles whose issues a snapshot returns: the factory statuses and `intake`. */
 const SNAPSHOT_ROLES = new Set<Role>(["intake", ...FACTORY_ROLES]);
@@ -161,7 +161,8 @@ export class InMemoryTracker implements Tracker {
   private readonly issues = new Map<string, StoredIssue>();
   /** For each write, the refusals still to come, in order. */
   private readonly refusals = new Map<RefusableWrite, UnavailableReason[]>();
-  private ids = 0;
+  /** Shared with every view `as` makes, so IDs stay unique. */
+  private readonly ids = { last: 0 };
   /** `<app> <workspace>` for each app whose mints Linear refuses. */
   private readonly failing = new Set<string>();
   /** The tokens Linear rejects, as after an expiry or a revoke by hand. */
@@ -170,6 +171,16 @@ export class InMemoryTracker implements Tracker {
   constructor(options: { clock: () => Date; appUser: string }) {
     this.clock = options.clock;
     this.actor = options.appUser;
+  }
+
+  /**
+   * The same workspace, acting as another user, as `flight-deck apply` does with the maintainer's setup key. Its
+   * writes land in this adapter's issues and records.
+   */
+  as(user: string): InMemoryTracker {
+    const view = Object.create(this) as InMemoryTracker;
+    Object.defineProperty(view, "actor", { value: user });
+    return view;
   }
 
   // The world a scenario builds. None of these is a runner write.
@@ -316,6 +327,7 @@ export class InMemoryTracker implements Tracker {
   // Reads.
 
   async snapshot(repo: TrackerRepo, options: SnapshotOptions = {}): Promise<Snapshot> {
+    this.refused("snapshot");
     const issues = [...this.issues.values()]
       .filter((issue) => issue.team === repo.team && !issue.archived)
       .map((issue) => this.snapshotIssue(issue, repo))
@@ -619,7 +631,7 @@ export class InMemoryTracker implements Tracker {
   }
 
   private newId(kind: string): string {
-    return `${kind}-${++this.ids}`;
+    return `${kind}-${++this.ids.last}`;
   }
 
   private now(): string {

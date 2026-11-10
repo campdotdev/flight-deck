@@ -48,6 +48,8 @@ export const paths = {
   oldLog: (f: Folders) => join(f.data, "state", "runner.log.1"),
   /** When the daily sweep last ran. */
   sweep: (f: Folders) => join(f.data, "state", "sweep.json"),
+  /** The runner's Unix socket, mode `0600` (spec 1, "The runner's socket"). */
+  socket: (f: Folders) => join(f.data, "state", "runner.sock"),
   /** The last passing trial run, with the version it ran on (spec 1, "Install"). */
   trial: (f: Folders) => join(f.data, "state", "trial.json"),
   /** Trial runs' transcripts, which the daily sweep deletes after 30 days. */
