@@ -11,6 +11,7 @@ export {
   type LastRecord,
   type OpenPause,
   type PendingComment,
+  type PortPause,
   type Mode,
   type Reply,
   type Restart,
