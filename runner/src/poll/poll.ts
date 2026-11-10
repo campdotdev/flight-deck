@@ -7,7 +7,7 @@
 import type { Folders } from "../folders/index.ts";
 import { paths, sessionParts } from "../folders/index.ts";
 import { buildLaunch, type Auth, type Exit, type Harness, type HarnessSession, type Launch } from "../harness/index.ts";
-import { readConfig, type Config, type Registration } from "../install/index.ts";
+import { readConfig, writeEtc, type Config, type Registration } from "../install/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
 import { durationMs, readRecord, type RecordResult, type RepoRecord, type Role } from "../record/index.ts";
@@ -57,6 +57,8 @@ export class Poll {
   private readonly state: State;
   /** Exits queue as they happen, and the next tick handles them first. */
   private readonly exits: QueuedExit[] = [];
+  /** The `[machine_user]` that `etc/` was last written from, or `null` before this runner's first write. */
+  private etcFor: string | null = null;
 
   constructor(options: PollOptions) {
     this.folders = options.folders;
@@ -71,6 +73,7 @@ export class Poll {
   /** Runs one poll for every registered repo. */
   async tick(now: Date): Promise<void> {
     const config = await readConfig(this.folders);
+    await this.writeEtc(config);
     const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
     await this.handleExits(now, config, workspace);
 
@@ -79,6 +82,14 @@ export class Poll {
 
     await this.starts(now, config, repos, workspace);
     await this.publish(now, config, repos);
+  }
+
+  /** `etc/` at each start, and again whenever `[machine_user]` changes (spec 1, "Folders and files"). */
+  private async writeEtc(config: Config): Promise<void> {
+    const machineUser = JSON.stringify(config.machine_user ?? null);
+    if (machineUser === this.etcFor) return;
+    await writeEtc(this.folders, config.machine_user);
+    this.etcFor = machineUser;
   }
 
   // Exits.

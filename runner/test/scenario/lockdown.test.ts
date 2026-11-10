@@ -1,6 +1,7 @@
 // Session lockdown: what the scripted Harness is asked to start (spec 1, "The command line", "`settings.json`",
 // "`mcp.json`", and "Sandbox policy").
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { StartRecord } from "../../src/harness/index.ts";
 import { SHADERS_RECORD, World } from "./world.ts";
@@ -366,5 +367,38 @@ describe("the root AGENTS.md", () => {
     const start = await startOne();
     expect(appended(start)).toBeNull();
     expect(start.sessionJson.agents_md).toBeNull();
+  });
+});
+
+describe("etc/", () => {
+  const etc = (name: string) => join(world.folders.sessionRoot, "etc", name);
+  const userName = () => Bun.spawnSync(["git", "config", "--file", etc("gitconfig"), "--get", "user.name"]).stdout.toString().trim();
+
+  test("is written at the runner's first poll, before any session starts", async () => {
+    await world.tick();
+    expect(userName()).toBe("Flight Deck Bot");
+    expect(await readFile(etc("npmrc"), "utf8")).toContain("registry=https://registry.npmjs.org/\n");
+    expect(await readFile(etc("retry-reset.cjs"), "utf8")).toContain("ECONNRESET");
+  });
+
+  test("is written again when [machine_user] changes, and not at a poll where it didn't", async () => {
+    await world.tick();
+    await writeFile(etc("retry-reset.cjs"), "// changed\n");
+    await world.tick();
+    expect(await readFile(etc("retry-reset.cjs"), "utf8")).toBe("// changed\n");
+
+    world.config.machine_user = { login: "factory-bot", id: 2, name: "Factory Bot", email: "2+factory-bot@users.noreply.github.com" };
+    await world.writeConfig();
+    await world.tick();
+    expect(userName()).toBe("Factory Bot");
+    expect(await readFile(etc("retry-reset.cjs"), "utf8")).toContain("ECONNRESET");
+  });
+
+  test("is written again at each start", async () => {
+    await world.tick();
+    await writeFile(etc("retry-reset.cjs"), "// changed\n");
+    world.restart();
+    await world.tick();
+    expect(await readFile(etc("retry-reset.cjs"), "utf8")).toContain("ECONNRESET");
   });
 });
