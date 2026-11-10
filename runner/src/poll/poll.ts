@@ -4,6 +4,7 @@
 //
 // This is the tracer bullet's poll: fetch, snapshot, and starts. Later tickets add the team check, moved-out
 // issues, answers, flags, subscriptions, stale takes, trouble, usage, holds, retries, and the start order.
+import { basename } from "node:path";
 import type { Folders } from "../folders/index.ts";
 import { paths, sessionParts } from "../folders/index.ts";
 import { buildLaunch, type Auth, type Exit, type Harness, type HarnessSession, type Launch } from "../harness/index.ts";
@@ -70,6 +71,8 @@ export class Poll {
   private etcFor: string | null = null;
   /** Each repo's cache refresh, by repo, from its start until a tick handles its end. */
   private readonly refreshes = new Map<string, RunningRefresh>();
+  /** Whether this runner has polled yet, for the sweep at a start. */
+  private polled = false;
 
   constructor(options: PollOptions) {
     this.folders = options.folders;
@@ -88,6 +91,8 @@ export class Poll {
     const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
     await this.handleExits(now, config, workspace);
     await this.endRefreshes(now);
+    await this.sweep(now, workspace);
+    await this.state.rotateLog();
 
     const repos: RepoPoll[] = [];
     for (const registration of config.repos) repos.push(await this.pollRepo(now, config, registration, workspace));
@@ -213,6 +218,27 @@ export class Poll {
       const result = await refresh.job.done;
       await this.state.log(now, `${repo}: cache refresh ${refresh.job.session} ${result.ok ? "passed" : `failed, kept the last good cache: ${result.error}`}`);
     }
+  }
+
+  // The daily sweep.
+
+  /**
+   * Runs the sweep at the first poll after 03:00 in the Mac's time zone, and at a start when the last sweep
+   * was more than 24 hours ago. A running refresh keeps its worktree and session folder.
+   */
+  private async sweep(now: Date, workspace: Workspace): Promise<void> {
+    const first = !this.polled;
+    this.polled = true;
+    const last = await this.state.lastSweep();
+    const threeAm = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 3);
+    if (threeAm > now) threeAm.setDate(threeAm.getDate() - 1);
+    const due = last === null || last < threeAm || (first && now.getTime() - last.getTime() > 24 * HOUR);
+    if (!due) return;
+    const keep = new Set((await this.state.sessions()).map((entry) => entry.id));
+    for (const { job } of this.refreshes.values()) keep.add(job.session).add(basename(paths.cacheWorktree(this.folders, job.repo)));
+    const swept = await workspace.sweep({ now, keep });
+    await this.state.writeSweep(now);
+    if (swept.length > 0) await this.state.log(now, `sweep removed ${swept.join(", ")}`);
   }
 
   // 5. Answers.

@@ -14,6 +14,7 @@ import { cloneFolder, copyFiles, fillDeps, linkDeps } from "./deps.ts";
 import { emptyConfigFolders, sessionEnv } from "./env.ts";
 import { refreshCache, type RefreshInput, type RefreshJob } from "./refresh.ts";
 import type { SessionJson } from "./session.ts";
+import { sweep } from "./sweep.ts";
 
 /** The longest socket file name a sandbox makes in a temp folder, from `data/limits.toml` (spec 1, "Session IDs"). */
 export const SOCKET_NAME_BYTES: number = (limits as { socket_name_bytes: number }).socket_name_bytes;
@@ -235,6 +236,14 @@ export class Workspace {
         await this.must(worktree, "checkout", "--quiet", "--detach", commit);
       },
     });
+  }
+
+  /**
+   * The daily sweep: removes every worktree and session folder whose name `keep` doesn't hold, with Claude
+   * Code's folder for each removed worktree, and transcripts and hand-run folders older than 30 days.
+   */
+  async sweep(input: { now: Date; keep: Set<string> }): Promise<string[]> {
+    return sweep({ folders: this.folders, ...input });
   }
 
   /** Whether the repo's cache has a good copy, and how its last refresh went. */
