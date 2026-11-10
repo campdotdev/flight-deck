@@ -6,6 +6,7 @@ import { readConfig } from "../install/index.ts";
 import { startRunner } from "../runner/index.ts";
 import { State } from "../state/index.ts";
 import { runCommand } from "./commands.ts";
+import { hiddenPrompt } from "./prompt.ts";
 import { PRODUCTION_ADAPTERS, PRODUCTION_RUNNER } from "./production.ts";
 
 /** The version string the build script stamps with `--define`, such as `0.1.0-dev.20261101T103012Z`. */
@@ -24,6 +25,10 @@ export async function main(argv: string[]): Promise<number> {
     clock: () => new Date(),
     out: (line) => void process.stdout.write(`${line}\n`),
     err: (line) => void process.stderr.write(`${line}\n`),
+    // The question goes to stderr, so a command's stdout holds only its result.
+    prompt: hiddenPrompt(process.stdin, process.stderr),
+    cwd: process.cwd(),
+    env: process.env,
     adapters: PRODUCTION_ADAPTERS,
   });
 }

@@ -1,5 +1,6 @@
 // The production adapters build the Linear adapter for each identity without reaching Linear: the runner's
-// acts as the Flight Deck app from `credentials.env`, and `flight-deck apply`'s as the maintainer's setup key.
+// and `register`'s act as the Flight Deck app from `credentials.env`, and `flight-deck apply`'s and `login linear`'s
+// as the maintainer's setup key.
 // A stand-in `fetch` records each request, so no test here reaches the network.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -37,6 +38,7 @@ afterEach(async () => {
 test("building the Linear adapter for each identity makes no request", () => {
   expect(PRODUCTION_RUNNER.runnerTracker({ folders, config })).toBeInstanceOf(LinearTracker);
   expect(PRODUCTION_ADAPTERS.maintainerTracker({ folders, workspace: "camp-dev", setupKey: "lin_api_setup" })).toBeInstanceOf(LinearTracker);
+  expect(PRODUCTION_ADAPTERS.appTracker({ folders })).toBeInstanceOf(LinearTracker);
   expect(requests).toEqual([]);
 });
 
@@ -58,4 +60,11 @@ test("apply's adapter sends the maintainer's setup key as it is, and mints nothi
   await expect(tracker.issue({ id: "SHA-1", repo })).rejects.toBeInstanceOf(IssueNotFoundError);
   expect(requests.map((each) => each.url)).toEqual(["https://api.linear.app/graphql"]);
   expect(new Headers(requests[0]!.init?.headers).get("Authorization")).toBe("lin_api_setup");
+});
+
+test("register's adapter mints as the Flight Deck app from credentials.env", async () => {
+  await writeFile(join(folders.config, "credentials.env"), "LINEAR_APP_ID_CAMP_DEV=fd-id\nLINEAR_APP_SECRET_CAMP_DEV=fd-secret\n", { mode: 0o600 });
+  await PRODUCTION_ADAPTERS.appTracker({ folders }).runnerToken("camp-dev");
+  expect(requests.map((each) => each.url)).toEqual(["https://api.linear.app/oauth/token"]);
+  expect(new URLSearchParams(String(requests[0]!.init?.body)).get("client_id")).toBe("fd-id");
 });
