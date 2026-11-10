@@ -1,5 +1,6 @@
 // The Harness port: the only module that starts Claude Code (overview, spec 1's "Harness").
 import type { Mode, Stage } from "../state/index.ts";
+import type { Launch } from "./launch.ts";
 
 /** What `start` needs to run one session. */
 export interface HarnessSession {
@@ -23,6 +24,8 @@ export interface HarnessSession {
   model: string;
   /** The exact version folder, never `current` (ADR 0015). */
   versionFolder: string;
+  /** The command line, `settings.json`, `mcp.json`, and environment the session starts with. */
+  launch: Launch;
 }
 
 /** The running session, as the session list records it. */

@@ -1,10 +1,10 @@
 // The scripted Harness adapter. It stands in for `claude`, its `version()`, and `caffeinate`. A scenario tells
 // it what each session leaves in its outbox and how it exits, and asserts on what it was asked to start.
-import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { SessionJson } from "../workspace/index.ts";
+import { writeLaunch, type McpConfig, type Settings } from "./launch.ts";
 import type { Exit, ExitKind, Handle, Harness, HarnessSession, RateLimitEvent, SessionEvents } from "./types.ts";
 
 /** What one session does. */
@@ -17,9 +17,17 @@ export interface SessionScript {
   exit?: ExitKind;
 }
 
-/** One `start` call, with what the session found when it started. */
+/** One `start` call: what the session was started with, and what it found when it started. */
 export interface StartRecord {
   session: HarnessSession;
+  handle: Handle;
+  /** The arguments after `<claude>`. */
+  args: string[];
+  /** The whole environment `claude` would start with. */
+  environment: Record<string, string>;
+  /** `settings.json` and `mcp.json` as written in the session folder, parsed. */
+  settings: Settings;
+  mcp: McpConfig;
   /** `session.json`, parsed. */
   sessionJson: SessionJson;
   /** Every file in the inbox, by name. */
@@ -68,13 +76,20 @@ export class ScriptedHarness implements Harness {
   }
 
   async start(session: HarnessSession, events: SessionEvents): Promise<Handle> {
+    // The Claude Code adapter writes the same files before it runs `claude`.
+    await writeLaunch(session.launch);
+    const handle: Handle = { session: session.id, uuid: session.launch.uuid, pid: this.pids++, pidStartedAt: new Date().toISOString() };
     this.started.push({
       session,
-      sessionJson: JSON.parse(await readFile(session.sessionJson, "utf8")) as SessionJson,
+      handle,
+      args: session.launch.args,
+      environment: session.launch.environment,
+      settings: await readJson<Settings>(session.launch.settingsPath),
+      mcp: await readJson<McpConfig>(session.launch.mcpPath),
+      sessionJson: await readJson<SessionJson>(session.sessionJson),
       inbox: await readFiles(join(session.sessionFolder, "inbox")),
       worktreeHead: Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: session.worktree }).stdout.toString().trim(),
     });
-    const handle: Handle = { session: session.id, uuid: randomUUID(), pid: this.pids++, pidStartedAt: new Date().toISOString() };
     const running: Running = { session, events, handle };
     this.running.set(session.id, running);
     await mkdir(dirname(session.transcript), { recursive: true });
@@ -109,6 +124,10 @@ export class ScriptedHarness implements Harness {
     writeFileSync(join(running.session.sessionFolder, "exit.json"), `${JSON.stringify(exit)}\n`);
     running.events.exit(exit);
   }
+}
+
+async function readJson<T>(path: string): Promise<T> {
+  return JSON.parse(await readFile(path, "utf8")) as T;
 }
 
 async function readFiles(folder: string): Promise<Record<string, string>> {
