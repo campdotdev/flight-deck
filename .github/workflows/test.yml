@@ -21,5 +21,8 @@ jobs:
         with:
           bun-version: 1.4.3
       - run: bun install --frozen-lockfile
+      # The pinned sandbox-runtime that a cache refresh runs, which Workspace's tests run for real.
+      - run: bun install --frozen-lockfile
+        working-directory: vendor/sandbox-runtime
       - run: bun run typecheck
       - run: bun test

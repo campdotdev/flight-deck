@@ -1,8 +1,7 @@
 // The scenario harness: the in-memory world at the one seam (spec 1, "The seam"). A scenario builds the world,
 // scripts each session, runs ticks, and asserts on the in-memory Tracker, the scripted Harness, and
 // `status.json`. It never reads or writes the session list or issue memory.
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Folders } from "../../src/folders/index.ts";
 import { ScriptedHarness } from "../../src/harness/index.ts";
@@ -33,11 +32,19 @@ export const STATUSES: Record<Role, [string, StatusType]> = {
 
 const statusNames = Object.fromEntries(Object.entries(STATUSES).map(([role, [name]]) => [role, name])) as Record<Role, string>;
 
-/** Shaders' schema-1 record, without its `[app]` table, because ports come in a later ticket. */
-export const SHADERS_RECORD = (await Bun.file(new URL("../record/fixtures/shaders.toml", import.meta.url)).text()).replace(
-  /\n\[app\]\n(?:[^\n[]*\n)*/,
-  "\n",
-);
+/**
+ * The test record's dependency install: it writes a package into `node_modules` and a blob into pnpm's store,
+ * with only the commands the registration's `PATH` holds.
+ */
+export const INSTALL = 'mkdir -p node_modules/pkg "$pnpm_config_store_dir" && echo installed > node_modules/pkg/index.js && echo stored > "$pnpm_config_store_dir/blob"';
+
+/**
+ * Shaders' schema-1 record, without its `[app]` table, because ports come in a later ticket, and with
+ * `INSTALL` as its dependency install, because the test Mac has no pnpm on the registration's `PATH`.
+ */
+export const SHADERS_RECORD = (await Bun.file(new URL("../record/fixtures/shaders.toml", import.meta.url)).text())
+  .replace(/\n\[app\]\n(?:[^\n[]*\n)*/, "\n")
+  .replace('command = "pnpm install --frozen-lockfile"', `command = '${INSTALL}'`);
 
 /** Each outbox a scenario's session can leave, as files. */
 export const outbox = {
@@ -66,11 +73,15 @@ export const outbox = {
 };
 
 const VERSION = "0.1.0";
+/** The repo's `vendor/sandbox-runtime/`, which `bun install` fills. */
+const VENDOR_SANDBOX_RUNTIME = new URL("../../../vendor/sandbox-runtime", import.meta.url).pathname;
 const START = new Date("2026-11-10T09:00:00Z");
 
 export interface WorldOptions {
   /** The record on the bare repo's default branch. `null` commits none. */
   record?: string | null;
+  /** Whether the repo starts with a good dependency cache, built from the default branch. Default `true`. */
+  cache?: boolean;
 }
 
 export class World {
@@ -121,8 +132,9 @@ export class World {
   }
 
   static async create(options: WorldOptions = {}): Promise<World> {
-    // realpath, because macOS's temp folder sits behind the /var symlink and git reports the real path.
-    const root = await realpath(await mkdtemp(join(tmpdir(), "flight-deck-")));
+    // Under /tmp, because macOS's own temp folder is so long that a session's temp folder would fail the
+    // socket path limit. realpath, because /tmp sits behind a symlink and git reports the real path.
+    const root = await realpath(await mkdtemp("/tmp/fd-"));
     const folders: Folders = {
       data: join(root, "data"),
       config: join(root, "config"),
@@ -134,6 +146,12 @@ export class World {
       await mkdir(folder, { recursive: true });
     }
     await writeFile(join(folders.config, "gitconfig-runner"), "");
+    // The version folder's binary is Bun itself, which acts as Bun under BUN_BE_BUN as the compiled binary
+    // does, and its vendored sandbox-runtime is the repo's.
+    await mkdir(join(versionFolder, "bin"), { recursive: true });
+    await symlink(process.execPath, join(versionFolder, "bin", "flight-deck"));
+    await mkdir(join(versionFolder, "vendor"), { recursive: true });
+    await symlink(VENDOR_SANDBOX_RUNTIME, join(versionFolder, "vendor", "sandbox-runtime"));
     const remote = join(root, "remote.git");
     const commit = await makeRemote(root, remote, options.record === undefined ? SHADERS_RECORD : options.record);
     const world = new World(root, folders, versionFolder, remote, commit);

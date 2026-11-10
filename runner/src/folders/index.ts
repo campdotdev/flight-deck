@@ -40,6 +40,10 @@ export const paths = {
   status: (f: Folders) => join(f.data, "state", "status.json"),
   heartbeat: (f: Folders) => join(f.data, "state", "heartbeat"),
   log: (f: Folders) => join(f.data, "state", "runner.log"),
+  /** The log before the current one, which a new log replaces. */
+  oldLog: (f: Folders) => join(f.data, "state", "runner.log.1"),
+  /** When the daily sweep last ran. */
+  sweep: (f: Folders) => join(f.data, "state", "sweep.json"),
   handRuns: (f: Folders) => join(f.data, "hand-runs"),
 
   repo: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo)),
@@ -47,6 +51,10 @@ export const paths = {
   transcripts: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "transcripts"),
   transcript: (f: Folders, repo: string, session: string) => join(f.data, "repos", repoPath(repo), "transcripts", `${session}.jsonl`),
   cursor: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "cursor.json"),
+  /** The copies of the record's `copy_files` that `register` makes (ADR 0007). */
+  files: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "files"),
+  /** The repo's last cache refresh: its commit, when it started, and whether it passed. */
+  refresh: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "refresh.json"),
   issues: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "issues"),
   issueMemory: (f: Folders, repo: string, uuid: string) => join(f.data, "repos", repoPath(repo), "issues", `${uuid}.json`),
 
@@ -54,6 +62,8 @@ export const paths = {
   worktree: (f: Folders, session: string) => join(f.sessionRoot, "worktrees", session),
   sessions: (f: Folders) => join(f.sessionRoot, "sessions"),
   sessionFolder: (f: Folders, session: string) => join(f.sessionRoot, "sessions", session),
+  /** A cache refresh's scratch worktree, `worktrees/cache-<owner>-<repo>`. */
+  cacheWorktree: (f: Folders, repo: string) => join(f.sessionRoot, "worktrees", `cache-${repo.replace("/", "-")}`),
   /** The dependency cache, `cache/<owner>/<repo>/`. */
   cache: (f: Folders, repo: string) => join(f.sessionRoot, "cache", repoPath(repo)),
   /** The files every session's sandbox reads, outside `~` (spec 1, "Folders and files"). */
