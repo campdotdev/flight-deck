@@ -2,7 +2,7 @@
 // JSON, and every write is one atomic rename (spec 1, "State").
 import { paths, type Folders } from "../folders/index.ts";
 import type { Role } from "../record/index.ts";
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import { appendLine, readJson, writeJson } from "./files.ts";
 import type { Status } from "./status.ts";
 
@@ -34,7 +34,14 @@ export interface SessionEntry {
   started_at: string | null;
   deadline: string | null;
   state: SessionState;
+  /**
+   * Why the runner asked the Harness to stop the session, once it has: `stop` for `flight-deck stop`, and
+   * `moved_out` for an issue that left its working status. The `stopped` exit reads it.
+   */
+  stop_cause?: StopCause;
 }
+
+export type StopCause = "stop" | "moved_out";
 
 /** One answer a pause offers (ADR 0019). */
 export interface Answer {
@@ -118,6 +125,16 @@ export interface IssueMemory {
   pending: PendingComment | null;
 }
 
+/**
+ * The hold marker, `state/hold`: the one record of the `maintainer` and `stop` holds (spec 1, "State", ADR 0024).
+ * `by` tells a hold from a stop.
+ */
+export interface HoldMarker {
+  by: "hold" | "stop";
+  /** ISO time. */
+  since: string;
+}
+
 const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null };
 
 export class State {
@@ -156,6 +173,17 @@ export class State {
 
   async writeCursor(repo: string, comments: string): Promise<void> {
     await writeJson(paths.cursor(this.folders, repo), { comments });
+  }
+
+  /** The hold marker, or `null` while neither `hold` nor `stop` holds the runner. */
+  async holdMarker(): Promise<HoldMarker | null> {
+    return readJson<HoldMarker | null>(paths.holdMarker(this.folders), null);
+  }
+
+  /** Writes the hold marker, or removes it for `null`. */
+  async writeHoldMarker(marker: HoldMarker | null): Promise<void> {
+    if (marker === null) await rm(paths.holdMarker(this.folders), { force: true });
+    else await writeJson(paths.holdMarker(this.folders), marker);
   }
 
   /** The time of the last poll, written every poll. */

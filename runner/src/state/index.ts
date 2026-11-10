@@ -2,6 +2,7 @@ export {
   State,
   type Answer,
   type Flag,
+  type HoldMarker,
   type FlagCause,
   type IssueMemory,
   type OpenPause,
@@ -11,6 +12,7 @@ export {
   type SessionEntry,
   type SessionState,
   type Stage,
+  type StopCause,
 } from "./state.ts";
 export type * from "./status.ts";
 export { readJson, writeAtomic, writeJson } from "./files.ts";
