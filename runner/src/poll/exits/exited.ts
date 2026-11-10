@@ -8,6 +8,7 @@ import type { ApplyResult } from "../../outbox/index.ts";
 import { stillWorking } from "../moved-out.ts";
 import { WORKING } from "../stages.ts";
 import type { ExitContext, ExitHandler } from "./context.ts";
+import { waitToApply } from "./unwritten.ts";
 
 type ResultHandlers = { [K in ApplyResult["result"]]: (context: ExitContext, result: Extract<ApplyResult, { result: K }>) => Promise<void> };
 
@@ -16,8 +17,7 @@ const RESULTS: ResultHandlers = {
   applied: (context) => context.finish(),
   paused: (context) => context.finish(),
   failed: (context, result) => context.fail({ kind: "refused", rule: result.rule }),
-  // FLD-100 replaces this line: the entry waits as `apply_waiting` and the apply runs again with backoff.
-  unwritten: (context) => context.finish(),
+  unwritten: (context, result) => waitToApply(context, result),
 };
 
 export const exited: ExitHandler = async (context) => {

@@ -41,6 +41,25 @@ export interface SessionEntry {
    * `moved_out` for an issue that left its working status. The `stopped` exit reads it.
    */
   stop_cause?: StopCause;
+  /** An `apply_waiting` entry's tries. Absent on every other entry. */
+  apply?: ApplyWait;
+}
+
+/**
+ * The tries of an outbox Linear didn't take (spec 1, "Not yet written"). The runner applies it again at the
+ * next poll, then after 1, 2, 4, and 8 minutes, then every 15 minutes, with no session.
+ */
+export interface ApplyWait {
+  /** The folder whose outbox the runner applies: the session folder, or the kept folder for a kept outbox's take. */
+  folder: string;
+  /** `apply`: the status move hasn't landed. `after_move`: it has, and the stage handed off. `pause`: the outbox is kept, and the Linear-write pause hasn't landed. */
+  phase: "apply" | "after_move" | "pause";
+  /** ISO time of the first try. Three hours from here, the runner keeps the outbox, or drops the writes after the move. */
+  since: string;
+  /** ISO time of the last try. */
+  tried_at: string;
+  /** The tries so far in this phase. */
+  tries: number;
 }
 
 export type StopCause = "stop" | "moved_out";
@@ -109,6 +128,8 @@ export interface PendingComment {
   comment_at: string | null;
   /** ISO time of the last try. */
   tried_at: string;
+  /** No try before this ISO time, for a comment that keeps its own backoff, such as the Linear-write pause. */
+  not_before?: string;
   /** The issue's identifier, title, and URL, for the flag. */
   issue: string;
   title: string;
@@ -144,6 +165,8 @@ export interface IssueMemory {
   stale_take: string | null;
   /** The attempt the next take keeps, set when the runner requeued the issue, or `null` for attempt 1. */
   restart: Restart | null;
+  /** The outbox the runner kept after Linear didn't take it for 3 hours, which the next take applies, or `null`. */
+  kept: KeptOutbox | null;
 }
 
 /**
@@ -156,6 +179,14 @@ export interface HoldMarker {
   since: string;
 }
 
+/** A kept outbox, in `repos/<owner>/<repo>/kept/<issue UUID>/` (spec 1, "Not yet written"). */
+export interface KeptOutbox {
+  /** The session that wrote it. */
+  session: string;
+  /** ISO time it was kept. */
+  at: string;
+}
+
 /** The last valid record the runner read on a repo's default branch, for the stale-take limits (spec 1, "Poll"). */
 export interface LastRecord {
   /** The default branch's commit it was read at. */
@@ -165,7 +196,7 @@ export interface LastRecord {
   record: RepoRecord;
 }
 
-const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, stale_take: null, restart: null };
+const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, stale_take: null, restart: null, kept: null };
 
 /** One hold `state/holds.json` keeps: a usage hold, with when it ends (spec 1, "Holds"). */
 export interface StoredHold {
