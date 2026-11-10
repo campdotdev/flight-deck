@@ -244,6 +244,23 @@ describe("the writes", () => {
     expect(writes()).toEqual([["FlightDeckFile", { input: { teamId: TEAM_ID, stateId: stateId("Triage"), title: "Follow-up", description: "Text." } }]]);
   });
 
+  test("post, writeBrief, and file strip ?signature= from every URL they write", async () => {
+    start();
+    const signed = "![x](https://uploads.linear.app/ws/abc/x.png?signature=eyJhbGciOi)";
+    const plain = "![x](https://uploads.linear.app/ws/abc/x.png)";
+    linear.on("FlightDeckFlagState", flagState(null, false));
+    linear.on("FlightDeckDescription", { data: { issue: { id: uuid(1), description: "The button is blue." } } });
+    linear.on("FlightDeckFile", { data: { issueCreate: { success: true, issue: { id: uuid(5), identifier: "SHA-5", url: "https://linear.app/campdotdev/issue/SHA-5/x" } } } });
+    await tracker.post(ref, `See ${signed}`, { flag: false });
+    await tracker.writeBrief(ref, `## Summary\n\n${signed}`, { runnerWroteBrief: false });
+    await tracker.file({ repo, title: "Follow-up", description: signed }, "intake");
+    expect(writes()).toEqual([
+      ["FlightDeckComment", { input: { issueId: uuid(1), body: `See ${plain}` } }],
+      ["FlightDeckUpdate", { id: uuid(1), input: { description: `## Summary\n\n${plain}\n\n+++ Report\n\nThe button is blue.\n\n+++` } }],
+      ["FlightDeckFile", { input: { teamId: TEAM_ID, stateId: stateId("Triage"), title: "Follow-up", description: plain } }],
+    ]);
+  });
+
   test("relate makes a related relation", async () => {
     start();
     linear.on("FlightDeckRelate", { data: { issueRelationCreate: { success: true } } });

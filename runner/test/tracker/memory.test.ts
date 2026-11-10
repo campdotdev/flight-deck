@@ -332,6 +332,29 @@ describe("upload", () => {
   });
 });
 
+describe("signed upload URLs", () => {
+  const SIGNED = "![before](https://uploads.linear.app/ws/abc/before.png?signature=eyJhbGciOi)";
+  const UNSIGNED = "![before](https://uploads.linear.app/ws/abc/before.png)";
+
+  test("post strips ?signature= from the comment", async () => {
+    const one = issue();
+    await tracker.post(one, `It looks like this.\n\n${SIGNED}`, { flag: false });
+    expect(tracker.writes.at(-1)).toEqual({ kind: "comment", issue: one.identifier, body: `It looks like this.\n\n${UNSIGNED}` });
+  });
+
+  test("writeBrief strips ?signature= from the description", async () => {
+    const one = issue(`The button is blue.\n\n${SIGNED}`);
+    await tracker.writeBrief(one, `## Summary\n\n${SIGNED}`, { runnerWroteBrief: false });
+    expect(tracker.stored(one.id).description).toBe(`## Summary\n\n${UNSIGNED}\n\n+++ Report\n\nThe button is blue.\n\n${UNSIGNED}\n\n+++`);
+  });
+
+  test("file strips ?signature= from the title and the description", async () => {
+    const filed = await tracker.file({ repo, title: "See https://uploads.linear.app/ws/abc/a.png?signature=x", description: SIGNED }, "intake");
+    const read = await tracker.issue({ id: filed.id, repo });
+    expect([read.title, read.description]).toEqual(["See https://uploads.linear.app/ws/abc/a.png", UNSIGNED]);
+  });
+});
+
 describe("file", () => {
   test("files the draft in the role's status as the actor, with no label, priority, assignee, or delegate", async () => {
     const filed = await tracker.file({ repo, title: "Flaky test", description: "It fails one run in ten." }, "intake");

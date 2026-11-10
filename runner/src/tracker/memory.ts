@@ -398,7 +398,7 @@ export class InMemoryTracker implements Tracker {
       // An issue the runner flagged keeps the maintainer assigned and subscribed, so the comment reaches them.
       await this.unsubscribe(ref);
     }
-    const posted = this.comment(issue, this.actor, plusFolds(comment), null, false);
+    const posted = this.comment(issue, this.actor, unsigned(plusFolds(comment)), null, false);
     return { id: posted.id, created_at: posted.created_at };
   }
 
@@ -429,7 +429,7 @@ export class InMemoryTracker implements Tracker {
   async writeBrief(ref: IssueRef, brief: string, options: WriteBriefOptions): Promise<void> {
     this.refused("writeBrief");
     const issue = this.stored(ref.id);
-    issue.description = briefDescription(brief, issue.description, options.runnerWroteBrief);
+    issue.description = unsigned(briefDescription(brief, issue.description, options.runnerWroteBrief));
     this.writes.push({ kind: "description", issue: issue.identifier, description: issue.description });
   }
 
@@ -449,7 +449,7 @@ export class InMemoryTracker implements Tracker {
     this.refused("file");
     const status = this.statusFor(draft.repo, role);
     // Filing subscribes the creator, as Linear does.
-    const issue = this.create({ team: draft.repo.team, title: draft.title, description: draft.description, status, creator: this.actor });
+    const issue = this.create({ team: draft.repo.team, title: unsigned(draft.title), description: unsigned(draft.description), status, creator: this.actor });
     this.writes.push({ kind: "file", issue: issue.identifier, title: issue.title, description: issue.description, status });
     return { id: issue.id, repo: draft.repo, identifier: issue.identifier, url: this.url(draft.repo, issue) };
   }
