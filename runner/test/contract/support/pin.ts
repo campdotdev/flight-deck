@@ -88,3 +88,22 @@ function firstSentence(text: string): string {
 function escape(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+/** A process ID on macOS has at most this many digits, so a socket name that holds one may grow to it. */
+const PID_DIGITS = 5;
+
+/**
+ * `socket_name_bytes` from the sockets seen under a session's temp folder: the longest path after `tmp/`, in bytes,
+ * with each run of 3 or more digits counted as at least 5, because it may be a process ID that grows. Workspace
+ * fails `prepare` when the temp folder's path, plus `/`, plus this passes 103 bytes (spec 1, "Session IDs").
+ */
+export function socketNameBytes(tmp: string, sockets: string[]): number {
+  const names = sockets.filter((path) => path.startsWith(`${tmp}/`)).map((path) => path.slice(tmp.length + 1));
+  if (names.length === 0) throw new Error(`no socket appeared under ${tmp}`);
+  return Math.max(...names.map((name) => Buffer.byteLength(name.replace(/\d{3,}/g, (digits) => digits.padEnd(Math.max(digits.length, PID_DIGITS), "0")))));
+}
+
+/** Whether a session's temp folder on the maintainer's Mac leaves room for the socket names (spec 1, "Session IDs"). */
+export function fits(tmp: string, socketNameBytes: number): boolean {
+  return Buffer.byteLength(tmp) + 1 + socketNameBytes <= 103;
+}

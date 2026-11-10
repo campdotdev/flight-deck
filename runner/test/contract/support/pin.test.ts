@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fixture } from "../../harness/fixtures.ts";
-import { loginExpiredPatterns, pinToml, recordFixture, tomlValue } from "./pin.ts";
+import { fits, loginExpiredPatterns, pinToml, recordFixture, socketNameBytes, tomlValue } from "./pin.ts";
 import { contractParts } from "./gate.ts";
 
 describe("pinToml", () => {
@@ -101,6 +101,31 @@ describe("loginExpiredPatterns", () => {
     const texts = ["Login failed (401). Run /login", String.raw`API Error: 401 {"error":{"message":"Token revoked [x]."}}`];
     const patterns = loginExpiredPatterns(texts).map((each) => new RegExp(each));
     for (const text of texts) expect(patterns.some((pattern) => pattern.test(text))).toBe(true);
+  });
+});
+
+describe("socketNameBytes", () => {
+  const tmp = "/Users/Shared/flight-deck/huntergarrett/sessions/a1b2c3/tmp";
+
+  test("is the longest path after tmp/, counting a process ID at its widest", () => {
+    expect(socketNameBytes(tmp, [`${tmp}/srt-mux-812-0.sock`, `${tmp}/c-1a2b/p.sock`])).toBe("srt-mux-81200-0.sock".length);
+    expect(socketNameBytes(tmp, [`${tmp}/claude-sandbox-1a2b3c4d/http-proxy.sock`])).toBe("claude-sandbox-1a2b3c4d/http-proxy.sock".length);
+  });
+
+  test("counts bytes, not characters", () => {
+    expect(socketNameBytes(tmp, [`${tmp}/é.sock`])).toBe(7);
+  });
+
+  test("ignores sockets outside the temp folder, and throws when none is inside it", () => {
+    expect(socketNameBytes(tmp, [`${tmp}/a.sock`, "/tmp/a-much-longer-socket-name.sock"])).toBe(6);
+    expect(() => socketNameBytes(tmp, ["/tmp/x.sock"])).toThrow("no socket");
+  });
+
+  test("fits when the temp folder, a slash, and the name come to 103 bytes at most", () => {
+    // The maintainer's temp folder is 59 bytes (spec 1, "Session IDs").
+    expect(Buffer.byteLength(tmp)).toBe(59);
+    expect(fits(tmp, 43)).toBe(true);
+    expect(fits(tmp, 44)).toBe(false);
   });
 });
 
