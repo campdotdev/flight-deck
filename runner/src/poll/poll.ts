@@ -13,7 +13,7 @@ import { paths, sessionParts } from "../folders/index.ts";
 import { buildLaunch, type Auth, type Exit, type ExitKind, type Harness, type HarnessSession, type Launch } from "../harness/index.ts";
 import { hasWorkspace, othersCanRead, readConfig, readCredentials, writeEtc, type Config, type Credentials, type Registration } from "../install/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
-import { Outbox, SecretScan } from "../outbox/index.ts";
+import { Outbox, SecretScan, SecretScanFailed } from "../outbox/index.ts";
 import { blockerPause } from "../outbox/runner-comments/blocker.ts";
 import { failedTwice, type FailedExit } from "../outbox/runner-comments/failed-twice.ts";
 import { portPause } from "../outbox/runner-comments/port.ts";
@@ -633,7 +633,21 @@ export class Poll {
       return;
     }
     await this.state.log(now, `${entry.id} ${entry.issue}: failed (${failure.kind}) on attempt ${entry.attempt}`);
-    await this.runnerPause(now, repo, entry, failedTwice(failure), facts, workspace);
+    await this.runnerPause(now, repo, entry, failedTwice(await this.scanRule(repo, failure)), facts, workspace);
+  }
+
+  /**
+   * A refused rule can quote what the session wrote, such as `outcome.json`'s stage, so it goes through the secret
+   * scan before the comment posts it, as an error message does. A match, or a scan that can't run, leaves it out.
+   */
+  private async scanRule(repo: TrackerRepo, failure: FailedExit): Promise<FailedExit> {
+    if (failure.kind !== "refused" || failure.rule === null) return failure;
+    try {
+      return (await this.secrets.matches(repo.name, failure.rule)) ? { kind: "refused", rule: null } : failure;
+    } catch (error) {
+      if (error instanceof SecretScanFailed) return { kind: "refused", rule: null };
+      throw error;
+    }
   }
 
   /**
