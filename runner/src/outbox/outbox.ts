@@ -49,7 +49,10 @@ export class Outbox {
     if (repo === null) return { result: "failed", rule: `${session.repo} isn't registered on this Mac`, writes: [] };
     const tracker = options.identity;
     const lifecycle = new Lifecycle(tracker);
-    const issue = await tracker.issue({ id: session.issue, repo });
+    const read = await tracker.issue({ id: session.issue, repo });
+    const role = read.role;
+    if (role === null) return { result: "failed", rule: `${read.identifier}'s status ${read.status} has no role in ${repo.name}'s record`, writes: [] };
+    const issue = { ...read, role };
 
     const checked = await readEnvelope(sessionParts(sessionFolder).outbox, {
       version: this.options.version,
