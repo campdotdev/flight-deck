@@ -77,3 +77,11 @@ export function reportOf(description: string, runnerWroteBrief: boolean): string
 export function briefDescription(brief: string, description: string, runnerWroteBrief: boolean): string {
   return `${plusFolds(brief.trim())}\n\n${fold("Report", reportOf(description, runnerWroteBrief))}`;
 }
+
+/**
+ * Text with every `signature` query parameter taken out of its URLs, because the Linear MCP server signs each
+ * upload URL as it returns it, with a 5-minute expiry (ADR 0019).
+ */
+export function unsigned(text: string): string {
+  return text.replace(/([?&])signature=[^&\s)"'>]*(&?)/g, (_, lead: string, tail: string) => (tail === "" ? "" : lead));
+}
