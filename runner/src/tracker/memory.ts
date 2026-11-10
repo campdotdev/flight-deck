@@ -2,11 +2,20 @@
 // relies on, and records every write. Scenarios build their world through its `add*` methods and assert on
 // `writes`. The Tracker contract suite checks the same behavior against real Linear.
 import type { Role } from "../record/index.ts";
-import { briefDescription, plusFolds } from "./folds.ts";
+import { briefDescription, plusFolds, unsigned } from "./folds.ts";
 import { FACTORY_ROLES, roleOf } from "./roles.ts";
 import { TrackerUnavailable, type UnavailableReason } from "./unavailable.ts";
+import {
+  IssueNotFoundError,
+  type FiledIssue,
+  type IssueDraft,
+  type IssueRef,
+  type RelationKind,
+  type StatusType,
+  type SyncedIssueRef,
+  type UploadFile,
+} from "./types.ts";
 import type {
-  IssueRef,
   PostedComment,
   PostOptions,
   Snapshot,
@@ -21,9 +30,6 @@ import type {
   WriteBriefOptions,
 } from "./types.ts";
 
-/** Linear's status types. */
-export type StatusType = "triage" | "backlog" | "unstarted" | "started" | "completed" | "canceled" | "duplicate";
-
 /** One write the runner made, in the order Linear would have seen it. `issue` is the identifier. */
 export type TrackerWrite =
   | { kind: "move"; issue: string; status: string }
@@ -32,7 +38,11 @@ export type TrackerWrite =
   | { kind: "unsubscribe"; issue: string; user: string }
   | { kind: "comment"; issue: string; body: string }
   | { kind: "description"; issue: string; description: string }
-  | { kind: "duplicate"; issue: string; of: string; status: string };
+  | { kind: "duplicate"; issue: string; of: string; status: string }
+  | { kind: "detach"; issue: string; attachment: string }
+  | { kind: "upload"; name: string; url: string }
+  | { kind: "file"; issue: string; title: string; description: string; status: string }
+  | { kind: "relate"; issue: string; other: string; relation: RelationKind };
 
 export interface TokenRecord {
   session: string;
@@ -57,8 +67,13 @@ export interface StoredIssue {
   priority: number;
   created_at: string;
   comments: TrackerComment[];
+  /** The GitHub sync attachment, which stays after a detach as the link to the GitHub issue. */
   sync_attachment: string | null;
+  /** Whether the GitHub sync is on. */
+  synced: boolean;
   duplicate_of: string | null;
+  /** The relations `relate` made from this issue, by the other issue's UUID. */
+  relations: { kind: RelationKind; issue: string }[];
 }
 
 export interface NewIssue {
@@ -91,7 +106,7 @@ interface Team {
 }
 
 /** The writes a scenario can make Linear refuse. */
-export type RefusableWrite = "move" | "post" | "clearFlag" | "unsubscribe" | "writeBrief" | "markDuplicate";
+export type RefusableWrite = "move" | "post" | "clearFlag" | "unsubscribe" | "writeBrief" | "markDuplicate" | "file" | "relate" | "detach" | "upload";
 
 /** Roles whose issues a snapshot returns: the factory statuses and `intake`. */
 const SNAPSHOT_ROLES = new Set<Role>(["intake", ...FACTORY_ROLES]);
@@ -101,6 +116,8 @@ export class InMemoryTracker implements Tracker {
   readonly writes: TrackerWrite[] = [];
   /** Every Reader token minted, in order. */
   readonly tokens: TokenRecord[] = [];
+  /** Each uploaded file's bytes, by the URL `upload` returned. */
+  readonly uploads = new Map<string, Uint8Array>();
 
   private readonly clock: () => Date;
   /** The user every write acts as: the Flight Deck app user, or the maintainer for a hand run. */
@@ -129,6 +146,10 @@ export class InMemoryTracker implements Tracker {
 
   /** Files an issue as its creator, which subscribes them. */
   addIssue(input: NewIssue): StoredIssue {
+    return this.create(input);
+  }
+
+  private create(input: NewIssue): StoredIssue {
     const team = this.team(input.team);
     this.statusOf(team, input.status);
     const now = this.now();
@@ -151,7 +172,9 @@ export class InMemoryTracker implements Tracker {
       created_at: now,
       comments: [],
       sync_attachment: input.synced === true ? this.newId("attachment") : null,
+      synced: input.synced === true,
       duplicate_of: null,
+      relations: [],
     };
     this.issues.set(issue.id, issue);
     return issue;
@@ -197,7 +220,7 @@ export class InMemoryTracker implements Tracker {
   /** The stored issue, by UUID or identifier. */
   stored(id: string): StoredIssue {
     const issue = this.issues.get(id) ?? [...this.issues.values()].find((each) => each.identifier === id);
-    if (issue === undefined) throw new Error(`no issue ${id}`);
+    if (issue === undefined) throw new IssueNotFoundError(id);
     return issue;
   }
 
@@ -218,14 +241,15 @@ export class InMemoryTracker implements Tracker {
 
   async issue(ref: IssueRef): Promise<TrackerIssue> {
     const issue = this.stored(ref.id);
-    const read = this.snapshotIssue(issue, ref.repo);
-    if (read === null) throw new Error(`${issue.identifier}'s status ${issue.status} has no role`);
     return {
-      ...read,
+      ...this.read(issue, ref.repo),
+      team: issue.team,
+      status_type: this.statusOf(this.team(issue.team), issue.status).type,
       description: issue.description,
       creator: issue.creator,
       comments: issue.comments.map((comment) => ({ ...comment })),
-      sync_attachment: issue.sync_attachment,
+      synced: issue.synced,
+      sync_attachment: issue.synced ? issue.sync_attachment : null,
     };
   }
 
@@ -292,6 +316,40 @@ export class InMemoryTracker implements Tracker {
     this.writes.push({ kind: "duplicate", issue: issue.identifier, of: original.identifier, status });
   }
 
+  async file(draft: IssueDraft, role: Role): Promise<FiledIssue> {
+    this.refused("file");
+    const status = this.statusFor(draft.repo, role);
+    // Filing subscribes the creator, as Linear does.
+    const issue = this.create({ team: draft.repo.team, title: draft.title, description: draft.description, status, creator: this.actor });
+    this.writes.push({ kind: "file", issue: issue.identifier, title: issue.title, description: issue.description, status });
+    return { id: issue.id, repo: draft.repo, identifier: issue.identifier, url: this.url(draft.repo, issue) };
+  }
+
+  async relate(ref: IssueRef, other: IssueRef, kind: RelationKind): Promise<void> {
+    this.refused("relate");
+    const issue = this.stored(ref.id);
+    const to = this.stored(other.id);
+    issue.relations.push({ kind, issue: to.id });
+    this.writes.push({ kind: "relate", issue: issue.identifier, other: to.identifier, relation: kind });
+  }
+
+  async detach(ref: SyncedIssueRef): Promise<void> {
+    this.refused("detach");
+    const issue = this.stored(ref.id);
+    if (!issue.synced || issue.sync_attachment !== ref.sync_attachment) throw new Error(`${issue.identifier} isn't synced through ${ref.sync_attachment}`);
+    issue.synced = false;
+    this.writes.push({ kind: "detach", issue: issue.identifier, attachment: ref.sync_attachment });
+  }
+
+  async upload(file: UploadFile): Promise<string> {
+    this.refused("upload");
+    // Linear's `fileUpload` returns a signed asset URL. The adapter strips the signature, as the Linear adapter does.
+    const url = unsigned(`https://uploads.linear.app/workspace/${this.newId("upload")}/${encodeURIComponent(file.name)}?signature=signed`);
+    this.uploads.set(url, file.data);
+    this.writes.push({ kind: "upload", name: file.name, url });
+    return url;
+  }
+
   async sessionToken(session: TokenSession): Promise<string> {
     const token = `reader-${session.id}-${this.tokens.length + 1}`;
     this.tokens.push({ session: session.id, token, revoked: false });
@@ -326,15 +384,19 @@ export class InMemoryTracker implements Tracker {
   }
 
   private snapshotIssue(issue: StoredIssue, repo: TrackerRepo): SnapshotIssue | null {
-    const role = roleOf(repo, issue.status);
-    if (role === null) return null;
+    const read = this.read(issue, repo);
+    return read.role === null ? null : { ...read, role: read.role };
+  }
+
+  /** The fields a snapshot and `issue` share, with a `null` role for a status the repo's roles don't name. */
+  private read(issue: StoredIssue, repo: TrackerRepo): Omit<SnapshotIssue, "role"> & { role: Role | null } {
     return {
       id: issue.id,
       repo,
       identifier: issue.identifier,
       title: issue.title,
-      url: `https://linear.app/${repo.workspace}/issue/${issue.identifier}`,
-      role,
+      url: this.url(repo, issue),
+      role: roleOf(repo, issue.status),
       status: issue.status,
       status_since: issue.status_since,
       assignee: issue.assignee,
@@ -344,6 +406,10 @@ export class InMemoryTracker implements Tracker {
       priority: issue.priority,
       created_at: issue.created_at,
     };
+  }
+
+  private url(repo: TrackerRepo, issue: StoredIssue): string {
+    return `https://linear.app/${repo.workspace}/issue/${issue.identifier}`;
   }
 
   private statusFor(repo: TrackerRepo, role: Role): string {

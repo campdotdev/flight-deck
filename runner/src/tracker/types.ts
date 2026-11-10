@@ -86,14 +86,63 @@ export interface TrackerComment {
   synced: boolean;
 }
 
-/** One issue as `issue` returns it. */
-export interface TrackerIssue extends SnapshotIssue {
+/** Linear's status types. */
+export type StatusType = "triage" | "backlog" | "unstarted" | "started" | "completed" | "canceled" | "duplicate";
+
+/**
+ * One issue as `issue` returns it. It may sit on another team, or in a status the repo's roles don't name, such
+ * as the issue a duplicate's `of` names, so its role may be `null`.
+ */
+export interface TrackerIssue extends Omit<SnapshotIssue, "role"> {
+  role: Role | null;
+  /** The team key. */
+  team: string;
+  status_type: StatusType;
   description: string;
   /** The creator's user ID. */
   creator: string;
   comments: TrackerComment[];
-  /** The GitHub sync attachment's ID, or `null` when the issue isn't synced. */
+  /** Whether the issue is synced with a GitHub issue: its `syncedWith` holds a `github` entry (ADR 0008). */
+  synced: boolean;
+  /** The GitHub sync attachment's ID while the issue is synced, else `null`. */
   sync_attachment: string | null;
+}
+
+/** `issue` throws this when Linear has no issue by that ID, or the identity can't read it. */
+export class IssueNotFoundError extends Error {
+  constructor(readonly id: string) {
+    super(`no issue ${id}`);
+    this.name = "IssueNotFoundError";
+  }
+}
+
+/** A synced issue, with the sync attachment `detach` turns off. */
+export interface SyncedIssueRef extends IssueRef {
+  sync_attachment: string;
+}
+
+/** An issue `file` files: its team comes from the repo. */
+export interface IssueDraft {
+  repo: TrackerRepo;
+  title: string;
+  description: string;
+}
+
+/** An issue `file` filed. */
+export interface FiledIssue extends IssueRef {
+  identifier: string;
+  url: string;
+}
+
+/** The relations `relate` makes. Spec 4 adds blocking. */
+export type RelationKind = "related";
+
+/** A file `upload` uploads. */
+export interface UploadFile {
+  /** The file name, such as `before.png`. */
+  name: string;
+  contentType: string;
+  data: Uint8Array;
 }
 
 export interface PostOptions {
@@ -114,7 +163,7 @@ export interface TokenSession {
 
 /**
  * The Tracker's operations. Spec 1 builds the overview's whole interface. This version holds the operations
- * the runner uses so far; later tickets add `flag`, `file`, `relate`, `detach`, and `upload`.
+ * the runner uses so far; FLD-106 adds `flag`.
  */
 export interface Tracker {
   /**
@@ -143,6 +192,19 @@ export interface Tracker {
   writeBrief(issue: IssueRef, brief: string, options: WriteBriefOptions): Promise<void>;
   /** Makes the duplicate relation and moves the issue to the `duplicate` role. Only Lifecycle calls this. */
   markDuplicate(issue: IssueRef, of: IssueRef): Promise<void>;
+  /**
+   * Files an issue in the role's status, because Linear sends an issue created through the API to the team's
+   * default status otherwise (ADR 0013). It sets no label, priority, assignee, or delegate (ADR 0006).
+   */
+  file(draft: IssueDraft, role: Role): Promise<FiledIssue>;
+  relate(issue: IssueRef, other: IssueRef, kind: RelationKind): Promise<void>;
+  /**
+   * Turns off the issue's GitHub sync with `issueExternalSyncDisable`. The attachment stays as the link to the
+   * GitHub issue (ADR 0008).
+   */
+  detach(issue: SyncedIssueRef): Promise<void>;
+  /** Uploads a file with `fileUpload` and returns its asset URL without any `?signature=` (ADR 0019). */
+  upload(file: UploadFile): Promise<string>;
 
   /** Mints the session's Flight Deck Reader token. */
   sessionToken(session: TokenSession): Promise<string>;

@@ -187,12 +187,13 @@ export class Poll {
   private async runnerPause(now: Date, repo: TrackerRepo, entry: SessionEntry, text: RunnerText, facts: RunnerFacts, workspace: Workspace): Promise<void> {
     await this.finish(entry, workspace);
     const issue = await this.tracker.issue({ id: entry.issue_id, repo });
-    if (issue.role !== WORKING[entry.stage]) {
-      await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, no pause posted`);
+    const working = WORKING[entry.stage];
+    if (working === undefined || issue.role !== working) {
+      await this.state.log(now, `${entry.id} ${entry.issue}: left ${working}, no pause posted`);
       return;
     }
     const comment = runnerComment(text, facts, { version: this.version, statuses: repo.statuses });
-    const result = await this.comments(now).post(issue, comment);
+    const result = await this.comments(now).post({ ...issue, role: working }, comment);
     await this.state.log(now, `${entry.id} ${entry.issue}: runner pause ${result}: ${comment.statusLine}`);
   }
 
