@@ -142,7 +142,7 @@ export interface PendingComment {
  * Why the runner put an issue back in its queue without using the stage's retry: a plan limit, an expired
  * login, a failed Reader mint, or a shutdown (spec 1, "Exits"). Each ticket that requeues adds its exit here.
  */
-export type RestartCause = "rate_limited" | "login_expired" | "shutdown";
+export type RestartCause = "rate_limited" | "login_expired" | "linear_token" | "shutdown";
 
 /** The next take keeps this attempt, because the requeue that set it used no retry (ADR 0002). */
 export interface Restart {

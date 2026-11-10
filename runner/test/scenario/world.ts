@@ -74,7 +74,11 @@ export const outbox = {
 
 const VERSION = "0.1.0";
 /** `credentials.env` with every campdotdev secret, so the workspace has a Linear login. */
-const CREDENTIALS = ["APP_ID", "APP_SECRET", "READER_ID", "READER_SECRET", "SETUP_KEY"].map((name) => `LINEAR_${name}_CAMPDOTDEV=test-${name.toLowerCase()}`).join("\n") + "\n";
+function credentialsFor(workspace: string): string {
+  const key = workspace.toUpperCase().replaceAll("-", "_");
+  return ["APP_ID", "APP_SECRET", "READER_ID", "READER_SECRET", "SETUP_KEY"].map((name) => `LINEAR_${name}_${key}=test-${name.toLowerCase()}`).join("\n") + "\n";
+}
+const CREDENTIALS = credentialsFor("campdotdev");
 const START = new Date("2026-11-10T09:00:00Z");
 
 export interface WorldOptions {
@@ -159,15 +163,22 @@ export class World {
 
   /**
    * Registers a second repo on its own team, with Shaders' statuses and record, on its own bare remote. Issues on
-   * it are filed with `world.issue({ team, ... })`.
+   * it are filed with `world.issue({ team, ... })`. With `workspace`, the repo's team sits in another Linear
+   * workspace, with its own login.
    */
-  async addRepo(input: { name: string; team: string }): Promise<void> {
+  async addRepo(input: { name: string; team: string; workspace?: string }): Promise<void> {
     const slug = input.name.replace("/", "-");
     const remote = join(this.root, `${slug}.git`);
-    await makeRemote(this.root, remote, SHADERS_RECORD.replace('team = "SHA"', `team = "${input.team}"`));
+    const workspace = input.workspace ?? "campdotdev";
+    await makeRemote(this.root, remote, SHADERS_RECORD.replace('team = "SHA"', `team = "${input.team}"`).replace('workspace = "campdotdev"', `workspace = "${workspace}"`));
     this.tracker.addTeam({ key: input.team, name: input.name, statuses: Object.values(STATUSES).map(([name, type]) => ({ name, type })) });
     const first = this.config.repos[0]!;
-    this.config.repos.push({ ...first, name: input.name, remote, checkout: join(this.root, `checkout-${slug}`), tracker: { ...first.tracker, team: input.team } });
+    this.config.repos.push({ ...first, name: input.name, remote, checkout: join(this.root, `checkout-${slug}`), tracker: { ...first.tracker, workspace, team: input.team } });
+    if (this.config.linear[workspace] === undefined) {
+      this.config.linear[workspace] = { ...this.config.linear.campdotdev! };
+      const credentials = await readFile(join(this.folders.config, "credentials.env"), "utf8");
+      await this.writeCredentials(credentials + credentialsFor(workspace));
+    }
     await this.writeConfig();
   }
 
