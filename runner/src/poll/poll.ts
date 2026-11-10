@@ -32,6 +32,7 @@ import { Trouble } from "./trouble/trouble.ts";
 import { MIN_VERSION, tooOld } from "./trouble/version.ts";
 import { notify } from "./trouble/notify.ts";
 import { Trials, type TrialEvents, type TrialResult } from "./trial.ts";
+import { LoginWatch } from "./login.ts";
 
 export interface PollOptions {
   folders: Folders;
@@ -86,6 +87,8 @@ export class Poll {
   /** `tick`, `hold`, `start`, and `stop` run one at a time, in the order they're called. */
   private queue: Promise<unknown> = Promise.resolve();
   private readonly trials: Trials;
+  /** Claude Code's login: `claude_login` after an expired login, and `claude_login_soon` after its warning. */
+  private readonly login = new LoginWatch();
 
   constructor(options: PollOptions) {
     this.folders = options.folders;
@@ -105,6 +108,7 @@ export class Poll {
       events: (id) => ({
         exit: (exit) => void this.exits.push({ session: id, exit }),
         rateLimit: () => {},
+        loginExpiring: (warning) => this.login.expiring(id, warning),
       }),
     });
   }
@@ -202,6 +206,7 @@ export class Poll {
       await this.atStart(now, config, workspace);
     }
     const trouble = await Trouble.load(this.state);
+    this.login.poll(trouble);
     await this.handleExits(now, config, workspace, trouble);
     const credentials = await this.checkCredentials(trouble);
     checkSharedTeams(config, trouble);
@@ -286,6 +291,7 @@ export class Poll {
     for (const { session, exit } of queued) {
       const entry = (await this.state.sessions()).find((each) => each.id === session);
       if (entry === undefined) continue;
+      this.login.exited(now, entry, exit, trouble);
       // A trial has no repo, no issue, and no Reader token.
       if (entry.stage === "trial") {
         await this.trials.exited({ now, entry, exit, workspace, trouble });
@@ -423,6 +429,7 @@ export class Poll {
       // 6. Flags, and 7. Subscriptions.
       await this.flags(now, tracker, snapshot, handled);
       await this.subscriptions(tracker, snapshot, handled);
+      await this.forgetRestarts(tracker, snapshot);
       // 8. Stale takes.
       stale = await staleTakes({
         now,
@@ -594,6 +601,18 @@ export class Poll {
     }
   }
 
+  /**
+   * The attempt resets to 1 whenever the issue leaves the working status, except when the runner requeues it
+   * (spec 1, "Exits"). So a requeued issue keeps its attempt only while it waits in its queue for the next take.
+   */
+  private async forgetRestarts(repo: TrackerRepo, snapshot: Snapshot): Promise<void> {
+    for (const { uuid, memory } of await this.state.issueMemories(repo.name)) {
+      if (memory.restart === null) continue;
+      if (snapshot.issues.find((issue) => issue.id === uuid)?.role === "ready_to_plan") continue;
+      await this.state.writeIssueMemory(repo.name, uuid, { ...memory, restart: null });
+    }
+  }
+
   // Starts.
 
   private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace, trouble: Trouble): Promise<void> {
@@ -654,6 +673,7 @@ export class Poll {
     const stage: Stage = "plan";
     const id = await workspace.newSessionId();
     const worktree = paths.worktree(this.folders, id);
+    const memory = await this.state.issueMemory(registration.name, issue.id);
     const entry: SessionEntry = {
       id,
       repo: registration.name,
@@ -662,7 +682,8 @@ export class Poll {
       title: issue.title,
       stage,
       mode: "issue",
-      attempt: retry?.attempt ?? 1,
+      // A retry has its attempt. A take after a requeue keeps the attempt the requeue recorded (ADR 0002).
+      attempt: retry?.attempt ?? memory.restart?.attempt ?? 1,
       pid: null,
       pid_started_at: null,
       claude_uuid: null,
@@ -681,6 +702,7 @@ export class Poll {
         await this.dropEntry(id);
         return;
       }
+      if (memory.restart !== null) await this.state.writeIssueMemory(registration.name, issue.id, { ...memory, restart: null });
     } else {
       await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
     }
@@ -697,7 +719,6 @@ export class Poll {
     const deadline = new Date(now.getTime() + durationMs(record.time_limits.plan)).toISOString();
     const linear = config.linear[repo.workspace];
     const full = await this.tracker.issue(issue);
-    const memory = await this.state.issueMemory(registration.name, issue.id);
 
     // 3. Prepare, then the launch. A failure of either is a failed session.
     let prepared;
@@ -767,6 +788,7 @@ export class Poll {
       exit: (exit) => void this.exits.push({ session: id, exit }),
       // FLD-105 turns each event into the plan-limit hold.
       rateLimit: () => {},
+      loginExpiring: (warning) => this.login.expiring(id, warning),
     });
     const running: SessionEntry = {
       ...entry,

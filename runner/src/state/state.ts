@@ -114,7 +114,19 @@ export interface PendingComment {
   url: string;
 }
 
-/** One issue's memory, keyed by Linear's UUID. Later tickets add the attempt and more. */
+/**
+ * Why the runner put an issue back in its queue without using the stage's retry: a plan limit, an expired
+ * login, a failed Reader mint, or a shutdown (spec 1, "Exits"). Each ticket that requeues adds its exit here.
+ */
+export type RestartCause = "rate_limited" | "login_expired";
+
+/** The next take keeps this attempt, because the requeue that set it used no retry (ADR 0002). */
+export interface Restart {
+  attempt: number;
+  after: RestartCause;
+}
+
+/** One issue's memory, keyed by Linear's UUID. Later tickets add more. */
 export interface IssueMemory {
   /** The brief the runner last wrote for the issue, or `null`. */
   brief: string | null;
@@ -129,6 +141,8 @@ export interface IssueMemory {
    * issue gets one stale-take flag per stay (ADR 0011).
    */
   stale_take: string | null;
+  /** The attempt the next take keeps, set when the runner requeued the issue, or `null` for attempt 1. */
+  restart: Restart | null;
 }
 
 /**
@@ -162,7 +176,7 @@ export interface TrialPass {
   passed_at: string;
 }
 
-const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, stale_take: null };
+const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, stale_take: null, restart: null };
 
 export class State {
   constructor(private readonly folders: Folders) {}
