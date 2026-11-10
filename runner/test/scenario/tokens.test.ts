@@ -221,6 +221,50 @@ describe("a failed Reader mint", () => {
   });
 });
 
+describe("a failed Reader mint uses no retry", () => {
+  test("a take at attempt 2 goes back to Ready to plan and keeps attempt 2", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    const resetsAt = new Date(world.now.getTime() + 60 * 60_000).toISOString();
+    world.harness.script(issue.identifier, { exit: { kind: "timed_out" } });
+    world.harness.script(issue.identifier, { exit: { kind: "rate_limited", resetsAt } });
+    await world.tick();
+    await world.tick();
+    await world.tick();
+    expect(world.harness.started.map((each) => each.sessionJson.attempt)).toEqual([1, 2]);
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+
+    // The take after the plan limit carries attempt 2, and its Reader mint fails.
+    world.tracker.failMints("reader", "campdotdev");
+    await world.tick(new Date(resetsAt));
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+    expect(world.harness.started).toHaveLength(2);
+
+    world.tracker.failMints("reader", "campdotdev", false);
+    world.harness.script(issue.identifier, {});
+    await world.tick(new Date(Date.parse(resetsAt) + 60_000));
+    expect(world.harness.started.map((each) => each.sessionJson.attempt)).toEqual([1, 2, 2]);
+    expect(world.tracker.writes.filter((write) => write.kind === "comment")).toEqual([]);
+  });
+
+  test("a retry waits again as retry_waiting, in Planning, with its attempt", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "timed_out" } });
+    await world.tick();
+    world.tracker.failMints("reader", "campdotdev");
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
+    expect((await world.status()).sessions.map(({ issue, state }) => ({ issue, state }))).toEqual([{ issue: issue.identifier, state: "retry_waiting" }]);
+
+    world.tracker.failMints("reader", "campdotdev", false);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    expect(world.harness.started.map((each) => each.sessionJson.attempt)).toEqual([1, 2]);
+  });
+});
+
 describe("each session's Reader token", () => {
   const ENDINGS: [string, ExitKind][] = [
     ["exits", { kind: "exited", code: 0 }],

@@ -862,6 +862,9 @@ export class Poll {
       return;
     }
     await this.dropEntry(entry.id);
+    // The next take keeps this one's attempt, as after any requeue (ADR 0002).
+    const memory = await this.state.issueMemory(entry.repo, issue.id);
+    await this.state.writeIssueMemory(entry.repo, issue.id, { ...memory, restart: { attempt: entry.attempt, after: "linear_token" } });
     const moved = await this.lifecycle.move({ ...issue, role: "planning" }, "ready_to_plan", "requeue");
     await this.state.log(now, `${entry.id} ${entry.issue}: no Reader token, ${moved.ok ? "back in ready_to_plan" : `requeue refused: ${moved.violation}`}`);
   }
