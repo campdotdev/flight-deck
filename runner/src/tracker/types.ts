@@ -155,6 +155,12 @@ export interface WriteBriefOptions {
   runnerWroteBrief: boolean;
 }
 
+/**
+ * What `checkTeam` found: the team reads and has every status the role map names, or the Flight Deck app
+ * can't read the team, or some names are missing, as roles in the record's role order (ADR 0006).
+ */
+export type TeamCheck = { ok: true } | { ok: false; reason: "unreadable" } | { ok: false; reason: "missing"; roles: Role[] };
+
 /** A session the Reader token is for. */
 export interface TokenSession {
   id: string;
@@ -162,8 +168,7 @@ export interface TokenSession {
 }
 
 /**
- * The Tracker's operations. Spec 1 builds the overview's whole interface. This version holds the operations
- * the runner uses so far; FLD-106 adds `flag`.
+ * The Tracker's operations. Spec 1 builds the overview's whole interface.
  */
 export interface Tracker {
   /**
@@ -173,6 +178,11 @@ export interface Tracker {
   snapshot(repo: TrackerRepo, options?: SnapshotOptions): Promise<Snapshot>;
   /** One issue with its description, comments, and sync state. */
   issue(issue: IssueRef): Promise<TrackerIssue>;
+  /**
+   * The team query of poll step 2: whether the team exists and the app can read it, and whether every status
+   * name in the repo's role map exists on it. The adapter keeps the role map, so the check lives here (ADR 0006).
+   */
+  checkTeam(repo: TrackerRepo): Promise<TeamCheck>;
 
   /** Only Lifecycle calls this. */
   move(issue: IssueRef, role: Role): Promise<void>;
@@ -186,6 +196,8 @@ export interface Tracker {
    * assignee subscribed (ADR 0011).
    */
   clearFlag(issue: IssueRef): Promise<void>;
+  /** Assigns the maintainer and posts nothing, for a trouble issue (ADR 0019). */
+  flag(issue: IssueRef): Promise<void>;
   /** Unsubscribes the maintainer, only when they're subscribed. */
   unsubscribe(issue: IssueRef): Promise<void>;
   /** Replaces the description with the brief, then a `+++ Report` fold that holds the report. */
