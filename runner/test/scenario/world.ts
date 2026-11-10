@@ -1,9 +1,10 @@
 // The scenario harness: the in-memory world at the one seam (spec 1, "The seam"). A scenario builds the world,
 // scripts each session, runs ticks, and asserts on the in-memory Tracker, the scripted Harness, and
 // `status.json`. It never reads or writes the session list or issue memory.
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import type { Folders } from "../../src/folders/index.ts";
+import { dirname, join } from "node:path";
+import { paths, type Folders } from "../../src/folders/index.ts";
 import { ScriptedHarness } from "../../src/harness/index.ts";
 import type { Config } from "../../src/install/index.ts";
 import { Poll } from "../../src/poll/index.ts";
@@ -89,6 +90,8 @@ export const outbox = {
 const VERSION = "0.1.0";
 /** The repo's `vendor/sandbox-runtime/`, which `bun install` fills. */
 const VENDOR_SANDBOX_RUNTIME = new URL("../../../vendor/sandbox-runtime", import.meta.url).pathname;
+/** The repo's `vendor/betterleaks`, which `scripts/fetch-betterleaks.sh` puts there. */
+const VENDOR_BETTERLEAKS = new URL("../../../vendor/betterleaks", import.meta.url).pathname;
 /** `credentials.env` with every campdotdev secret, so the workspace has a Linear login. */
 function credentialsFor(workspace: string): string {
   const key = workspace.toUpperCase().replaceAll("-", "_");
@@ -167,11 +170,13 @@ export class World {
     }
     await writeFile(join(folders.config, "gitconfig-runner"), "");
     // The version folder's binary is Bun itself, which acts as Bun under BUN_BE_BUN as the compiled binary
-    // does, and its vendored sandbox-runtime is the repo's.
+    // does, and its vendored sandbox-runtime and Betterleaks are the repo's.
     await mkdir(join(versionFolder, "bin"), { recursive: true });
     await symlink(process.execPath, join(versionFolder, "bin", "flight-deck"));
     await mkdir(join(versionFolder, "vendor"), { recursive: true });
     await symlink(VENDOR_SANDBOX_RUNTIME, join(versionFolder, "vendor", "sandbox-runtime"));
+    if (!existsSync(VENDOR_BETTERLEAKS)) throw new Error("vendor/betterleaks is missing. Run scripts/fetch-betterleaks.sh.");
+    await symlink(VENDOR_BETTERLEAKS, join(versionFolder, "vendor", "betterleaks"));
     // The shipped skill Shaders' record names in `plan.reproduce`, so its slot resolves.
     await mkdir(join(versionFolder, "skills", "reproducing-bugs"), { recursive: true });
     await writeFile(join(versionFolder, "skills", "reproducing-bugs", "SKILL.md"), "---\nname: reproducing-bugs\n---\n");
@@ -227,6 +232,13 @@ export class World {
     }
     await this.writeConfig();
     await this.refreshCache(input.name);
+  }
+
+  /** Copies a gitignored file into Flight Deck's own folder, as `flight-deck register --files` does (ADR 0007). */
+  async copyFile(path: string, text: string, name = this.repo): Promise<void> {
+    const target = join(paths.files(this.folders, name), path);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, text);
   }
 
   /** Files an issue as the maintainer, in Backlog unless it says otherwise. */

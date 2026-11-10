@@ -4,12 +4,15 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
-import { readJson, writeJson, type IssueMemory, type State } from "../state/index.ts";
+import { readJson, writeJson, type Answer, type IssueMemory, type State } from "../state/index.ts";
 import { IssueNotFoundError, isUnavailable, TrackerRefused, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
 import { duplicateLine, followUpFooter, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
-import { readEnvelope } from "./envelope.ts";
+import { readEnvelope, type Envelope } from "./envelope.ts";
 import { contentType, embedImages, nameImages } from "./media.ts";
+import { runnerComment } from "./runner-comments/frame.ts";
+import { secretScanPause } from "./runner-comments/secret-scan.ts";
+import { SecretScanFailed, type ScanText, type SecretHit, type SecretScan } from "./secret-scan.ts";
 
 export type ApplyResult =
   /** Every write landed. */
@@ -46,6 +49,8 @@ export interface OutboxOptions {
   repo(name: string): TrackerRepo | null;
   /** Where issue memory's writes go. `state`'s files by default. Reads always come from `state`. */
   memory?: IssueMemoryWrites;
+  /** The secret scan every apply runs before its first write. */
+  secrets: SecretScan;
 }
 
 /**
@@ -116,8 +121,17 @@ export class Outbox {
     const { envelope } = checked;
     const { move, answers = [], needs } = envelope.outcome;
 
+    // Before any write, the scan reads everything the outbox would post (ADR 0007).
+    let hits: SecretHit[];
+    try {
+      hits = await this.options.secrets.scan(session.repo, scanTexts(envelope));
+    } catch (error) {
+      if (!(error instanceof SecretScanFailed)) throw error;
+      return { result: "failed", rule: `the secret scan couldn't run: ${error.message}`, writes: [] };
+    }
+
     let original: TrackerIssue | null = null;
-    if (move === "duplicate") {
+    if (move === "duplicate" && hits.length === 0) {
       const of = await originalOf(tracker, repo, issue, envelope.outcome.of ?? "");
       if (typeof of === "string") return { result: "failed", rule: of, writes: [] };
       original = of;
@@ -183,34 +197,52 @@ export class Outbox {
       ],
     ]);
 
-    // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
-    let steps: Step[];
-    if (move === "paused") {
+    // A pause's writes: the flag in issue memory, the flagged comment, the move, then the answers.
+    const pauseSteps = (statusLine: string, body: (applied: Applied) => string, pauseAnswers: readonly Answer[], toPaused: Step): Step[] => {
       let commentAt: string | null = null;
-      steps = [
+      return [
         [
           "post",
           async (applied) => {
             // The flag goes into issue memory first, so the next poll never takes the assignee for one the runner didn't set.
-            const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since: this.options.clock().toISOString() };
+            const flag = { cause: "pause" as const, status_line: statusLine, since: this.options.clock().toISOString() };
             await this.memory.write(session.repo, issue.id, { flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } });
-            commentAt = (await tracker.post(ref, comment(applied.uploads), { flag: true })).created_at;
+            commentAt = (await tracker.post(ref, body(applied), { flag: true })).created_at;
             return null;
           },
         ],
-        moveStep,
+        toPaused,
         [
           "pause",
           async () => {
             const memory = await state.issueMemory(session.repo, issue.id);
             // A resumed apply lost the comment's time, and the flag's start comes just before it.
             const at = commentAt ?? memory.flag?.since ?? this.options.clock().toISOString();
-            await this.memory.write(session.repo, issue.id, { pause: { answers, comment_at: at, replies: [] } });
+            await this.memory.write(session.repo, issue.id, { pause: { answers: [...pauseAnswers], comment_at: at, replies: [] } });
             return null;
           },
         ],
-        ...followUpSteps,
       ];
+    };
+
+    // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
+    let steps: Step[];
+    let reason: string | null = null;
+    if (hits.length > 0) {
+      // A hit pauses the issue with the runner's own text, and posts, uploads, and files nothing from the session.
+      const paused = await runnerComment(secretScanPause(hits), {}, { version: this.options.version, statuses: repo.statuses });
+      const toPaused: Step = [
+        "move",
+        async () => {
+          const moved = await lifecycle.move({ ...ref, role: issue.role }, "paused", "pause");
+          return moved.ok ? null : moved.violation;
+        },
+      ];
+      reason = paused.statusLine;
+      steps = pauseSteps(paused.statusLine, () => paused.body, paused.answers ?? [], toPaused);
+    } else if (move === "paused") {
+      reason = opening(phrase, envelope.summary).statusLine;
+      steps = [...pauseSteps(reason, (applied) => comment(applied.uploads), answers, moveStep), ...followUpSteps];
     } else if (move === "duplicate") {
       steps = [...detachSteps, postStep(false), moveStep, ...followUpSteps];
     } else {
@@ -232,7 +264,7 @@ export class Outbox {
       ];
     }
 
-    for (const [name, write] of [...uploadSteps, ...steps]) {
+    for (const [name, write] of [...(hits.length > 0 ? [] : uploadSteps), ...steps]) {
       if (applied.writes.includes(name)) continue;
       if (options.dryRun !== true) {
         let violation: string | null;
@@ -250,9 +282,19 @@ export class Outbox {
       writes.push(name);
       options.onWrite?.(name);
     }
-    if (move === "paused") return { result: "paused", reason: opening(phrase, envelope.summary).statusLine, writes };
+    if (reason !== null) return { result: "paused", reason, writes };
     return { result: "applied", writes };
   }
+}
+
+/** Everything an outbox would post: `summary.md`, the handoff file, each answer's `does`, and each follow-up issue. */
+function scanTexts(envelope: Envelope): ScanText[] {
+  return [
+    ...(envelope.summary === null ? [] : [{ file: "summary.md", text: envelope.summary }]),
+    ...(envelope.handoff === null ? [] : [{ file: envelope.handoff.name, text: envelope.handoff.text }]),
+    ...(envelope.outcome.answers ?? []).map((answer) => ({ file: "outcome.json", text: answer.does })),
+    ...envelope.followUps.map((followUp) => ({ file: followUp.name, text: `# ${followUp.title}\n\n${followUp.description}` })),
+  ];
 }
 
 /**
