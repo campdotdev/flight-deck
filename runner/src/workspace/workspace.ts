@@ -160,7 +160,8 @@ export class Workspace {
       agents_md: null,
     };
     await writeFile(parts.sessionJson, `${JSON.stringify(json, null, 2)}\n`);
-    return { session: plan.session, sessionFolder, ...parts, worktree, port: null, appUrl: null };
+    const { sessionJson, inbox, outbox, tmp, deps } = parts;
+    return { session: plan.session, sessionFolder, sessionJson, inbox, outbox, tmp, deps, worktree, port: null, appUrl: null };
   }
 
   /**

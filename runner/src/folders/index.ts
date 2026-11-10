@@ -52,6 +52,10 @@ export const paths = {
   worktree: (f: Folders, session: string) => join(f.sessionRoot, "worktrees", session),
   sessions: (f: Folders) => join(f.sessionRoot, "sessions"),
   sessionFolder: (f: Folders, session: string) => join(f.sessionRoot, "sessions", session),
+  /** The dependency cache, `cache/<owner>/<repo>/`. */
+  cache: (f: Folders, repo: string) => join(f.sessionRoot, "cache", repoPath(repo)),
+  /** The files every session's sandbox reads, outside `~` (spec 1, "Folders and files"). */
+  etc: (f: Folders) => join(f.sessionRoot, "etc"),
 
   /** The folder Claude Code makes for a worktree: its path with every character but a letter or digit as `-`. */
   claudeProject: (f: Folders, worktree: string) => join(f.home, ".claude", "projects", worktree.replace(/[^A-Za-z0-9]/g, "-")),
@@ -65,5 +69,7 @@ export function sessionParts(folder: string) {
     outbox: join(folder, "outbox"),
     tmp: join(folder, "tmp"),
     deps: join(folder, "deps"),
+    /** The package manager's folders, and the empty config folders turbo and Vercel get. */
+    home: join(folder, "home"),
   };
 }
