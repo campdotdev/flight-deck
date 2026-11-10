@@ -168,6 +168,23 @@ describe("after 3 hours", () => {
     expect(existsSync(kept(issue))).toBe(false);
   }, 30_000);
 
+  test("from an older version, its next take after the retry deletes it and starts a fresh session", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    await keep(issue);
+    world.reply(issue, "retry");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+    // flight-deck update restarts the runner on a new version, which can't apply the old one's outbox (ADR 0015).
+    world.restart({ version: "0.1.0-dev.20261111T000000Z" });
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    expect(existsSync(kept(issue))).toBe(false);
+    expect(world.harness.started).toHaveLength(2);
+    expect(world.harness.started[1]!.sessionJson).toMatchObject({ version: "0.1.0-dev.20261111T000000Z", attempt: 1 });
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
+    expect((await world.status()).sessions.map(({ issue: id, state }) => ({ id, state }))).toEqual([{ id: issue.identifier, state: "running" }]);
+  }, 30_000);
+
   test("a hand move back to Ready to plan applies the kept outbox too", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     await keep(issue);

@@ -118,6 +118,12 @@ export class ApplyWaiting {
       return false;
     }
     const session = JSON.parse(await readFile(sessionParts(folder).sessionJson, "utf8")) as SessionJson;
+    // An older version's outbox can't be applied (ADR 0015), as after `flight-deck update`, so the take starts a
+    // fresh session instead of spending the stage's retry on a refusal.
+    if (session.version !== this.options.version) {
+      await this.forgetKept(now, repo.name, issue.id, `${issue.identifier}: the kept outbox is from Flight Deck ${session.version}, so it's deleted and the take starts a session`);
+      return false;
+    }
     const waiting = waitingEntry(
       {
         id: session.session,
