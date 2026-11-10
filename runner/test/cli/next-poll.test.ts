@@ -9,8 +9,9 @@ import { linearApps, readCredentials, writeCredentials } from "../../src/install
 import { LinearTracker } from "../../src/tracker/index.ts";
 import { World } from "../scenario/world.ts";
 import { FakeLinear } from "../tracker/linear/fake-linear.ts";
-import { repo, teamReply, STATUSES } from "../tracker/linear/linear-world.ts";
+import { repo, teamReply } from "../tracker/linear/linear-world.ts";
 import { cli } from "./cli.ts";
+import { STATUS_NAMES } from "../statuses.ts";
 
 let cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -64,7 +65,7 @@ test("a secret rotated in credentials.env is the one the runner's next mint send
   const linear = FakeLinear.start();
   cleanup.push(async () => linear.stop());
   linear.apps.set("fd-client", "old-secret");
-  linear.on("FlightDeckTeam", teamReply(Object.values(STATUSES)));
+  linear.on("FlightDeckTeam", teamReply(Object.values(STATUS_NAMES)));
   await writeCredentials(folders, { LINEAR_APP_ID_CAMPDOTDEV: "fd-client", LINEAR_APP_SECRET_CAMPDOTDEV: "old-secret" });
   // The runner's adapter, as `PRODUCTION_RUNNER` builds it, with Linear's origin pointed at the fake.
   const tracker = new LinearTracker({ identity: { kind: "flight_deck" }, apps: async (ws) => linearApps(await readCredentials(folders), ws), api: linear.url });

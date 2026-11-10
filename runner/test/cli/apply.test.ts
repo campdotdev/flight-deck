@@ -5,8 +5,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { RunnerSocket } from "../../src/runner/index.ts";
 import { TrackerRefused, type StoredIssue, type TrackerWrite } from "../../src/tracker/index.ts";
-import { outbox, STATUSES, World } from "../scenario/world.ts";
+import { outbox, World } from "../scenario/world.ts";
 import { cli, listen } from "./cli.ts";
+import { STATUSES } from "../statuses.ts";
 
 let world: World;
 let socket: RunnerSocket | null;

@@ -10,29 +10,10 @@ import type { Config } from "../../src/install/index.ts";
 import { Poll } from "../../src/poll/index.ts";
 import { readRecord, type Role } from "../../src/record/index.ts";
 import type { Status } from "../../src/state/index.ts";
-import { InMemoryTracker, type NewIssue, type StatusType, type StoredIssue } from "../../src/tracker/index.ts";
+import { InMemoryTracker, type NewIssue, type StoredIssue } from "../../src/tracker/index.ts";
 import { Workspace } from "../../src/workspace/index.ts";
 import { toToml } from "../../src/install/toml.ts";
-
-/** Shaders' statuses, with the status type Linear gives each. */
-export const STATUSES: Record<Role, [string, StatusType]> = {
-  intake: ["Triage", "triage"],
-  backlog: ["Backlog", "backlog"],
-  ready_to_plan: ["Ready to plan", "unstarted"],
-  planning: ["Planning", "started"],
-  ready_to_build: ["Ready to build", "unstarted"],
-  building: ["Building", "started"],
-  ready_to_check: ["Ready to check", "unstarted"],
-  checking: ["Checking", "started"],
-  landed: ["Landed", "started"],
-  paused: ["Paused", "started"],
-  in_review: ["In Review", "started"],
-  done: ["Done", "completed"],
-  canceled: ["Canceled", "canceled"],
-  duplicate: ["Duplicate", "duplicate"],
-};
-
-const statusNames = Object.fromEntries(Object.entries(STATUSES).map(([role, [name]]) => [role, name])) as Record<Role, string>;
+import { STATUS_NAMES, STATUSES } from "../statuses.ts";
 
 /**
  * The test record's dependency install: it writes a package into `node_modules` and a blob into pnpm's store,
@@ -147,7 +128,7 @@ export class World {
           checkout: join(root, "checkout"),
           package_manager: "/usr/bin/true",
           path: "/usr/bin:/bin:/usr/sbin:/sbin",
-          tracker: { kind: "linear", workspace: "campdotdev", team: "SHA", statuses: statusNames },
+          tracker: { kind: "linear", workspace: "campdotdev", team: "SHA", statuses: STATUS_NAMES },
         },
       ],
       linear: { campdotdev: { maintainer_id: this.maintainer.id, maintainer_name: this.maintainer.name, app_user_id: this.appUser } },

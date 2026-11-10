@@ -1,29 +1,12 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import type { Role } from "../../src/record/index.ts";
 import { InMemoryTracker, IssueNotFoundError, MintFailed, TrackerUnavailable, unsigned, type IssueRef, type TrackerRepo } from "../../src/tracker/index.ts";
-
-const STATUSES: Record<Role, string> = {
-  intake: "Triage",
-  backlog: "Backlog",
-  ready_to_plan: "Ready to plan",
-  planning: "Planning",
-  ready_to_build: "Ready to build",
-  building: "Building",
-  ready_to_check: "Ready to check",
-  checking: "Checking",
-  landed: "Landed",
-  paused: "Paused",
-  in_review: "In Review",
-  done: "Done",
-  canceled: "Canceled",
-  duplicate: "Duplicate",
-};
+import { STATUS_NAMES } from "../statuses.ts";
 
 const repo: TrackerRepo = {
   name: "campdotdev/shaders",
   workspace: "campdotdev",
   team: "SHA",
-  statuses: STATUSES,
+  statuses: STATUS_NAMES,
   maintainer: "maintainer",
 };
 
@@ -35,7 +18,7 @@ beforeEach(() => {
   tracker = new InMemoryTracker({ clock: () => now, appUser: "app" });
   tracker.addUser({ id: "maintainer", name: "Hunter" });
   tracker.addUser({ id: "stranger", name: "Sam" });
-  tracker.addTeam({ key: "SHA", name: "Shaders", statuses: Object.values(STATUSES).map((name) => ({ name, type: "started" })) });
+  tracker.addTeam({ key: "SHA", name: "Shaders", statuses: Object.values(STATUS_NAMES).map((name) => ({ name, type: "started" })) });
 });
 
 function issue(description = "The button is blue.", status = "Planning"): IssueRef & { identifier: string } {
@@ -80,7 +63,7 @@ describe("what the in-memory Tracker models", () => {
 
   test("intake and backlog may name one status, which reads back as intake", async () => {
     const one = issue("x", "Backlog");
-    const shared = { ...repo, statuses: { ...STATUSES, intake: "Backlog" } };
+    const shared = { ...repo, statuses: { ...STATUS_NAMES, intake: "Backlog" } };
     expect((await tracker.issue({ id: one.id, repo: shared })).role).toBe("intake");
   });
 });

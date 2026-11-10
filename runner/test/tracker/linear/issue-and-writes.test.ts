@@ -4,7 +4,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { IssueNotFoundError, TrackerRefused, type LinearTracker } from "../../../src/tracker/index.ts";
 import { notFound, type FakeLinear } from "./fake-linear.ts";
-import { commentNode, issueNode, page, repo, stateId, STATUSES, TEAM_ID, teamReply, uuid, world } from "./linear-world.ts";
+import { commentNode, issueNode, page, repo, stateId, TEAM_ID, teamReply, uuid, world } from "./linear-world.ts";
+import { STATUS_NAMES } from "../../statuses.ts";
 
 let linear: FakeLinear;
 let tracker: LinearTracker;
@@ -111,7 +112,7 @@ describe("checkTeam", () => {
 
   test("lists the roles whose status is missing, in the record's role order", async () => {
     start();
-    linear.on("FlightDeckTeam", teamReply(Object.values(STATUSES).filter((name) => name !== "Paused" && name !== "Triage")));
+    linear.on("FlightDeckTeam", teamReply(Object.values(STATUS_NAMES).filter((name) => name !== "Paused" && name !== "Triage")));
     expect(await tracker.checkTeam(repo)).toEqual({ ok: false, reason: "missing", roles: ["intake", "paused"] });
   });
 

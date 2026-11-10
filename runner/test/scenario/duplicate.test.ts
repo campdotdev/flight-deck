@@ -1,7 +1,8 @@
 // Plan marks a duplicate of an open issue without pausing (ADRs 0006 and 0026).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { StoredIssue } from "../../src/tracker/index.ts";
-import { outbox, STATUSES, World } from "./world.ts";
+import { outbox, World } from "./world.ts";
+import { STATUSES } from "../statuses.ts";
 
 const SUMMARY = "Same report as the open Save button issue\n\nBoth say the settings page's Save button is blue.";
 

@@ -1,49 +1,14 @@
 // The Linear adapter's test setup: a fake Linear, a repo on team SHA, and Linear-shaped nodes for its answers.
 // The node builders follow Linear's public schema; the contract suite (FLD-116) replaces them with recordings.
-import type { Role } from "../../../src/record/index.ts";
 import { LinearTracker, type LinearIdentity, type TrackerRepo } from "../../../src/tracker/index.ts";
+import { STATUS_NAMES, STATUS_TYPES } from "../../statuses.ts";
 import { FakeLinear } from "./fake-linear.ts";
-
-export const STATUSES: Record<Role, string> = {
-  intake: "Triage",
-  backlog: "Backlog",
-  ready_to_plan: "Ready to plan",
-  planning: "Planning",
-  ready_to_build: "Ready to build",
-  building: "Building",
-  ready_to_check: "Ready to check",
-  checking: "Checking",
-  landed: "Landed",
-  paused: "Paused",
-  in_review: "In Review",
-  done: "Done",
-  canceled: "Canceled",
-  duplicate: "Duplicate",
-};
-
-/** The status type Linear gives each of SHA's statuses. */
-const TYPES: Record<string, string> = {
-  Triage: "triage",
-  Backlog: "backlog",
-  "Ready to plan": "unstarted",
-  Planning: "started",
-  "Ready to build": "unstarted",
-  Building: "started",
-  "Ready to check": "unstarted",
-  Checking: "started",
-  Landed: "started",
-  Paused: "started",
-  "In Review": "started",
-  Done: "completed",
-  Canceled: "canceled",
-  Duplicate: "duplicate",
-};
 
 export const repo: TrackerRepo = {
   name: "campdotdev/shaders",
   workspace: "campdotdev",
   team: "SHA",
-  statuses: STATUSES,
+  statuses: STATUS_NAMES,
   maintainer: "user-maintainer",
 };
 
@@ -55,7 +20,7 @@ export function stateId(name: string): string {
 }
 
 export function state(name: string): { name: string; type: string } {
-  return { name, type: TYPES[name] ?? "started" };
+  return { name, type: STATUS_TYPES[name] ?? "started" };
 }
 
 /** A UUID for a test issue number. */
@@ -69,7 +34,7 @@ export function world(identity: LinearIdentity = { kind: "flight_deck" }): { lin
   linear.apps.set("fd-client", "fd-secret");
   linear.apps.set("reader-client", "reader-secret");
   if (identity.kind === "setup_key") linear.accepted.add(identity.key);
-  linear.on("FlightDeckTeam", teamReply(Object.values(STATUSES)));
+  linear.on("FlightDeckTeam", teamReply(Object.values(STATUS_NAMES)));
   const logs: string[] = [];
   const tracker = new LinearTracker({
     identity,
@@ -82,7 +47,7 @@ export function world(identity: LinearIdentity = { kind: "flight_deck" }): { lin
 }
 
 export function teamReply(names: string[]) {
-  return { data: { teams: { nodes: [{ id: TEAM_ID, key: "SHA", states: { nodes: names.map((name) => ({ id: stateId(name), name, type: TYPES[name] ?? "started" })) } }] } } };
+  return { data: { teams: { nodes: [{ id: TEAM_ID, key: "SHA", states: { nodes: names.map((name) => ({ id: stateId(name), name, type: STATUS_TYPES[name] ?? "started" })) } }] } } };
 }
 
 export interface IssueNodeInput {
