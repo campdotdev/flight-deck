@@ -1,4 +1,5 @@
 export {
+  ISSUE_MEMORY_FIELDS,
   State,
   type Answer,
   type ApplyWait,

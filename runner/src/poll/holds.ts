@@ -16,6 +16,8 @@ export interface HoldContext {
   config: Config;
   /** This poll's trouble causes, which steps 1 and 2 and the version check opened or cleared. */
   trouble: Trouble;
+  /** When `flight-deck update` asked for its hold, or `null` while it holds nothing. Only this runner keeps it. */
+  update: string | null;
 }
 
 /** Returns the holds one cause, or one family of causes, puts on the runner now. */
@@ -28,11 +30,17 @@ export const markerHolds: HoldSource = async ({ state }) => {
   return [{ cause: marker.by === "stop" ? "stop" : "maintainer", scope: "runner", name: null, since: marker.since, until: null }];
 };
 
+/**
+ * `update`: `flight-deck update` holds the runner while it checks for running sessions (spec 1, "Install"). The
+ * hold lives in the runner's memory only, so the new runner the update starts holds nothing.
+ */
+export const updateHolds: HoldSource = async ({ update }) => (update === null ? [] : [{ cause: "update", scope: "runner", name: null, since: update, until: null }]);
+
 /** Each open trouble cause that stops sessions, with its scope (spec 1's "Trouble issues"). */
 export const troubleHolds: HoldSource = async ({ now, trouble }) => trouble.holds(now);
 
 /** Every source, in the order `status.json` lists their holds. */
-export const HOLD_SOURCES: HoldSource[] = [markerHolds, troubleHolds, usageHolds];
+export const HOLD_SOURCES: HoldSource[] = [markerHolds, updateHolds, troubleHolds, usageHolds];
 
 /** Every hold that holds now. */
 export async function currentHolds(context: HoldContext): Promise<StatusHold[]> {

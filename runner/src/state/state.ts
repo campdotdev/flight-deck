@@ -225,6 +225,9 @@ export interface TrialPass {
 
 const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, stale_take: null, restart: null, kept: null };
 
+/** The fields of issue memory, for a write that comes from outside the runner. */
+export const ISSUE_MEMORY_FIELDS: ReadonlySet<string> = new Set(Object.keys(EMPTY_MEMORY));
+
 /** One hold `state/holds.json` keeps: a usage hold, with when it ends (spec 1, "Holds"). */
 export interface StoredHold {
   cause: HoldCause;

@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
-import { readJson, writeJson, type State } from "../state/index.ts";
+import { readJson, writeJson, type IssueMemory, type State } from "../state/index.ts";
 import { IssueNotFoundError, isUnavailable, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
 import { duplicateLine, followUpFooter, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
@@ -26,6 +26,14 @@ export interface ApplyOptions {
   identity: Tracker;
   /** Make no write. The result lists each one. */
   dryRun?: boolean;
+  /** Called with each write's name as it lands, or, on a dry run, as it would. */
+  onWrite?: (name: string) => void;
+}
+
+/** Where the Outbox's writes to issue memory go. The runner writes the file, and a hand run asks the runner. */
+export interface IssueMemoryWrites {
+  /** Merges the fields over the issue's memory. */
+  write(repo: string, uuid: string, fields: Partial<IssueMemory>): Promise<void>;
 }
 
 export interface OutboxOptions {
@@ -36,6 +44,8 @@ export interface OutboxOptions {
   clock: () => Date;
   /** The repo a session ran for, as the Tracker needs it, or `null` when this Mac hasn't registered it. */
   repo(name: string): TrackerRepo | null;
+  /** Where issue memory's writes go. `state`'s files by default. Reads always come from `state`. */
+  memory?: IssueMemoryWrites;
 }
 
 /**
@@ -58,7 +68,12 @@ type Step = [string, (applied: Applied) => Promise<string | null>];
 const OPEN_TYPES = new Set(["backlog", "unstarted", "started", "triage"]);
 
 export class Outbox {
-  constructor(private readonly options: OutboxOptions) {}
+  private readonly memory: IssueMemoryWrites;
+
+  constructor(private readonly options: OutboxOptions) {
+    const state = options.state;
+    this.memory = options.memory ?? { write: async (repo, uuid, fields) => state.writeIssueMemory(repo, uuid, { ...(await state.issueMemory(repo, uuid)), ...fields }) };
+  }
 
   /**
    * Checks the outbox, then makes each write that `applied.json` doesn't record yet. A read or write Linear
@@ -177,8 +192,7 @@ export class Outbox {
           async (applied) => {
             // The flag goes into issue memory first, so the next poll never takes the assignee for one the runner didn't set.
             const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since: this.options.clock().toISOString() };
-            const memory = await state.issueMemory(session.repo, issue.id);
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } });
+            await this.memory.write(session.repo, issue.id, { flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } });
             commentAt = (await tracker.post(ref, comment(applied.uploads), { flag: true })).created_at;
             return null;
           },
@@ -190,7 +204,7 @@ export class Outbox {
             const memory = await state.issueMemory(session.repo, issue.id);
             // A resumed apply lost the comment's time, and the flag's start comes just before it.
             const at = commentAt ?? memory.flag?.since ?? this.options.clock().toISOString();
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { answers, comment_at: at, replies: [] } });
+            await this.memory.write(session.repo, issue.id, { pause: { answers, comment_at: at, replies: [] } });
             return null;
           },
         ],
@@ -207,7 +221,7 @@ export class Outbox {
           async (applied) => {
             const memory = await state.issueMemory(session.repo, issue.id);
             await tracker.writeBrief(ref, embedImages(brief, applied.uploads), { runnerWroteBrief: memory.brief !== null });
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, brief });
+            await this.memory.write(session.repo, issue.id, { brief });
             return null;
           },
         ],
@@ -226,6 +240,7 @@ export class Outbox {
         await writeJson(appliedFile, applied);
       }
       writes.push(name);
+      options.onWrite?.(name);
     }
     if (move === "paused") return { result: "paused", reason: opening(phrase, envelope.summary).statusLine, writes };
     return { result: "applied", writes };

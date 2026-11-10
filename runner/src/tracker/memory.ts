@@ -161,7 +161,8 @@ export class InMemoryTracker implements Tracker {
   private readonly issues = new Map<string, StoredIssue>();
   /** For each write, the refusals still to come, in order. */
   private readonly refusals = new Map<RefusableWrite, UnavailableReason[]>();
-  private ids = 0;
+  /** Shared with every view `as` makes, so IDs stay unique. */
+  private readonly ids = { last: 0 };
   /** `<app> <workspace>` for each app whose mints Linear refuses. */
   private readonly failing = new Set<string>();
   /** The tokens Linear rejects, as after an expiry or a revoke by hand. */
@@ -170,6 +171,16 @@ export class InMemoryTracker implements Tracker {
   constructor(options: { clock: () => Date; appUser: string }) {
     this.clock = options.clock;
     this.actor = options.appUser;
+  }
+
+  /**
+   * The same workspace, acting as another user, as `flight-deck apply` does with the maintainer's setup key. Its
+   * writes land in this adapter's issues and records.
+   */
+  as(user: string): InMemoryTracker {
+    const view = Object.create(this) as InMemoryTracker;
+    Object.defineProperty(view, "actor", { value: user });
+    return view;
   }
 
   // The world a scenario builds. None of these is a runner write.
@@ -619,7 +630,7 @@ export class InMemoryTracker implements Tracker {
   }
 
   private newId(kind: string): string {
-    return `${kind}-${++this.ids}`;
+    return `${kind}-${++this.ids.last}`;
   }
 
   private now(): string {
