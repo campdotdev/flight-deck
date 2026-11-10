@@ -2,6 +2,7 @@ export {
   State,
   type Answer,
   type Flag,
+  type HoldMarker,
   type FlagCause,
   type IssueMemory,
   type LastRecord,
@@ -12,6 +13,7 @@ export {
   type SessionEntry,
   type SessionState,
   type Stage,
+  type StopCause,
 } from "./state.ts";
 export type * from "./status.ts";
 export type * from "./trouble.ts";

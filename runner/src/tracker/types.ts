@@ -106,6 +106,8 @@ export interface TrackerIssue extends Omit<SnapshotIssue, "role"> {
   synced: boolean;
   /** The GitHub sync attachment's ID while the issue is synced, else `null`. */
   sync_attachment: string | null;
+  /** Whether the issue is archived. A snapshot never returns an archived issue. */
+  archived: boolean;
 }
 
 /** `issue` throws this when Linear has no issue by that ID, or the identity can't read it. */
@@ -222,4 +224,9 @@ export interface Tracker {
   sessionToken(session: TokenSession): Promise<string>;
   /** Revokes the session's Reader token. */
   revoke(session: TokenSession): Promise<void>;
+  /**
+   * Revokes the runner's own Flight Deck app token for the workspace, on a clean shutdown such as
+   * `flight-deck stop` (ADR 0005). The next Linear call mints a new one.
+   */
+  revokeRunnerToken(workspace: string): Promise<void>;
 }

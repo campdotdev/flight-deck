@@ -73,6 +73,7 @@ export interface StoredIssue {
   /** Whether the GitHub sync is on. */
   synced: boolean;
   duplicate_of: string | null;
+  archived: boolean;
   /** The relations `relate` made from this issue, by the other issue's UUID. */
   relations: { kind: RelationKind; issue: string }[];
 }
@@ -119,6 +120,8 @@ export class InMemoryTracker implements Tracker {
   readonly writes: TrackerWrite[] = [];
   /** Every Reader token minted, in order. */
   readonly tokens: TokenRecord[] = [];
+  /** The workspace of each revoke of the runner's own token, in order. */
+  readonly runnerRevokes: string[] = [];
   /** Each uploaded file's bytes, by the URL `upload` returned. */
   readonly uploads = new Map<string, Uint8Array>();
 
@@ -189,6 +192,7 @@ export class InMemoryTracker implements Tracker {
       sync_attachment: input.synced === true ? this.newId("attachment") : null,
       synced: input.synced === true,
       duplicate_of: null,
+      archived: false,
       relations: [],
     };
     this.issues.set(issue.id, issue);
@@ -222,6 +226,27 @@ export class InMemoryTracker implements Tracker {
     issue.status_since = this.now();
   }
 
+  /** The maintainer deletes the issue. `issue` no longer finds it. */
+  deleteIssue(issueId: string): void {
+    this.issues.delete(this.stored(issueId).id);
+  }
+
+  /** The maintainer archives the issue. A snapshot no longer returns it. */
+  archive(issueId: string): void {
+    this.stored(issueId).archived = true;
+  }
+
+  /** The maintainer moves the issue to another team, into one of that team's statuses. */
+  moveToTeam(issueId: string, team: string, status: string): void {
+    const issue = this.stored(issueId);
+    const to = this.team(team);
+    this.statusOf(to, status);
+    issue.team = to.key;
+    issue.identifier = `${to.key}-${to.next++}`;
+    issue.status = status;
+    issue.status_since = this.now();
+  }
+
   /**
    * Linear refuses the next `times` calls of the write, as a 5xx unless told otherwise, and records nothing
    * for them. The call after them lands.
@@ -243,7 +268,7 @@ export class InMemoryTracker implements Tracker {
 
   async snapshot(repo: TrackerRepo, options: SnapshotOptions = {}): Promise<Snapshot> {
     const issues = [...this.issues.values()]
-      .filter((issue) => issue.team === repo.team)
+      .filter((issue) => issue.team === repo.team && !issue.archived)
       .map((issue) => this.snapshotIssue(issue, repo))
       .filter((issue): issue is SnapshotIssue => issue !== null && SNAPSHOT_ROLES.has(issue.role));
     const since = options.since ?? null;
@@ -265,6 +290,7 @@ export class InMemoryTracker implements Tracker {
       comments: issue.comments.map((comment) => ({ ...comment })),
       synced: issue.synced,
       sync_attachment: issue.synced ? issue.sync_attachment : null,
+      archived: issue.archived,
     };
   }
 
@@ -386,6 +412,10 @@ export class InMemoryTracker implements Tracker {
 
   async revoke(session: TokenSession): Promise<void> {
     for (const record of this.tokens) if (record.session === session.id) record.revoked = true;
+  }
+
+  async revokeRunnerToken(workspace: string): Promise<void> {
+    this.runnerRevokes.push(workspace);
   }
 
   // Helpers.

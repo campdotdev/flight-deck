@@ -41,6 +41,8 @@ export const paths = {
   status: (f: Folders) => join(f.data, "state", "status.json"),
   heartbeat: (f: Folders) => join(f.data, "state", "heartbeat"),
   trouble: (f: Folders) => join(f.data, "state", "trouble.json"),
+  /** Present while `hold` or `stop` holds the runner (ADR 0024). */
+  holdMarker: (f: Folders) => join(f.data, "state", "hold"),
   log: (f: Folders) => join(f.data, "state", "runner.log"),
   handRuns: (f: Folders) => join(f.data, "hand-runs"),
 
