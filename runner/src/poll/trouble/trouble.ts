@@ -121,7 +121,7 @@ export class Trouble {
   }
 
   /** `status.json`'s `trouble`: each open cause. */
-  status(): { cause: string; repos: string[]; issue_url: string | null; since: string }[] {
+  status(): { cause: TroubleCause; repos: string[]; issue_url: string | null; since: string }[] {
     return this.entries
       .filter((entry) => entry.open)
       .map((entry) => ({ cause: entry.cause, repos: entry.repos, issue_url: entry.issues[0]?.url ?? null, since: entry.since }));

@@ -1,5 +1,6 @@
 // `status.json`, the one contract between the runner and the menu bar app (overview, spec 1's "`status.json`").
 import type { SessionState, Stage } from "./state.ts";
+import type { TroubleCause } from "./trouble.ts";
 
 export type HoldCause =
   | "maintainer"
@@ -65,7 +66,7 @@ export interface Status {
   jobs: { kind: "cache_refresh"; repo: string; started_at: string }[];
   usage: StatusUsage;
   flags: { repo: string; issue: string; title: string; url: string; status_line: string; since: string }[];
-  trouble: { cause: string; repos: string[]; issue_url: string | null; since: string }[];
+  trouble: { cause: TroubleCause; repos: string[]; issue_url: string | null; since: string }[];
   stale_takes: { repo: string; issue: string; title: string; status: string; since: string }[];
   repos: StatusRepo[];
 }
