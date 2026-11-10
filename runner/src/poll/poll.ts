@@ -13,7 +13,7 @@ import { Outbox } from "../outbox/index.ts";
 import { durationMs, readRecord, type RecordResult, type RepoRecord, type Role } from "../record/index.ts";
 import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
 import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
-import { Workspace, type FetchResult } from "../workspace/index.ts";
+import { Workspace, type FetchResult, type RefreshJob } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
 
 export interface PollOptions {
@@ -31,6 +31,14 @@ export interface PollOptions {
 const WORKING: Partial<Record<Stage, Role>> = { plan: "planning" };
 
 const RECORD_PATH = ".flight-deck/record.toml";
+
+const HOUR = 60 * 60_000;
+
+/** A cache refresh the runner started, and whether it has ended. */
+interface RunningRefresh {
+  job: RefreshJob;
+  ended: boolean;
+}
 
 /** What one tick learned about one repo. */
 interface RepoPoll {
@@ -60,6 +68,8 @@ export class Poll {
   private readonly exits: QueuedExit[] = [];
   /** The `[machine_user]` that `etc/` was last written from, or `null` before this runner's first write. */
   private etcFor: string | null = null;
+  /** Each repo's cache refresh, by repo, from its start until a tick handles its end. */
+  private readonly refreshes = new Map<string, RunningRefresh>();
 
   constructor(options: PollOptions) {
     this.folders = options.folders;
@@ -77,12 +87,21 @@ export class Poll {
     await this.writeEtc(config);
     const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
     await this.handleExits(now, config, workspace);
+    await this.endRefreshes(now);
 
     const repos: RepoPoll[] = [];
     for (const registration of config.repos) repos.push(await this.pollRepo(now, config, registration, workspace));
 
     await this.starts(now, config, repos, workspace);
-    await this.publish(now, config, repos);
+    await this.publish(now, config, repos, workspace);
+  }
+
+  /**
+   * Resolves once every cache refresh that's running has ended. The runner's shutdown waits on it after it
+   * kills them, and a scenario uses it to let a refresh land before its next tick.
+   */
+  async refreshesEnded(): Promise<void> {
+    await Promise.all([...this.refreshes.values()].map((refresh) => refresh.job.done));
   }
 
   /** `etc/` at each start, and again whenever `[machine_user]` changes (spec 1, "Folders and files"). */
@@ -146,6 +165,7 @@ export class Poll {
       const text = await workspace.show(registration, fetch.head, RECORD_PATH);
       record = text === null ? null : readRecord(text);
     }
+    if (fetch.ok && record?.ok === true) await this.refreshIfDue(now, registration, record.record, fetch.head, workspace);
     const repo = trackerRepo(config, registration, record?.ok === true ? record.record : null);
 
     // 3. Snapshot, with the comments since the repo's cursor.
@@ -162,6 +182,37 @@ export class Poll {
     }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
     return { registration, tracker: repo, fetch, record, snapshot, waitingForSpecs };
+  }
+
+  // The dependency cache.
+
+  /**
+   * Starts a cache refresh when the default branch's tip moved since the last one, before the repo's first
+   * session, when the cache has gone, and an hour after a failed one (ADR 0018). The record on the default
+   * branch names the install, so a repo without a valid one gets none.
+   */
+  private async refreshIfDue(now: Date, registration: Registration, record: RepoRecord, head: string, workspace: Workspace): Promise<void> {
+    if (this.refreshes.has(registration.name)) return;
+    const { current, last } = await workspace.cacheState(registration.name);
+    const due = last === null || last.commit !== head || (last.ok ? !current : now.getTime() - Date.parse(last.at) >= HOUR);
+    if (!due) return;
+    const job = await workspace.refreshCache({ repo: registration, record, commit: head, versionFolder: this.versionFolder, now });
+    const refresh: RunningRefresh = { job, ended: false };
+    void job.done.then(() => {
+      refresh.ended = true;
+    });
+    this.refreshes.set(registration.name, refresh);
+    await this.state.log(now, `${registration.name}: cache refresh ${job.session} started at ${head}`);
+  }
+
+  /** Logs each refresh that ended since the last tick, and forgets it. */
+  private async endRefreshes(now: Date): Promise<void> {
+    for (const [repo, refresh] of this.refreshes) {
+      if (!refresh.ended) continue;
+      this.refreshes.delete(repo);
+      const result = await refresh.job.done;
+      await this.state.log(now, `${repo}: cache refresh ${refresh.job.session} ${result.ok ? "passed" : `failed, kept the last good cache: ${result.error}`}`);
+    }
   }
 
   // 5. Answers.
@@ -253,6 +304,8 @@ export class Poll {
     const candidates: { poll: RepoPoll; issue: SnapshotIssue }[] = [];
     for (const poll of repos) {
       if (!poll.fetch.ok || poll.record?.ok !== true || poll.snapshot === null) continue;
+      // Nothing starts for a repo while its cache refresh runs.
+      if (this.refreshes.has(poll.registration.name)) continue;
       for (const issue of poll.snapshot.issues) {
         if (issue.role === "ready_to_plan" && !hasSpec(issue) && !busy.has(issue.id)) candidates.push({ poll, issue });
       }
@@ -409,7 +462,15 @@ export class Poll {
     return flags;
   }
 
-  private async publish(now: Date, config: Config, repos: RepoPoll[]): Promise<void> {
+  /** The repo's cache in `status.json`: a running refresh, then a failed last one, then whether a good copy exists. */
+  private async cache(repo: string, workspace: Workspace): Promise<StatusRepo["cache"]> {
+    if (this.refreshes.has(repo)) return "refreshing";
+    const { current, last } = await workspace.cacheState(repo);
+    if (last?.ok === false) return "failed";
+    return current ? "ok" : "missing";
+  }
+
+  private async publish(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace): Promise<void> {
     const at = now.toISOString();
     await this.state.writeHeartbeat(now);
     const sessions = await this.state.sessions();
@@ -428,7 +489,7 @@ export class Poll {
         started_at: entry.started_at,
         deadline: entry.deadline,
       })),
-      jobs: [],
+      jobs: [...this.refreshes.values()].map(({ job }) => ({ kind: "cache_refresh" as const, repo: job.repo, started_at: job.startedAt })),
       usage:
         config.auth === "api_key"
           ? {
@@ -442,7 +503,7 @@ export class Poll {
       flags: await this.flagList(repos),
       trouble: [],
       stale_takes: [],
-      repos: repos.map(statusRepo),
+      repos: await Promise.all(repos.map(async (poll) => statusRepo(poll, await this.cache(poll.registration.name, workspace)))),
     };
     await this.state.publish(status);
   }
@@ -482,13 +543,12 @@ function priorityRank(issue: SnapshotIssue): number {
   return issue.priority === 0 ? 5 : issue.priority;
 }
 
-function statusRepo(poll: RepoPoll): StatusRepo {
+function statusRepo(poll: RepoPoll, cache: StatusRepo["cache"]): StatusRepo {
   const record = poll.record === null ? "waiting" : poll.record.ok ? "ok" : poll.record.reason === "newer" ? "newer" : "invalid";
   return {
     name: poll.registration.name,
     record,
-    // FLD-99 adds the dependency cache.
-    cache: "missing",
+    cache,
     waiting_for_specs: poll.waitingForSpecs.map((issue) => ({ issue: issue.identifier, title: issue.title })),
     waiting_for_blockers: [],
     waiting_for_port: null,

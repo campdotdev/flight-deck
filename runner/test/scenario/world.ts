@@ -7,9 +7,10 @@ import type { Folders } from "../../src/folders/index.ts";
 import { ScriptedHarness } from "../../src/harness/index.ts";
 import type { Config } from "../../src/install/index.ts";
 import { Poll } from "../../src/poll/index.ts";
-import type { Role } from "../../src/record/index.ts";
+import { readRecord, type Role } from "../../src/record/index.ts";
 import type { Status } from "../../src/state/index.ts";
 import { InMemoryTracker, type NewIssue, type StatusType, type StoredIssue } from "../../src/tracker/index.ts";
+import { Workspace } from "../../src/workspace/index.ts";
 import { toToml } from "./toml.ts";
 
 /** Shaders' statuses, with the status type Linear gives each. */
@@ -156,7 +157,25 @@ export class World {
     const commit = await makeRemote(root, remote, options.record === undefined ? SHADERS_RECORD : options.record);
     const world = new World(root, folders, versionFolder, remote, commit);
     await world.writeConfig();
+    if (options.cache !== false) await world.refreshCache();
     return world;
+  }
+
+  /**
+   * Builds the repo's dependency cache from the default branch's tip, as a refresh the runner made earlier
+   * would have, so the next poll finds a good cache for the tip. Does nothing without a valid record there.
+   */
+  async refreshCache(): Promise<void> {
+    const workspace = new Workspace({ folders: this.folders, git: this.config.paths.git });
+    const repo = this.config.repos[0]!;
+    const fetched = await workspace.fetch(repo);
+    if (!fetched.ok) throw new Error(fetched.error);
+    const text = await workspace.show(repo, fetched.head, ".flight-deck/record.toml");
+    const record = text === null ? null : readRecord(text);
+    if (record?.ok !== true) return;
+    const job = await workspace.refreshCache({ repo, record: record.record, commit: fetched.head, versionFolder: this.versionFolder, now: this.now });
+    const result = await job.done;
+    if (!result.ok) throw new Error(`the world's cache refresh failed: ${result.error}`);
   }
 
   /** Files an issue as the maintainer, in Backlog unless it says otherwise. */
@@ -195,9 +214,14 @@ export class World {
     await writeFile(join(this.folders.config, "config.toml"), toToml(this.config as unknown as Record<string, unknown>));
   }
 
-  /** Commits files on the remote's default branch, and returns the new tip. */
-  async push(files: Record<string, string>, message = "Change"): Promise<string> {
+  /**
+   * Commits files on the remote's default branch, and returns the new tip. Then it rebuilds the cache for the
+   * new tip, so the next poll starts sessions at once, unless `refresh` is `false`, which leaves the cache
+   * for the runner to refresh.
+   */
+  async push(files: Record<string, string>, message = "Change", options: { refresh?: boolean } = {}): Promise<string> {
     this.commit = await commitTo(this.root, this.remote, files, message);
+    if (options.refresh !== false) await this.refreshCache();
     return this.commit;
   }
 
