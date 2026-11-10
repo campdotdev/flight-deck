@@ -49,13 +49,35 @@ export type ExitKind =
 
 /**
  * Every exit names the transcript and the Claude Code version. `error` is the last error message from the
- * session's `result` event, when it had one. A runner comment's Details fold shows it (ADR 0019).
+ * session's `result` event, when it had one. A runner comment's Details fold shows it (ADR 0019). `costUsd` is
+ * that event's `total_cost_usd`. It's absent when the session ended with no `result` event, and then the
+ * runner counts the session's whole budget (spec 1, "State").
  */
-export type Exit = ExitKind & { transcript: string; claudeCodeVersion: string; error?: string };
+export type Exit = ExitKind & { transcript: string; claudeCodeVersion: string; error?: string; costUsd?: number };
 
-/** One `rate_limit_event` from the stream. The Harness contract suite's fixtures pin its fields. */
+/** One window of a `rate_limit_event`, such as `five_hour` or `seven_day`. */
+export interface RateLimitWindow {
+  /** A fraction of the window: 0.04 is 4%. */
+  utilization: number | null;
+  /** ISO time. The stream gives Unix seconds. */
+  resetsAt: string | null;
+  /** `allowed` or `rejected`. */
+  status: string | null;
+}
+
+/**
+ * One `rate_limit_event` from the stream: its `rate_limit_info`, with each time as ISO. The fixtures in
+ * `test/harness/fixtures/`, which the Harness contract suite records, pin its fields.
+ */
 export interface RateLimitEvent {
-  [field: string]: unknown;
+  /** `allowed`, or `rejected` when the session hit a plan limit. */
+  status: string;
+  /** `rateLimitType`, the window the event is about, such as `five_hour`. */
+  type: string | null;
+  /** When that window resets, as an ISO time. */
+  resetsAt: string | null;
+  /** `unifiedWindows`, by name: `five_hour` and `seven_day`. */
+  windows: Record<string, RateLimitWindow>;
 }
 
 /** What a running session reports. The runner queues each exit and handles it at the next tick. */

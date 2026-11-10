@@ -4,7 +4,8 @@ import { paths, type Folders } from "../folders/index.ts";
 import type { Role } from "../record/index.ts";
 import { readdir } from "node:fs/promises";
 import { appendLine, readJson, writeJson } from "./files.ts";
-import type { Status } from "./status.ts";
+import type { RateLimitEvent } from "../harness/index.ts";
+import type { HoldCause, Status } from "./status.ts";
 
 export type Stage = "plan" | "build" | "check" | "debrief" | "trial";
 export type Mode = "issue" | "sub_issue" | "spec" | "bot_round" | "recheck";
@@ -106,7 +107,19 @@ export interface PendingComment {
   url: string;
 }
 
-/** One issue's memory, keyed by Linear's UUID. Later tickets add the attempt and more. */
+/**
+ * Why the runner put an issue back in its queue without using the stage's retry: a plan limit, an expired
+ * login, a failed Reader mint, or a shutdown (spec 1, "Exits"). Each ticket that requeues adds its exit here.
+ */
+export type RestartCause = "rate_limited";
+
+/** The next take keeps this attempt, because the requeue that set it used no retry (ADR 0002). */
+export interface Restart {
+  attempt: number;
+  after: RestartCause;
+}
+
+/** One issue's memory, keyed by Linear's UUID. Later tickets add more. */
 export interface IssueMemory {
   /** The brief the runner last wrote for the issue, or `null`. */
   brief: string | null;
@@ -116,9 +129,36 @@ export interface IssueMemory {
   pause: OpenPause | null;
   /** A runner comment Linear didn't take yet, or `null`. */
   pending: PendingComment | null;
+  /** The attempt the next take keeps, set when the runner requeued the issue, or `null` for attempt 1. */
+  restart: Restart | null;
 }
 
-const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null };
+const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, restart: null };
+
+/** One hold `state/holds.json` keeps: a usage hold, with when it ends (spec 1, "Holds"). */
+export interface StoredHold {
+  cause: HoldCause;
+  /** ISO time. */
+  since: string;
+  /** ISO time it ends on its own. */
+  until: string;
+}
+
+/** `state/holds.json`: the usage holds, and the latest `rate_limit_event` beside them. */
+export interface Holds {
+  holds: StoredHold[];
+  rate_limit_event: RateLimitEvent | null;
+}
+
+/** `state/spend.json`: on an API key, the day's and the month's spending, in the Mac's time zone. */
+export interface Spend {
+  /** The local day the spending is for, `YYYY-MM-DD`. */
+  day: string;
+  day_usd: number;
+  /** The local month, `YYYY-MM`. */
+  month: string;
+  month_usd: number;
+}
 
 export class State {
   constructor(private readonly folders: Folders) {}
@@ -156,6 +196,23 @@ export class State {
 
   async writeCursor(repo: string, comments: string): Promise<void> {
     await writeJson(paths.cursor(this.folders, repo), { comments });
+  }
+
+  async holds(): Promise<Holds> {
+    return { holds: [], rate_limit_event: null, ...(await readJson<Partial<Holds>>(paths.holds(this.folders), {})) };
+  }
+
+  async writeHolds(holds: Holds): Promise<void> {
+    await writeJson(paths.holds(this.folders), holds);
+  }
+
+  /** The spending on record, or `null` before the first session on an API key ends. */
+  async spend(): Promise<Spend | null> {
+    return readJson<Spend | null>(paths.spend(this.folders), null);
+  }
+
+  async writeSpend(spend: Spend): Promise<void> {
+    await writeJson(paths.spend(this.folders), spend);
   }
 
   /** The time of the last poll, written every poll. */

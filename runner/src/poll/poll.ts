@@ -14,12 +14,13 @@ import { Outbox } from "../outbox/index.ts";
 import { failedTwice, type FailedExit } from "../outbox/runner-comments/failed-twice.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from "../outbox/runner-comments/index.ts";
 import { durationMs, readRecord, type RecordResult, type RepoRecord } from "../record/index.ts";
-import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
+import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusHold, type StatusRepo } from "../state/index.ts";
 import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
 import { EXITS, type ExitContext } from "./exits/index.ts";
 import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
+import { Usage } from "./usage.ts";
 
 export interface PollOptions {
   folders: Folders;
@@ -60,6 +61,7 @@ export class Poll {
   private readonly harness: Harness;
   private readonly lifecycle: Lifecycle;
   private readonly state: State;
+  private readonly usage: Usage;
   /** Exits queue as they happen, and the next tick handles them first. */
   private readonly exits: QueuedExit[] = [];
   /** The `[machine_user]` that `etc/` was last written from, or `null` before this runner's first write. */
@@ -73,6 +75,7 @@ export class Poll {
     this.harness = options.harness;
     this.lifecycle = new Lifecycle(options.tracker);
     this.state = new State(options.folders);
+    this.usage = new Usage(this.state);
   }
 
   /** Runs one poll for every registered repo. */
@@ -86,7 +89,22 @@ export class Poll {
     for (const registration of config.repos) repos.push(await this.pollRepo(now, config, registration, workspace));
 
     await this.starts(now, config, repos, workspace);
+    // 11. Usage.
+    await this.usage.update(now, config);
     await this.publish(now, config, repos);
+  }
+
+  /**
+   * Every hold that holds now (spec 1, "Holds"). Each kind of hold adds its own line, so the start test and
+   * `status.json` see them all.
+   */
+  private async holds(now: Date): Promise<StatusHold[]> {
+    return [...(await this.usage.holds(now))];
+  }
+
+  /** A held runner starts nothing. Only a hold with the `runner` scope holds the whole runner. */
+  private async held(now: Date): Promise<boolean> {
+    return (await this.holds(now)).some((hold) => hold.scope === "runner");
   }
 
   /** `etc/` at each start, and again whenever `[machine_user]` changes (spec 1, "Folders and files"). */
@@ -122,15 +140,17 @@ export class Poll {
         continue;
       }
       await this.tracker.revoke({ id: entry.id, repo });
+      await this.usage.spent(now, config, exit);
 
       const sessionFolder = paths.sessionFolder(this.folders, entry.id);
-      const { transcript, claudeCodeVersion: _, error, ...kind } = exit;
+      const { transcript, claudeCodeVersion: _, error, costUsd: __, ...kind } = exit;
       const facts: RunnerFacts = { exit: kind as ExitKind, session: entry.id, attempt: entry.attempt, transcript };
       if (error !== undefined) facts.error = error;
       const context: ExitContext = {
         now,
         entry,
         exit,
+        config,
         repo,
         tracker: this.tracker,
         state: this.state,
@@ -231,6 +251,7 @@ export class Poll {
       // 6. Flags, and 7. Subscriptions.
       await this.flags(now, repo, snapshot, handled);
       await this.subscriptions(repo, snapshot, handled);
+      await this.forgetRestarts(repo, snapshot);
     }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
     return { registration, tracker: repo, fetch, record, snapshot, waitingForSpecs, blocked };
@@ -333,16 +354,33 @@ export class Poll {
     }
   }
 
+  /**
+   * The attempt resets to 1 whenever the issue leaves the working status, except when the runner requeues it
+   * (spec 1, "Exits"). So a requeued issue keeps its attempt only while it waits in its queue for the next take.
+   */
+  private async forgetRestarts(repo: TrackerRepo, snapshot: Snapshot): Promise<void> {
+    for (const { uuid, memory } of await this.state.issueMemories(repo.name)) {
+      if (memory.restart === null) continue;
+      if (snapshot.issues.find((issue) => issue.id === uuid)?.role === "ready_to_plan") continue;
+      await this.state.writeIssueMemory(repo.name, uuid, { ...memory, restart: null });
+    }
+  }
+
   // Starts.
 
   private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace): Promise<void> {
     const sessions = await this.state.sessions();
+    let running = sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
+    // The cap test runs first, so a cap that fits again ends its hold before the held test reads it.
+    if (!(await this.usage.fits(now, config, running)) || (await this.held(now))) return;
     const busy = new Set(sessions.map((entry) => entry.issue_id));
-    let free = config.concurrency_cap - sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
+    let free = config.concurrency_cap - running;
+    /** Whether one more session may start: a free place under the cap, and on an API key, room under each cap. */
+    const room = async () => free > 0 && (await this.usage.fits(now, config, running));
 
     // A retry waiting for a free place starts before any new take.
     for (const entry of sessions.filter((each) => each.state === "retry_waiting")) {
-      if (free <= 0) break;
+      if (!(await room())) break;
       const poll = repos.find((each) => each.registration.name === entry.repo);
       if (poll === undefined || !poll.fetch.ok || poll.record?.ok !== true || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
       const issue = poll.snapshot.issues.find((each) => each.id === entry.issue_id);
@@ -353,6 +391,7 @@ export class Poll {
         continue;
       }
       free--;
+      running++;
       await this.start(now, config, poll, issue, workspace, entry);
     }
 
@@ -365,8 +404,9 @@ export class Poll {
     }
     candidates.sort((a, b) => priorityRank(a.issue) - priorityRank(b.issue) || a.issue.created_at.localeCompare(b.issue.created_at));
     for (const { poll, issue } of candidates) {
-      if (free <= 0) break;
+      if (!(await room())) break;
       free--;
+      running++;
       await this.start(now, config, poll, issue, workspace);
     }
   }
@@ -383,6 +423,7 @@ export class Poll {
     const stage: Stage = "plan";
     const id = await workspace.newSessionId();
     const worktree = paths.worktree(this.folders, id);
+    const memory = await this.state.issueMemory(registration.name, issue.id);
     const entry: SessionEntry = {
       id,
       repo: registration.name,
@@ -391,7 +432,8 @@ export class Poll {
       title: issue.title,
       stage,
       mode: "issue",
-      attempt: retry?.attempt ?? 1,
+      // A retry has its attempt. A take after a requeue keeps the attempt the requeue recorded (ADR 0002).
+      attempt: retry?.attempt ?? memory.restart?.attempt ?? 1,
       pid: null,
       pid_started_at: null,
       claude_uuid: null,
@@ -410,6 +452,7 @@ export class Poll {
         await this.dropEntry(id);
         return;
       }
+      if (memory.restart !== null) await this.state.writeIssueMemory(registration.name, issue.id, { ...memory, restart: null });
     } else {
       await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
     }
@@ -419,7 +462,6 @@ export class Poll {
     const deadline = new Date(now.getTime() + durationMs(record.time_limits.plan)).toISOString();
     const linear = config.linear[repo.workspace];
     const full = await this.tracker.issue(issue);
-    const memory = await this.state.issueMemory(registration.name, issue.id);
 
     // 3. Prepare, then the launch. A failure of either is a failed session.
     let prepared;
@@ -487,8 +529,7 @@ export class Poll {
     };
     const handle = await this.harness.start(session, {
       exit: (exit) => void this.exits.push({ session: id, exit }),
-      // FLD-105 turns each event into the plan-limit hold.
-      rateLimit: () => {},
+      rateLimit: (event) => this.usage.report(event),
     });
     const running: SessionEntry = {
       ...entry,
@@ -526,11 +567,12 @@ export class Poll {
     const at = now.toISOString();
     await this.state.writeHeartbeat(now);
     const sessions = await this.state.sessions();
+    const holds = await this.holds(now);
     const status: Status = {
       version: this.version,
       heartbeat_at: at,
       polled_at: at,
-      runner: { state: "working", holds: [] },
+      runner: { state: holds.some((hold) => hold.scope === "runner") ? "held" : "working", holds },
       sessions: sessions.map((entry) => ({
         id: entry.id,
         repo: entry.repo,
@@ -542,16 +584,7 @@ export class Poll {
         deadline: entry.deadline,
       })),
       jobs: [],
-      usage:
-        config.auth === "api_key"
-          ? {
-              auth: "api_key",
-              day_usd: 0,
-              month_usd: 0,
-              daily_cap_usd: config.api?.daily_cap_usd ?? 0,
-              monthly_cap_usd: config.api?.monthly_cap_usd ?? 0,
-            }
-          : { auth: "subscription", five_hour: null, weekly: null },
+      usage: await this.usage.status(now, config),
       flags: await this.flagList(repos),
       trouble: [],
       stale_takes: [],
