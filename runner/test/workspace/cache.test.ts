@@ -140,6 +140,14 @@ describe("the temp-folder limit", () => {
     await expect(long.prepare(plan(id))).rejects.toThrow(`The temp folder ${tmp} is too long`);
     expect(existsSync(join(folders.sessionRoot, "worktrees", id))).toBe(false);
   });
+
+  test("a trial run's prepare fails the same way", async () => {
+    const folders: Folders = { ...world.folders, sessionRoot: join(world.root, "s".repeat(80)) };
+    const long = new Workspace({ folders, git: world.config.paths.git });
+    const id = await long.newSessionId();
+    const trial = { session: id, deadline: "2026-11-10T09:05:00.000Z", version: world.version, versionFolder: world.versionFolder, path: "/usr/bin:/bin" };
+    await expect(long.prepareTrial(trial)).rejects.toThrow(`The temp folder ${join(folders.sessionRoot, "sessions", id, "tmp")} is too long`);
+  });
 });
 
 describe("refreshCache", () => {

@@ -238,12 +238,14 @@ export class Workspace {
 
   /**
    * Makes a trial run's session folder, and a throwaway git repo at `worktrees/<session-id>` with one empty
-   * commit on `main`. The repo isn't a clone of anything, so `dispose` deletes it outright.
+   * commit on `main`. The repo isn't a clone of anything, so `dispose` deletes it outright. Fails, as `prepare`
+   * does, when the temp folder is too long for the sandboxes' sockets.
    */
   async prepareTrial(plan: TrialPlan): Promise<PreparedWorkspace> {
     const sessionFolder = paths.sessionFolder(this.folders, plan.session);
     const parts = sessionParts(sessionFolder);
     const worktree = paths.worktree(this.folders, plan.session);
+    checkTempFolder(parts.tmp);
     for (const folder of [parts.inbox, join(parts.outbox, "media"), parts.tmp, parts.deps, ...emptyConfigFolders(sessionFolder)]) {
       await mkdir(folder, { recursive: true });
     }
