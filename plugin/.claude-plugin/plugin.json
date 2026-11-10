@@ -1,0 +1,6 @@
+{
+	"name": "flight-deck",
+	"description": "Flight Deck's flows, which a factory session follows and the maintainer can run by hand.",
+	"author": { "name": "campdotdev" },
+	"license": "MIT"
+}
