@@ -473,19 +473,22 @@ export class Poll {
     const sessions = await this.state.sessions();
     const listed = sessions.filter((entry) => entry.state !== "retry_waiting" && entry.state !== "apply_waiting");
     if ((await this.state.holdMarker())?.by === "stop") {
-      // A `retry_waiting` entry's issue sits in the working status too, so it pauses as well.
-      for (const entry of sessions) if (entry.state !== "apply_waiting") await this.pauseStopped(now, config, entry, this.restartFacts(entry), workspace);
+      // A `retry_waiting` entry's issue sits in the working status too, so it pauses as well. Its session's cost
+      // counted at its exit. Every other session's exit goes unhandled, so its cost counts here.
+      for (const entry of sessions) {
+        if (entry.state === "apply_waiting") continue;
+        if (entry.state !== "retry_waiting") await this.usage.spent(now, config, (await this.recordedExit(entry))?.costUsd);
+        await this.pauseStopped(now, config, entry, this.restartFacts(entry), workspace);
+      }
       return;
     }
     for (const entry of listed) {
       // An earlier try of this start queued its exit already.
       if (this.exits.some((queued) => queued.session === entry.id)) continue;
       const facts = this.restartFacts(entry);
-      const recorded = await readJson<(Exit & { details?: unknown }) | null>(join(paths.sessionFolder(this.folders, entry.id), "exit.json"), null);
+      const recorded = await this.recordedExit(entry);
       if (recorded !== null) {
-        // The Claude Code adapter adds `details`, for a person reading the file.
-        const { details: _, ...exit } = recorded;
-        this.exits.push({ session: entry.id, exit });
+        this.exits.push({ session: entry.id, exit: recorded });
         continue;
       }
       if (entry.state === "shutdown") {
@@ -493,19 +496,30 @@ export class Poll {
         continue;
       }
       const repo = repoOf(config, entry.repo);
-      if (repo === null) {
-        await this.state.log(now, `${entry.id} ${entry.issue}: no process after a restart, and ${entry.repo} has no Linear sign-in`);
+      if (repo !== null && entry.state === "starting" && (await stillWorking(this.tracker, repo, entry)) === null) {
+        await this.state.log(now, `${entry.id} ${entry.issue}: starting before a restart, never taken, dropped`);
         await this.finish(entry, workspace);
         continue;
       }
-      if (entry.state === "starting" && (await stillWorking(this.tracker, repo, entry)) === null) {
-        await this.state.log(now, `${entry.id} ${entry.issue}: starting before a restart, never taken, dropped`);
+      // The session ended with no `result` event, so its whole budget counts (spec 1, "State").
+      await this.usage.spent(now, config, undefined);
+      if (repo === null) {
+        await this.state.log(now, `${entry.id} ${entry.issue}: no process after a restart, and ${entry.repo} has no Linear sign-in`);
         await this.finish(entry, workspace);
         continue;
       }
       await this.state.log(now, `${entry.id} ${entry.issue}: no process after a restart`);
       await this.fail(now, repo, entry, { kind: "cut_off", transcript: facts.transcript !== undefined }, facts, workspace);
     }
+  }
+
+  /** The exit the session's folder records, which the Claude Code adapter writes as the session ends, or `null`. */
+  private async recordedExit(entry: SessionEntry): Promise<Exit | null> {
+    const recorded = await readJson<(Exit & { details?: unknown }) | null>(join(paths.sessionFolder(this.folders, entry.id), "exit.json"), null);
+    if (recorded === null) return null;
+    // The Claude Code adapter adds `details`, for a person reading the file.
+    const { details: _, ...exit } = recorded;
+    return exit;
   }
 
   /** An entry's facts for a runner comment at a restart: the transcript only when its session started. */
@@ -539,7 +553,7 @@ export class Poll {
       // A trial has no repo, no issue, and no Reader token.
       if (entry.stage === "trial") {
         // Its cost counts toward the caps, and a plan limit holds the runner as after any session.
-        await this.usage.spent(now, config, exit);
+        await this.usage.spent(now, config, exit.costUsd);
         if (exit.kind === "rate_limited") await this.usage.rateLimited(now, config, exit.resetsAt);
         await this.trials.exited({ now, entry, exit, workspace, trouble });
         continue;
@@ -560,7 +574,7 @@ export class Poll {
         waiting.push({ session, exit });
         continue;
       }
-      await this.usage.spent(now, config, exit);
+      await this.usage.spent(now, config, exit.costUsd);
       if (!usable) {
         // A handoff the runner can't apply yet waits as `apply_waiting`, with its outbox kept (ADR 0005).
         await workspace.dispose({ session: entry.id, worktree: entry.worktree }, { keepFolder: true });

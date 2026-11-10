@@ -376,6 +376,18 @@ describe("on an API key", () => {
     expect((await world.status()).runner.holds).toEqual([]);
   });
 
+  test("a session the runner lost at a restart ended with no result event, so it counts its whole budget", async () => {
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+    const issue = world.issue({ title: "First" });
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    world.harness.lose(world.harness.started[0]!.session.id);
+    world.restart();
+    await world.tick();
+    expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 5, month_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+  });
+
   test("spending survives a restart", async () => {
     await useApiKey({ session_budget_usd: 5, daily_cap_usd: 8, monthly_cap_usd: 1000 });
     sendBriefed("First");

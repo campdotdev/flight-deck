@@ -3,7 +3,7 @@
 // `rate_limited`. On an API key it holds under `rate_limit` after a `rate_limited` exit, and under `api_cap` when
 // a start would let spending pass a cap. `state/holds.json` keeps each hold with its end, and the latest event,
 // so a hold survives a restart. `state/spend.json` keeps the day's and the month's spending.
-import type { Exit, RateLimitEvent, RateLimitWindow } from "../harness/index.ts";
+import type { RateLimitEvent, RateLimitWindow } from "../harness/index.ts";
 import type { Config } from "../install/index.ts";
 import type { Holds, Spend, State, StatusUsage, StoredHold, UsageWindow } from "../state/index.ts";
 import type { HoldSource } from "./holds.ts";
@@ -64,9 +64,9 @@ export class Usage {
    * On an API key, a session ended: its `result` event's `total_cost_usd` counts toward the day and the
    * month, or its whole `session_budget_usd` when it ended with no `result` event, because its cost is unknown.
    */
-  async spent(now: Date, config: Config, exit: Exit): Promise<void> {
+  async spent(now: Date, config: Config, costUsd: number | undefined): Promise<void> {
     if (config.auth !== "api_key" || config.api === undefined) return;
-    const usd = exit.costUsd ?? config.api.session_budget_usd;
+    const usd = costUsd ?? config.api.session_budget_usd;
     const spend = spendAt(await this.state.spend(), now);
     await this.state.writeSpend({ ...spend, day_usd: spend.day_usd + usd, month_usd: spend.month_usd + usd });
   }
