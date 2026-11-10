@@ -230,7 +230,7 @@ describe("status.json", () => {
     expect(status.runner).toEqual({ state: "working", holds: [] });
     expect(status.usage).toEqual({ auth: "subscription", five_hour: null, weekly: null });
     expect(status.repos).toEqual([
-      { name: "campdotdev/shaders", record: "ok", cache: "missing", waiting_for_specs: [], waiting_for_blockers: [], waiting_for_port: null },
+      { name: "campdotdev/shaders", record: "ok", cache: "ok", waiting_for_specs: [], waiting_for_blockers: [], waiting_for_port: null },
     ]);
   });
 });

@@ -1,0 +1,7 @@
+# Limits this version pins (spec 1, "Session IDs").
+
+# The longest socket file name that Claude Code's sandbox and sandbox-runtime create in a session's temp folder.
+# Workspace fails `prepare` when the temp folder's path, plus `/`, plus this many bytes passes 103 bytes.
+# PLACEHOLDER: the Harness contract suite (FLD-116) measures the real value on the maintainer's Mac. Until
+# then this is a generous guess: sandbox-runtime 0.0.81 names its sockets `srt-mux-<pid>-<n>.sock`.
+socket_name_bytes = 40
