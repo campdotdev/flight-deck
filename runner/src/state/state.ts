@@ -5,6 +5,7 @@ import type { RepoRecord, Role } from "../record/index.ts";
 import { readdir } from "node:fs/promises";
 import { appendLine, readJson, writeJson } from "./files.ts";
 import type { Status } from "./status.ts";
+import type { TroubleEntry } from "./trouble.ts";
 
 export type Stage = "plan" | "build" | "check" | "debrief" | "trial";
 export type Mode = "issue" | "sub_issue" | "spec" | "bot_round" | "recheck";
@@ -65,8 +66,8 @@ export interface Answer {
   move: Role;
 }
 
-/** Why the runner flagged an issue. Later tickets add stale takes and trouble issues. */
-export type FlagCause = "pause";
+/** Why the runner flagged an issue: a pause, a stale take, or a trouble issue it filed. */
+export type FlagCause = "pause" | "stale_take" | "trouble";
 
 /** The runner's flag on an issue: it assigned the maintainer (ADR 0011). */
 export interface Flag {
@@ -137,6 +138,11 @@ export interface IssueMemory {
   pause: OpenPause | null;
   /** A runner comment Linear didn't take yet, or `null`. */
   pending: PendingComment | null;
+  /**
+   * The `status_since` of the stay in a working status the runner last flagged as a stale take, or `null`. The
+   * issue gets one stale-take flag per stay (ADR 0011).
+   */
+  stale_take: string | null;
   /** The outbox the runner kept after Linear didn't take it for 3 hours, which the next take applies, or `null`. */
   kept: KeptOutbox | null;
 }
@@ -158,7 +164,7 @@ export interface LastRecord {
   record: RepoRecord;
 }
 
-const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, kept: null };
+const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, stale_take: null, kept: null };
 
 export class State {
   constructor(private readonly folders: Folders) {}
@@ -205,6 +211,15 @@ export class State {
 
   async writeLastRecord(repo: string, last: LastRecord): Promise<void> {
     await writeJson(paths.lastRecord(this.folders, repo), last);
+  }
+
+  /** `state/trouble.json`: each trouble cause the runner knows, open or cleared with its issue still open. */
+  async trouble(): Promise<TroubleEntry[]> {
+    return readJson<TroubleEntry[]>(paths.trouble(this.folders), []);
+  }
+
+  async writeTrouble(entries: TroubleEntry[]): Promise<void> {
+    await writeJson(paths.trouble(this.folders), entries);
   }
 
   /** The time of the last poll, written every poll. */

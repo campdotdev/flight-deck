@@ -59,7 +59,15 @@ export interface PreparedWorkspace {
   env: Record<string, string>;
 }
 
-export type FetchResult = { ok: true; branch: string; head: string } | { ok: false; error: string };
+/** A failed fetch says whether git failed to authenticate, which opens the trouble cause `github_token` (ADR 0005). */
+export type FetchResult = { ok: true; branch: string; head: string } | { ok: false; error: string; auth: boolean };
+
+/** What git prints when a remote refuses its login, over HTTPS or SSH. */
+const AUTH_FAILURE = /Authentication failed|could not read (?:Username|Password)|terminal prompts disabled|Invalid username or (?:password|token)|returned error: 40[13]|Permission denied \(publickey/i;
+
+function fetchFailed(error: string): FetchResult {
+  return { ok: false, error, auth: AUTH_FAILURE.test(error) };
+}
 
 export interface WorkspaceOptions {
   folders: Folders;
@@ -83,17 +91,17 @@ export class Workspace {
   async fetch(repo: Registration): Promise<FetchResult> {
     const clone = paths.clone(this.folders, repo.name);
     const symref = await this.git(null, "ls-remote", "--symref", repo.remote, "HEAD");
-    if (!symref.ok) return { ok: false, error: symref.error };
+    if (!symref.ok) return fetchFailed(symref.error);
     const branch = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(symref.out)?.[1];
-    if (branch === undefined) return { ok: false, error: `${repo.remote} names no default branch` };
+    if (branch === undefined) return fetchFailed(`${repo.remote} names no default branch`);
     if (!existsSync(join(clone, ".git"))) {
       await mkdir(dirname(clone), { recursive: true });
       const made = await this.git(null, "clone", "--quiet", "--no-checkout", repo.remote, clone);
-      if (!made.ok) return { ok: false, error: made.error };
+      if (!made.ok) return fetchFailed(made.error);
     }
     const ref = `refs/heads/${branch}`;
     const fetched = await this.git(clone, "fetch", "--quiet", "--tags", "--update-head-ok", repo.remote, `+${ref}:${ref}`);
-    if (!fetched.ok) return { ok: false, error: fetched.error };
+    if (!fetched.ok) return fetchFailed(fetched.error);
     await this.git(clone, "symbolic-ref", "HEAD", ref);
     return { ok: true, branch, head: await this.head(repo) };
   }
