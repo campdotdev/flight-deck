@@ -143,7 +143,7 @@ export class Trials {
       deadline: null,
       state: "starting",
     };
-    await state.writeSessions([...sessions, entry]);
+    await state.addSession(entry);
     this.attached.set(id, this.waiters.splice(0));
     if (this.nextLogin !== null) this.nextLogin = now.getTime() + LOGIN_EVERY_MS;
 
@@ -197,7 +197,7 @@ export class Trials {
       deadline,
       state: "running",
     };
-    await state.writeSessions((await state.sessions()).map((each) => (each.id === id ? started : each)));
+    await state.updateSession(id, () => started);
     await state.log(now, `${id} trial: started`);
     return true;
   }
@@ -236,7 +236,7 @@ export class Trials {
   /** Disposes the trial's workspace, which deletes its repo outright, drops its entry, and answers its callers. */
   private async end(entry: SessionEntry, workspace: Workspace, result: TrialResult | null): Promise<void> {
     await workspace.dispose({ session: entry.id, worktree: entry.worktree });
-    await this.options.state.writeSessions((await this.options.state.sessions()).filter((each) => each.id !== entry.id));
+    await this.options.state.dropSession(entry.id);
     const waiters = this.attached.get(entry.id) ?? [];
     this.attached.delete(entry.id);
     if (result !== null) for (const waiter of waiters) waiter.resolve(result);

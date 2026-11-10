@@ -277,7 +277,7 @@ export class Poll {
       if (!config.repos.some((registration) => registration.name === repo)) throw new Error(`${repo} isn't registered on this Mac`);
       if (!/^[A-Za-z0-9-]+$/.test(uuid)) throw new Error(`issue ${JSON.stringify(uuid)} isn't an issue UUID`);
       for (const key of Object.keys(fields)) if (!ISSUE_MEMORY_FIELDS.has(key)) throw new Error(`issue memory has no field ${key}`);
-      await this.state.writeIssueMemory(repo, uuid, { ...(await this.state.issueMemory(repo, uuid)), ...fields });
+      await this.state.mergeIssueMemory(repo, uuid, fields);
     });
   }
 
@@ -320,7 +320,7 @@ export class Poll {
       const config = await readConfig(this.folders);
       for (const entry of await this.state.sessions()) {
         if (entry.state !== "running" || entry.pid === null || entry.pid_started_at === null) continue;
-        await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? { ...each, state: "shutdown" } : each)));
+        await this.state.updateSession(entry.id, (each) => ({ ...each, state: "shutdown" }));
         await this.harness.stop({ session: entry.id, uuid: entry.claude_uuid ?? "", pid: entry.pid, pidStartedAt: entry.pid_started_at });
       }
       await this.revokeTokens(config);
@@ -352,7 +352,7 @@ export class Poll {
       await this.state.log(now, `${entry.id} ${entry.issue}: no process to stop`);
       return;
     }
-    await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? { ...each, stop_cause: cause } : each)));
+    await this.state.updateSession(entry.id, (each) => ({ ...each, stop_cause: cause }));
     await this.state.log(now, `${entry.id} ${entry.issue}: stopping (${cause})`);
     await this.harness.stop({ session: entry.id, uuid: entry.claude_uuid ?? "", pid: entry.pid, pidStartedAt: entry.pid_started_at });
   }
@@ -580,7 +580,7 @@ export class Poll {
         await workspace.dispose({ session: entry.id, worktree: entry.worktree }, { keepFolder: true });
         const sessionFolder = paths.sessionFolder(this.folders, entry.id);
         const kept = applyWaitingEntry(entry, { folder: sessionFolder, phase: "apply", now });
-        await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? kept : each)));
+        await this.state.updateSession(entry.id, () => kept);
         await this.state.log(now, `${entry.id} ${entry.issue}: no Linear token for ${repo.workspace}, the outbox waits to apply`);
         continue;
       }
@@ -618,7 +618,7 @@ export class Poll {
   /** The session is over: its workspace goes, and so does its entry. */
   private async finish(entry: SessionEntry, workspace: Workspace): Promise<void> {
     await workspace.dispose({ session: entry.id, worktree: entry.worktree });
-    await this.dropEntry(entry.id);
+    await this.state.dropSession(entry.id);
   }
 
   /**
@@ -642,7 +642,7 @@ export class Poll {
         deadline: null,
         state: "retry_waiting",
       };
-      await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? waiting : each)));
+      await this.state.updateSession(entry.id, () => waiting);
       await this.state.log(now, `${entry.id} ${entry.issue}: failed (${failure.kind}), attempt ${waiting.attempt} waits for a place`);
       return;
     }
@@ -1184,8 +1184,8 @@ export class Poll {
 
     // 1. The entry first, then the take, so the issue never sits in Planning unseen (ADR 0002). A retry's fresh
     // session takes the waiting entry's place.
-    if (retry === undefined) await this.state.writeSessions([...(await this.state.sessions()), entry]);
-    else await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
+    if (retry === undefined) await this.state.addSession(entry);
+    else await this.state.updateSession(retry.id, () => entry);
     try {
       await this.launch(now, config, poll, issue, workspace, trouble, entry, memory, retry);
     } catch (error) {
@@ -1205,7 +1205,7 @@ export class Poll {
     if (listed?.state !== "starting") return;
     await workspace.dispose({ session: entry.id, worktree: entry.worktree });
     await this.tracker.revoke({ id: entry.id, repo });
-    await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? { ...entry, state: "retry_waiting" } : each)));
+    await this.state.updateSession(entry.id, () => ({ ...entry, state: "retry_waiting" }));
     await this.state.log(now, `${entry.id} ${entry.issue}: start cut short (${(error as Error).message}), attempt ${entry.attempt} waits to start again`);
   }
 
@@ -1229,7 +1229,7 @@ export class Poll {
       const taken = await this.lifecycle.move(issue, "planning", "take");
       if (!taken.ok) {
         await this.state.log(now, `${id} ${issue.identifier}: take refused: ${taken.violation}`);
-        await this.dropEntry(id);
+        await this.state.dropSession(id);
         return;
       }
       if (memory.restart !== null) await this.state.writeIssueMemory(registration.name, issue.id, { ...memory, restart: null });
@@ -1341,7 +1341,7 @@ export class Poll {
       state: "running",
       port: prepared.port,
     };
-    await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === id ? running : each)));
+    await this.state.updateSession(id, () => running);
   }
 
   /**
@@ -1352,11 +1352,11 @@ export class Poll {
   private async readerMintFailed(now: Date, entry: SessionEntry, issue: SnapshotIssue, workspace: Workspace, retry: SessionEntry | undefined): Promise<void> {
     await workspace.dispose({ session: entry.id, worktree: entry.worktree });
     if (retry !== undefined) {
-      await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? retry : each)));
+      await this.state.updateSession(entry.id, () => retry);
       await this.state.log(now, `${entry.id} ${entry.issue}: no Reader token, attempt ${retry.attempt} waits again`);
       return;
     }
-    await this.dropEntry(entry.id);
+    await this.state.dropSession(entry.id);
     // The next take keeps this one's attempt, as after any requeue (ADR 0002).
     const memory = await this.state.issueMemory(entry.repo, issue.id);
     await this.state.writeIssueMemory(entry.repo, issue.id, { ...memory, restart: { attempt: entry.attempt, after: "linear_token" } });
@@ -1372,10 +1372,6 @@ export class Poll {
 
   private holdContext(now: Date, config: Config, trouble: Trouble): HoldContext {
     return { now, state: this.state, config, trouble, update: this.updateHold };
-  }
-
-  private async dropEntry(id: string): Promise<void> {
-    await this.state.writeSessions((await this.state.sessions()).filter((each) => each.id !== id));
   }
 
   // Publish.

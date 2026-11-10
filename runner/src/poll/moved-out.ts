@@ -65,5 +65,5 @@ export async function stillWorking(tracker: Tracker, repo: TrackerRepo, entry: S
 }
 
 async function drop(state: State, entry: SessionEntry): Promise<void> {
-  await state.writeSessions((await state.sessions()).filter((each) => each.id !== entry.id));
+  await state.dropSession(entry.id);
 }

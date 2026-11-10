@@ -83,7 +83,7 @@ export class Outbox {
 
   constructor(private readonly options: OutboxOptions) {
     const state = options.state;
-    this.memory = options.memory ?? { write: async (repo, uuid, fields) => state.writeIssueMemory(repo, uuid, { ...(await state.issueMemory(repo, uuid)), ...fields }) };
+    this.memory = options.memory ?? { write: async (repo, uuid, fields) => state.mergeIssueMemory(repo, uuid, fields) };
   }
 
   /**
