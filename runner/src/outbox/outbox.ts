@@ -7,7 +7,7 @@ import { Lifecycle } from "../lifecycle/index.ts";
 import { readJson, writeJson, type State } from "../state/index.ts";
 import type { IssueRef, Tracker, TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
-import { handoffComment, sessionFooter, statusPhrase } from "./comment.ts";
+import { handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope } from "./envelope.ts";
 
 export type ApplyResult =
@@ -31,12 +31,14 @@ export interface OutboxOptions {
   /** The running version. */
   version: string;
   state: State;
+  /** The time a flag starts. */
+  clock: () => Date;
   /** The repo a session ran for, as the Tracker needs it, or `null` when this Mac hasn't registered it. */
   repo(name: string): TrackerRepo | null;
 }
 
-/** The name `applied.json` records for each write, in the order `ready_to_build` makes them. */
-type WriteName = "writeBrief" | "post" | "move";
+/** The name `applied.json` records for each write. */
+type WriteName = "writeBrief" | "post" | "move" | "pause";
 
 export class Outbox {
   constructor(private readonly options: OutboxOptions) {}
@@ -59,33 +61,67 @@ export class Outbox {
     const { envelope } = checked;
 
     const ref: IssueRef = { id: issue.id, repo };
-    const memory = await this.options.state.issueMemory(session.repo, issue.id);
+    const state = this.options.state;
+    const { move, answers = [], needs } = envelope.outcome;
+    const phrase = statusPhrase(move, needs);
     const comment = handoffComment({
-      phrase: statusPhrase(envelope.outcome.move),
+      phrase,
       summary: envelope.summary,
+      answers: answers.map((answer) => ({ word: answer.word, does: answer.does, status: repo.statuses[answer.move] })),
       handoff: envelope.handoff.text,
       footer: sessionFooter(this.options.version, session.stage, session.session),
     });
+    const moveStep: [WriteName, () => Promise<string | null>] = [
+      "move",
+      async () => {
+        const moved = await lifecycle.move({ ...ref, role: issue.role }, move, move === "paused" ? "pause" : "handoff");
+        return moved.ok ? null : moved.violation;
+      },
+    ];
 
     // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
-    const steps: [WriteName, () => Promise<string | null>][] = [
-      [
-        "writeBrief",
-        async () => {
-          await tracker.writeBrief(ref, envelope.handoff.text, { runnerWroteBrief: memory.brief !== null });
-          await this.options.state.writeIssueMemory(session.repo, issue.id, { ...memory, brief: envelope.handoff.text });
-          return null;
-        },
-      ],
-      ["post", async () => (await tracker.post(ref, comment, { flag: false }), null)],
-      [
-        "move",
-        async () => {
-          const moved = await lifecycle.move({ ...ref, role: issue.role }, envelope.outcome.move, "handoff");
-          return moved.ok ? null : moved.violation;
-        },
-      ],
-    ];
+    let steps: [WriteName, () => Promise<string | null>][];
+    if (move === "paused") {
+      let commentAt: string | null = null;
+      steps = [
+        [
+          "post",
+          async () => {
+            // The flag goes into issue memory first, so the next poll never takes the assignee for one the runner didn't set.
+            const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since: this.options.clock().toISOString() };
+            const memory = await state.issueMemory(session.repo, issue.id);
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } });
+            commentAt = (await tracker.post(ref, comment, { flag: true })).created_at;
+            return null;
+          },
+        ],
+        moveStep,
+        [
+          "pause",
+          async () => {
+            const memory = await state.issueMemory(session.repo, issue.id);
+            // A resumed apply lost the comment's time, and the flag's start comes just before it.
+            const at = commentAt ?? memory.flag?.since ?? this.options.clock().toISOString();
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { answers, comment_at: at, replies: [] } });
+            return null;
+          },
+        ],
+      ];
+    } else {
+      steps = [
+        [
+          "writeBrief",
+          async () => {
+            const memory = await state.issueMemory(session.repo, issue.id);
+            await tracker.writeBrief(ref, envelope.handoff.text, { runnerWroteBrief: memory.brief !== null });
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, brief: envelope.handoff.text });
+            return null;
+          },
+        ],
+        ["post", async () => (await tracker.post(ref, comment, { flag: false }), null)],
+        moveStep,
+      ];
+    }
 
     const appliedFile = join(sessionFolder, "applied.json");
     const applied = await readJson<WriteName[]>(appliedFile, []);
@@ -100,6 +136,7 @@ export class Outbox {
       }
       writes.push(name);
     }
+    if (move === "paused") return { result: "paused", reason: opening(phrase, envelope.summary).statusLine, writes };
     return { result: "applied", writes };
   }
 }
