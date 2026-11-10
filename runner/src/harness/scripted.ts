@@ -4,7 +4,7 @@ import { writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { SessionJson } from "../workspace/index.ts";
-import { writeLaunch, type McpConfig, type Settings } from "./launch.ts";
+import { transcriptUuid, writeLaunch, type McpConfig, type Settings } from "./launch.ts";
 import type { Exit, ExitKind, Handle, Harness, HarnessSession, RateLimitEvent, SessionEvents } from "./types.ts";
 
 /** What one session does. */
@@ -13,6 +13,8 @@ export interface SessionScript {
   outbox?: Record<string, string | Uint8Array>;
   /** Each `rate_limit_event` the session reports while it runs. */
   rateLimits?: RateLimitEvent[];
+  /** Claude Code's warning that its login expires soon, which the session reports as `login_expiring`. */
+  loginExpiring?: string;
   /** How the session ends. Without one, it runs until the scenario calls `finish` or the runner calls `stop`. */
   exit?: ExitKind;
   /** The last error message from the session's `result` event. */
@@ -101,6 +103,7 @@ export class ScriptedHarness implements Harness {
     this.running.set(session.id, running);
     await mkdir(dirname(session.transcript), { recursive: true });
     await writeFile(session.transcript, "");
+    await writeFile(transcriptUuid(session.transcript), `${session.launch.uuid}\n`);
 
     const queue = this.scripts.get(session.issue) ?? [];
     const script = queue.shift() ?? {};
@@ -110,6 +113,7 @@ export class ScriptedHarness implements Harness {
       await writeFile(file, content);
     }
     for (const event of script.rateLimits ?? []) events.rateLimit(event);
+    if (script.loginExpiring !== undefined) events.loginExpiring?.(script.loginExpiring);
     if (script.exit !== undefined) this.end(running, script.exit, script);
     return handle;
   }
