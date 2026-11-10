@@ -10,11 +10,13 @@ import { join } from "node:path";
 import { paths, sessionParts, type Folders } from "../../src/folders/index.ts";
 import { buildLaunch, ClaudeCodeHarness, processStartedAt, type ClaudeCodeOptions, type Exit, type Handle, type HarnessSession, type RateLimitEvent } from "../../src/harness/index.ts";
 import { readRecord } from "../../src/record/index.ts";
+import { fixture, fixtureEvent, fixturePath } from "./fixtures.ts";
 
-const FIXTURES = join(import.meta.dir, "fixtures");
-const INIT = join(FIXTURES, "init.json");
-const RESULT = join(FIXTURES, "result.success.json");
-const RATE_LIMIT = join(FIXTURES, "rate-limit-event.allowed.json");
+const INIT = fixturePath("init.json");
+const RESULT = fixturePath("result.success.json");
+const RATE_LIMIT = fixturePath("rate-limit-event.allowed.json");
+/** A recorded `rate_limit_event`'s `resetsAt`, as the ISO time the adapter reports. */
+const resetsAt = (name: string) => new Date(((fixtureEvent(name).rate_limit_info as { resetsAt: number }).resetsAt) * 1000).toISOString();
 const SHADERS = readRecord(await readFile(join(import.meta.dir, "../record/fixtures/shaders.toml"), "utf8"));
 if (!SHADERS.ok) throw new Error("the Shaders fixture doesn't parse");
 
@@ -249,27 +251,27 @@ describe("a session that runs to its end", () => {
     expect(run.rateLimits).toEqual([
       {
         beforeExit: true,
-        event: expect.objectContaining({ status: "allowed", type: "five_hour", resetsAt: "2026-10-24T06:30:00.000Z" }),
+        event: expect.objectContaining({ status: "allowed", resetsAt: resetsAt("rate-limit-event.allowed.json") }),
       },
     ]);
   });
 
   test("reports the login-expiring warning from stderr", async () => {
-    const warning = (await readFile(join(FIXTURES, "placeholder.stderr.login-expiring.txt"), "utf8")).trimEnd();
-    const h = await makeHarness(await fakeClaude(`cat ${INIT}; echo '${warning}' >&2; cat ${RESULT}`));
+    const warning = fixture("stderr.login-expiring.txt");
+    const h = await makeHarness(await fakeClaude(`cat ${INIT}; cat ${fixturePath("stderr.login-expiring.txt")} >&2; cat ${RESULT}`));
     const run = await start(h, "p7q8r9");
     expect((await run.exit).kind).toBe("exited");
     expect(run.warnings).toEqual([warning]);
   });
 
   test("a stream that hit a plan limit ends rate_limited", async () => {
-    const h = await makeHarness(await fakeClaude(`cat ${INIT}; cat ${join(FIXTURES, "placeholder.rate-limit-event.rejected.json")}; exit 1`));
+    const h = await makeHarness(await fakeClaude(`cat ${INIT}; cat ${fixturePath("rate-limit-event.rejected.json")}; exit 1`));
     const run = await start(h, "s1t2u3");
-    expect(await run.exit).toMatchObject({ kind: "rate_limited", resetsAt: "2026-10-24T06:30:00.000Z" });
+    expect(await run.exit).toMatchObject({ kind: "rate_limited", resetsAt: resetsAt("rate-limit-event.rejected.json") });
   });
 
   test("a revoked login ends login_expired", async () => {
-    const h = await makeHarness(await fakeClaude(`cat ${INIT}; cat ${join(FIXTURES, "placeholder.result.login-expired.json")}; exit 1`));
+    const h = await makeHarness(await fakeClaude(`cat ${INIT}; cat ${fixturePath("result.login-expired.json")}; exit 1`));
     const run = await start(h, "v4w5x6");
     expect(await run.exit).toMatchObject({ kind: "login_expired" });
   });
