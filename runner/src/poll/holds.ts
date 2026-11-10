@@ -7,6 +7,7 @@
 import type { Config } from "../install/index.ts";
 import type { State, Status, StatusHold } from "../state/index.ts";
 import type { Trouble } from "./trouble/trouble.ts";
+import { usageHolds } from "./usage.ts";
 
 /** What a hold source reads. */
 export interface HoldContext {
@@ -31,7 +32,7 @@ export const markerHolds: HoldSource = async ({ state }) => {
 export const troubleHolds: HoldSource = async ({ now, trouble }) => trouble.holds(now);
 
 /** Every source, in the order `status.json` lists their holds. */
-export const HOLD_SOURCES: HoldSource[] = [markerHolds, troubleHolds];
+export const HOLD_SOURCES: HoldSource[] = [markerHolds, troubleHolds, usageHolds];
 
 /** Every hold that holds now. */
 export async function currentHolds(context: HoldContext): Promise<StatusHold[]> {

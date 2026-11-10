@@ -44,6 +44,10 @@ export const paths = {
   /** Present while `hold` or `stop` holds the runner (ADR 0024). */
   holdMarker: (f: Folders) => join(f.data, "state", "hold"),
   log: (f: Folders) => join(f.data, "state", "runner.log"),
+  /** Each usage hold and the latest `rate_limit_event`, so a hold survives a restart. */
+  holds: (f: Folders) => join(f.data, "state", "holds.json"),
+  /** On an API key, the day's and the month's spending. */
+  spend: (f: Folders) => join(f.data, "state", "spend.json"),
   handRuns: (f: Folders) => join(f.data, "hand-runs"),
 
   repo: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo)),
@@ -55,6 +59,8 @@ export const paths = {
   lastRecord: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "record.json"),
   issues: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "issues"),
   issueMemory: (f: Folders, repo: string, uuid: string) => join(f.data, "repos", repoPath(repo), "issues", `${uuid}.json`),
+  /** An outbox Linear didn't take for 3 hours, outside the session root, so dispose and the sweep never touch it. */
+  kept: (f: Folders, repo: string, uuid: string) => join(f.data, "repos", repoPath(repo), "kept", uuid),
 
   worktrees: (f: Folders) => join(f.sessionRoot, "worktrees"),
   worktree: (f: Folders, session: string) => join(f.sessionRoot, "worktrees", session),

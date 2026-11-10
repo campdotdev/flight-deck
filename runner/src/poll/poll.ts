@@ -14,15 +14,18 @@ import { buildLaunch, type Auth, type Exit, type ExitKind, type Harness, type Ha
 import { hasWorkspace, othersCanRead, readConfig, readCredentials, writeEtc, type Config, type Credentials, type Registration } from "../install/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
+import { blockerPause } from "../outbox/runner-comments/blocker.ts";
 import { failedTwice, type FailedExit } from "../outbox/runner-comments/failed-twice.ts";
 import { stopPause } from "../outbox/runner-comments/stop.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from "../outbox/runner-comments/index.ts";
 import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/record.ts";
 import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
 import { readJson, State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
-import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
+import { FACTORY_ROLES, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
+import { ApplyWaiting } from "./apply-waiting.ts";
+import { blockerTest } from "./blockers.ts";
 import { EXITS, type ExitContext } from "./exits/index.ts";
 import { movedOut, stillWorking } from "./moved-out.ts";
 import { currentHolds, holdsRepo, runnerState, type HoldContext } from "./holds.ts";
@@ -30,6 +33,7 @@ import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
 import { staleTakes } from "./stale-takes.ts";
 import { Trouble } from "./trouble/trouble.ts";
 import { MIN_VERSION, tooOld } from "./trouble/version.ts";
+import { Usage } from "./usage.ts";
 
 export interface PollOptions {
   folders: Folders;
@@ -55,6 +59,8 @@ interface RepoPoll {
   record: RecordResult | null;
   snapshot: Snapshot | null;
   waitingForSpecs: SnapshotIssue[];
+  /** The sent issues the blocker test left waiting at this poll, each with its blockers that aren't done. */
+  waitingForBlockers: { issue: SnapshotIssue; open: BlockerIssue[] }[];
   /** The issues with a runner comment that hadn't landed at the start of this poll. Nothing else happens to them. */
   blocked: Set<string>;
   /** Step 8's stale takes, for `status.json`. */
@@ -75,6 +81,8 @@ export class Poll {
   private readonly path: string;
   private readonly lifecycle: Lifecycle;
   private readonly state: State;
+  private readonly applyWaiting: ApplyWaiting;
+  private readonly usage: Usage;
   /** Exits queue as they happen, and the next tick handles them first. */
   private readonly exits: QueuedExit[] = [];
   /** The `[machine_user]` that `etc/` was last written from, or `null` before this runner's first write. */
@@ -93,6 +101,14 @@ export class Poll {
     this.path = options.path ?? process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
     this.lifecycle = new Lifecycle(options.tracker);
     this.state = new State(options.folders);
+    this.usage = new Usage(this.state);
+    this.applyWaiting = new ApplyWaiting({
+      folders: options.folders,
+      version: options.version,
+      tracker: options.tracker,
+      state: this.state,
+      fail: (now, repo, entry, failure, facts, workspace) => this.fail(now, repo, entry, failure, facts, workspace),
+    });
   }
 
   /** Runs one poll for every registered repo. */
@@ -201,6 +217,8 @@ export class Poll {
       this.started = true;
     }
     await this.handleExits(now, config, workspace);
+    // Outboxes Linear didn't take, each on its backoff, with no session.
+    await this.applyWaiting.retry(now, this.outbox(now, config), (name) => repoNamed(config, name), workspace);
     const trouble = await Trouble.load(this.state);
     const credentials = await this.checkCredentials(trouble);
     checkSharedTeams(config, trouble);
@@ -213,6 +231,8 @@ export class Poll {
     // 10. Trouble.
     const reachable = new Map(repos.flatMap((poll) => (poll.tracker === null ? [] : [[poll.registration.name, poll.tracker] as const])));
     await trouble.settle({ now, tracker: this.tracker, state: this.state, version: this.version, path: this.path, repos: reachable });
+    // 11. Usage.
+    await this.usage.update(now, config);
     await this.publish(now, config, repos, trouble);
   }
 
@@ -327,15 +347,7 @@ export class Poll {
   private async handleExits(now: Date, config: Config, workspace: Workspace): Promise<void> {
     const queued = this.exits.splice(0);
     if (queued.length === 0) return;
-    const outbox = new Outbox({
-      version: this.version,
-      state: this.state,
-      clock: () => now,
-      repo: (name) => {
-        const registration = config.repos.find((repo) => repo.name === name);
-        return registration === undefined ? null : trackerRepo(config, registration, null);
-      },
-    });
+    const outbox = this.outbox(now, config);
     for (const { session, exit } of queued) {
       const entry = (await this.state.sessions()).find((each) => each.id === session);
       if (entry === undefined) continue;
@@ -347,15 +359,17 @@ export class Poll {
         continue;
       }
       await this.tracker.revoke({ id: entry.id, repo });
+      await this.usage.spent(now, config, exit);
 
       const sessionFolder = paths.sessionFolder(this.folders, entry.id);
-      const { transcript, claudeCodeVersion: _, error, ...kind } = exit;
+      const { transcript, claudeCodeVersion: _, error, costUsd: __, ...kind } = exit;
       const facts: RunnerFacts = { exit: kind as ExitKind, session: entry.id, attempt: entry.attempt, transcript };
       if (error !== undefined) facts.error = error;
       const context: ExitContext = {
         now,
         entry,
         exit,
+        config,
         repo,
         tracker: this.tracker,
         state: this.state,
@@ -370,6 +384,10 @@ export class Poll {
       };
       await EXITS[exit.kind](context);
     }
+  }
+
+  private outbox(now: Date, config: Config): Outbox {
+    return new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => repoNamed(config, name) });
   }
 
   /** The session is over: its workspace goes, and so does its entry. */
@@ -460,8 +478,16 @@ export class Poll {
       const tracker = repo.repo;
       // A runner comment Linear didn't take yet goes first, and nothing else happens to its issue this poll.
       for (const issue of await this.pendingComments(now, tracker, snapshot)) blocked.add(issue);
-      // 4. Moved out.
-      await movedOut({ now, repo: tracker, snapshot, state: this.state, workspace, folders: this.folders, stop: (entry) => this.stopSession(now, entry, "moved_out") });
+      // 4. Moved out, with the kept outboxes of issues that left Paused.
+      await movedOut({
+        now,
+        repo: tracker,
+        snapshot,
+        state: this.state,
+        stop: (entry) => this.stopSession(now, entry, "moved_out"),
+        discard: (entry) => this.applyWaiting.movedOut(now, entry, workspace),
+      });
+      await this.applyWaiting.forget(now, tracker, snapshot);
       // 5. Answers.
       const handled = await this.answers(now, tracker, snapshot, blocked);
       for (const issue of blocked) handled.add(issue);
@@ -486,7 +512,7 @@ export class Poll {
       });
     }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
-    return { registration, tracker: repo?.repo ?? null, fetch, record, snapshot, waitingForSpecs, blocked, staleTakes: stale };
+    return { registration, tracker: repo?.repo ?? null, fetch, record, snapshot, waitingForSpecs, waitingForBlockers: [], blocked, staleTakes: stale };
   }
 
   /**
@@ -659,8 +685,16 @@ export class Poll {
 
   private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace, trouble: Trouble): Promise<void> {
     const sessions = await this.state.sessions();
-    const busy = new Set(sessions.map((entry) => entry.issue_id));
-    let free = config.concurrency_cap - sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
+    let running = sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
+    // An entry whose apply waits after the move has handed off, so its issue can be taken again.
+    const busy = new Set(sessions.filter((entry) => entry.apply?.phase !== "after_move").map((entry) => entry.issue_id));
+    for (const poll of repos) await this.blockers(now, poll, busy);
+    let free = config.concurrency_cap - running;
+    /** Whether one more session may start: a free place under the cap, and on an API key, room under each cap. */
+    const room = async () => free > 0 && (await this.usage.fits(now, config, running));
+    // The cap test runs before the holds are read, so a cap that fits again ends its `api_cap` hold, and one that
+    // doesn't holds the runner from this poll.
+    await this.usage.fits(now, config, running);
 
     // Before each start, Claude Code's version (ADR 0015).
     const work = sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
@@ -676,13 +710,14 @@ export class Poll {
 
     // A retry waiting for a free place starts before any new take.
     for (const entry of sessions.filter((each) => each.state === "retry_waiting")) {
-      if (free <= 0) break;
+      if (!(await room())) break;
       const poll = startable.find((each) => each.registration.name === entry.repo);
       if (poll === undefined || !poll.fetch.ok || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
       const issue = poll.snapshot.issues.find((each) => each.id === entry.issue_id);
       // Step 4 dropped the retry of an issue that left its working status.
       if (issue === undefined || issue.role !== WORKING[entry.stage]) continue;
       free--;
+      running++;
       await this.startSession(now, config, poll, issue, workspace, entry);
     }
 
@@ -690,14 +725,39 @@ export class Poll {
     for (const poll of startable) {
       if (!poll.fetch.ok || poll.snapshot === null) continue;
       for (const issue of poll.snapshot.issues) {
-        if (issue.role === "ready_to_plan" && !hasSpec(issue) && !busy.has(issue.id) && !poll.blocked.has(issue.id)) candidates.push({ poll, issue });
+        if (issue.role !== "ready_to_plan" || hasSpec(issue) || busy.has(issue.id) || poll.blocked.has(issue.id) || blockerTest(issue).kind !== "take") continue;
+        // A kept outbox is applied instead of a session, and takes no place under the cap.
+        if (poll.tracker !== null && (await this.applyWaiting.applyKept(now, this.outbox(now, config), poll.tracker, issue, workspace))) continue;
+        candidates.push({ poll, issue });
       }
     }
-    candidates.sort((a, b) => priorityRank(a.issue) - priorityRank(b.issue) || a.issue.created_at.localeCompare(b.issue.created_at));
+    // Priority, then how many issues each one unblocks, then age, across every repo (ADR 0002).
+    candidates.sort(
+      (a, b) => priorityRank(a.issue) - priorityRank(b.issue) || b.issue.unblocks - a.issue.unblocks || a.issue.created_at.localeCompare(b.issue.created_at),
+    );
     for (const { poll, issue } of candidates) {
-      if (free <= 0) break;
+      if (!(await room())) break;
       free--;
+      running++;
       await this.startSession(now, config, poll, issue, workspace);
+    }
+  }
+
+  /**
+   * The blocker test, on each sent issue spec 1 can take, before the order and even with no free place (ADR 0002).
+   * A canceled blocker, or a duplicate of nothing, pauses the issue from Ready to plan with no session and no
+   * retry used. An open blocker leaves it waiting with nothing posted, under `waiting_for_blockers`.
+   */
+  private async blockers(now: Date, poll: RepoPoll, busy: Set<string>): Promise<void> {
+    if (poll.tracker === null || poll.snapshot === null) return;
+    for (const issue of poll.snapshot.issues) {
+      if (issue.role !== "ready_to_plan" || hasSpec(issue) || busy.has(issue.id) || poll.blocked.has(issue.id)) continue;
+      const test = blockerTest(issue);
+      if (test.kind === "wait") poll.waitingForBlockers.push({ issue, open: test.open });
+      if (test.kind !== "pause") continue;
+      const comment = runnerComment(blockerPause(test), {}, { version: this.version, statuses: poll.tracker.statuses });
+      const result = await this.comments(now).post(issue, comment);
+      await this.state.log(now, `${issue.identifier}: blocker pause ${result}: ${comment.statusLine}`);
     }
   }
 
@@ -825,8 +885,7 @@ export class Poll {
     };
     const handle = await this.harness.start(session, {
       exit: (exit) => void this.exits.push({ session: id, exit }),
-      // FLD-105 turns each event into the plan-limit hold.
-      rateLimit: () => {},
+      rateLimit: (event) => this.usage.report(event),
     });
     const running: SessionEntry = {
       ...entry,
@@ -885,16 +944,7 @@ export class Poll {
         deadline: entry.deadline,
       })),
       jobs: [],
-      usage:
-        config.auth === "api_key"
-          ? {
-              auth: "api_key",
-              day_usd: 0,
-              month_usd: 0,
-              daily_cap_usd: config.api?.daily_cap_usd ?? 0,
-              monthly_cap_usd: config.api?.monthly_cap_usd ?? 0,
-            }
-          : { auth: "subscription", five_hour: null, weekly: null },
+      usage: await this.usage.status(now, config),
       flags: await this.flagList(repos),
       trouble: trouble.status(),
       stale_takes: repos.flatMap((poll) => poll.staleTakes),
@@ -910,6 +960,12 @@ export class Poll {
  */
 function ownedIssues(snapshot: Snapshot): SnapshotIssue[] {
   return snapshot.issues.filter((issue) => FACTORY_ROLES.includes(issue.role) && !(issue.role === "ready_to_plan" && hasSpec(issue)));
+}
+
+/** A registered repo by name, with the registration's `[tracker]`, or `null`. */
+function repoNamed(config: Config, name: string): TrackerRepo | null {
+  const registration = config.repos.find((repo) => repo.name === name);
+  return registration === undefined ? null : trackerRepo(config, registration, null);
 }
 
 /** The repo as the Tracker needs it: the record's `[tracker]` when it's valid, or else the registration's copy. */
@@ -986,7 +1042,13 @@ function statusRepo(poll: RepoPoll): StatusRepo {
     // FLD-99 adds the dependency cache.
     cache: "missing",
     waiting_for_specs: poll.waitingForSpecs.map((issue) => ({ issue: issue.identifier, title: issue.title })),
-    waiting_for_blockers: [],
+    waiting_for_blockers: poll.waitingForBlockers.map(({ issue, open }) => ({
+      issue: issue.identifier,
+      title: issue.title,
+      blockers: open.map((blocker) =>
+        blocker.readable ? { issue: blocker.identifier, title: blocker.title, status: blocker.status } : { issue: blocker.identifier, title: null, status: null },
+      ),
+    })),
     waiting_for_port: null,
   };
 }

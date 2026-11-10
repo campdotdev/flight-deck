@@ -375,3 +375,91 @@ describe("refuse", () => {
     expect(tracker.writes.map((write) => write.kind)).toEqual(["assign", "comment"]);
   });
 });
+
+describe("snapshot blockers and unblocks", () => {
+  beforeEach(() => {
+    tracker.addTeam({
+      key: "OPS",
+      name: "Ops",
+      statuses: [
+        { name: "Todo", type: "unstarted" },
+        { name: "Done", type: "completed" },
+        { name: "Canceled", type: "canceled" },
+        { name: "Duplicate", type: "duplicate" },
+      ],
+    });
+    tracker.addTeam({ key: "SEC", name: "Security", statuses: [{ name: "Todo", type: "unstarted" }], readable: false });
+  });
+
+  function ops(status: string, title = `Ops ${status}`) {
+    return tracker.addIssue({ team: "OPS", title, status, creator: "maintainer" });
+  }
+
+  async function read(id: string) {
+    const found = (await tracker.snapshot(repo)).issues.find((each) => each.id === id);
+    if (found === undefined) throw new Error(`no ${id} in the snapshot`);
+    return found;
+  }
+
+  test("lists each blocker of an issue in Ready to plan, on any team, with its title, URL, status, and status type", async () => {
+    const blocked = issue("x", "Ready to plan");
+    const todo = ops("Todo", "Rotate keys");
+    const local = tracker.addIssue({ team: "SHA", title: "Landed work", status: "Landed", creator: "maintainer" });
+    tracker.addBlocker(blocked.id, todo.id);
+    tracker.addBlocker(blocked.id, local.id);
+    expect((await read(blocked.id)).blockers).toEqual([
+      { readable: true, identifier: todo.identifier, title: "Rotate keys", url: `https://linear.app/campdotdev/issue/${todo.identifier}`, status: "Todo", status_type: "unstarted", original: null },
+      { readable: true, identifier: local.identifier, title: "Landed work", url: `https://linear.app/campdotdev/issue/${local.identifier}`, status: "Landed", status_type: "started", original: null },
+    ]);
+  });
+
+  test("gives a blocker the app can't read only its identifier", async () => {
+    const blocked = issue("x", "Ready to plan");
+    const secret = tracker.addIssue({ team: "SEC", title: "Private", status: "Todo", creator: "maintainer" });
+    tracker.addBlocker(blocked.id, secret.id);
+    expect((await read(blocked.id)).blockers).toEqual([{ readable: false, identifier: secret.identifier }]);
+  });
+
+  test("follows a duplicate blocker through further duplicates to its original, and stops at a loop", async () => {
+    const blocked = issue("x", "Ready to plan");
+    const first = ops("Canceled", "First");
+    const middle = ops("Duplicate", "Middle");
+    const original = ops("Done", "Original");
+    tracker.setDuplicate(first.id, middle.id);
+    tracker.setDuplicate(middle.id, original.id);
+    const looped = ops("Duplicate", "Looped");
+    const other = ops("Duplicate", "Other");
+    tracker.setDuplicate(looped.id, other.id);
+    tracker.setDuplicate(other.id, looped.id);
+    const orphan = ops("Duplicate", "Orphan");
+    for (const each of [first, looped, orphan]) tracker.addBlocker(blocked.id, each.id);
+    const [viaChain, viaLoop, viaNothing] = (await read(blocked.id)).blockers;
+    expect(viaChain).toMatchObject({ identifier: first.identifier, status_type: "canceled", original: { readable: true, identifier: original.identifier, title: "Original", status: "Done", status_type: "completed" } });
+    expect(viaLoop).toMatchObject({ identifier: looped.identifier, original: null });
+    expect(viaNothing).toMatchObject({ identifier: orphan.identifier, status_type: "duplicate", original: null });
+  });
+
+  test("leaves blockers and unblocks empty outside Ready to plan", async () => {
+    const planning = issue("x", "Planning");
+    const blocker = ops("Todo");
+    tracker.addBlocker(planning.id, blocker.id);
+    const blocks = ops("Todo");
+    tracker.addBlocker(blocks.id, planning.id);
+    expect(await read(planning.id)).toMatchObject({ blockers: [], unblocks: 0 });
+  });
+
+  test("counts the open issues an issue blocks that have no other open blocker", async () => {
+    const one = issue("x", "Ready to plan");
+    const alone = ops("Todo");
+    const doneOther = ops("Todo");
+    const openOther = ops("Todo");
+    const closed = ops("Done");
+    tracker.addBlocker(alone.id, one.id);
+    tracker.addBlocker(doneOther.id, one.id);
+    tracker.addBlocker(doneOther.id, ops("Done").id);
+    tracker.addBlocker(openOther.id, one.id);
+    tracker.addBlocker(openOther.id, ops("Todo").id);
+    tracker.addBlocker(closed.id, one.id);
+    expect((await read(one.id)).unblocks).toBe(2);
+  });
+});

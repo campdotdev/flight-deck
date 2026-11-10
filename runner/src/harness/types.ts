@@ -49,9 +49,11 @@ export type ExitKind =
 
 /**
  * Every exit names the transcript and the Claude Code version. `error` is the last error message from the
- * session's `result` event, when it had one. A runner comment's Details fold shows it (ADR 0019).
+ * session's `result` event, when it had one. A runner comment's Details fold shows it (ADR 0019). `costUsd` is
+ * that event's `total_cost_usd`. It's absent when the session ended with no `result` event, and then the
+ * runner counts the session's whole budget (spec 1, "State").
  */
-export type Exit = ExitKind & { transcript: string; claudeCodeVersion: string; error?: string };
+export type Exit = ExitKind & { transcript: string; claudeCodeVersion: string; error?: string; costUsd?: number };
 
 /** One window of a `rate_limit_event`, such as `five_hour` or `seven_day`. */
 export interface RateLimitWindow {
