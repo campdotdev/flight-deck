@@ -62,6 +62,8 @@ export const paths = {
   cursor: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "cursor.json"),
   /** The last valid record the runner read on the default branch, for stale-take limits (spec 1, poll step 8). */
   lastRecord: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "record.json"),
+  /** The open pause for a single-instance app's port in use, while the repo's other queued issues wait. */
+  portPause: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "port-pause.json"),
   issues: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "issues"),
   issueMemory: (f: Folders, repo: string, uuid: string) => join(f.data, "repos", repoPath(repo), "issues", `${uuid}.json`),
   /** An outbox Linear didn't take for 3 hours, outside the session root, so dispose and the sweep never touch it. */
