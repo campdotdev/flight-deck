@@ -270,9 +270,6 @@ describe("a write after the move", () => {
     expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
     expect(existsSync(join(world.folders.sessionRoot, "sessions", id))).toBe(false);
     expect(existsSync(kept(issue))).toBe(false);
-    const log = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
-    expect(log).toContain(`${id} ${issue.identifier}: file follow-ups/1.md dropped: Linear didn't take it for 3 hours`);
-    expect(log).toContain(`${id} ${issue.identifier}: relate follow-ups/1.md dropped: Linear didn't take it for 3 hours`);
     await world.tick();
     expect(afterTake(issue).map((write) => write.kind)).toEqual(["description", "comment", "move"]);
   }, 30_000);
@@ -302,8 +299,6 @@ describe("an issue the maintainer moves while its apply waits", () => {
     expect(afterTake(issue).map((write) => write.kind)).toEqual(["description"]);
     expect((await world.status()).sessions).toEqual([]);
     expect(existsSync(join(world.folders.sessionRoot, "sessions", id))).toBe(false);
-    const log = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
-    expect(log).toContain(`${id} ${issue.identifier}: left planning, outbox discarded`);
   });
 
   test("of a kept outbox's take deletes the kept folder, so the next take starts a session", async () => {

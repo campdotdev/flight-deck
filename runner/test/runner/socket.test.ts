@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { stat } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
+import { paths } from "../../src/folders/index.ts";
 import type { RunnerSocket } from "../../src/runner/index.ts";
+import { readJson } from "../../src/state/index.ts";
 import { ask, type Reply, type Request } from "../../src/socket/index.ts";
 import { listen } from "../cli/cli.ts";
 import { World } from "../scenario/world.ts";
@@ -102,6 +104,22 @@ test("trial returns once the trial ends, with its result", async () => {
   }
   await asked;
   expect(reply).toEqual({ ok: true, result: "passed", session: expect.any(String), exit: { kind: "exited", code: 0 } });
+  // Install's trial step is done once state/trial.json names the running version.
+  const session = world.harness.started[0]!.session.id;
+  expect(await readJson<unknown>(paths.trial(world.folders), null)).toEqual({ version: world.version, claude_code_version: "2.1.321", session, passed_at: world.now.toISOString() });
+});
+
+test("a trial that fails returns its exit, and records no pass", async () => {
+  world.harness.script("", { exit: { kind: "no_init" } });
+  let reply: Reply | null | undefined;
+  const asked = ask(socketPath(), { op: "trial" }, 30_000).then((each) => (reply = each));
+  for (let i = 0; i < 5 && reply === undefined; i++) {
+    await Bun.sleep(50);
+    await world.tick();
+  }
+  await asked;
+  expect(reply).toEqual({ ok: true, result: "failed", session: expect.any(String), exit: { kind: "no_init" } });
+  expect(await readJson(paths.trial(world.folders), null)).toBeNull();
 });
 
 test("notify posts a macOS notification", async () => {

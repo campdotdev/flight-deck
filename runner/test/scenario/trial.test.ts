@@ -137,11 +137,10 @@ describe("a trial", () => {
     expect(world.tracker.writes).toEqual([]);
   });
 
-  test("records a pass in state/trial.json with the version it ran on, and deletes its repo outright", async () => {
+  test("passes, and deletes its repo outright", async () => {
     world.harness.script("", PASSES);
     const result = await runTrial();
     const start = world.harness.started[0]!;
-    expect(await world.trialRecord()).toEqual({ version: world.version, claude_code_version: "2.1.321", session: start.session.id, passed_at: world.now.toISOString() });
     expect(existsSync(start.session.worktree)).toBe(false);
     expect(existsSync(start.session.sessionFolder)).toBe(false);
     // The transcript stays.
@@ -167,7 +166,6 @@ describe("a trial", () => {
     expect(await runTrial()).toEqual({ result: "failed", session: expect.any(String), exit: { kind: "exited", code: 1 } });
     world.harness.script("", { exit: { kind: "no_init" } });
     expect(await runTrial()).toEqual({ result: "failed", session: expect.any(String), exit: { kind: "no_init" } });
-    expect(await world.trialRecord()).toBeNull();
   });
 
   test("runs with no repo registered, as install's first trial does", async () => {

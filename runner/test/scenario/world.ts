@@ -298,11 +298,6 @@ export class World {
     return JSON.parse(await readFile(join(this.folders.data, "state", "status.json"), "utf8")) as Status;
   }
 
-  /** `state/trial.json`, the last passing trial, or `null` before one passed. */
-  async trialRecord(): Promise<unknown> {
-    return JSON.parse(await readFile(join(this.folders.data, "state", "trial.json"), "utf8").catch(() => "null"));
-  }
-
   /** The text of each macOS notification the runner posted, in order. */
   async notifications(): Promise<string[]> {
     const text = await readFile(join(this.root, "notifications.log"), "utf8").catch(() => "");
