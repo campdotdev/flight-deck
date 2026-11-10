@@ -22,6 +22,9 @@ export interface ClearedText {
   sentence: string;
 }
 
+/** How the maintainer signs Claude Code in again. Flight Deck never touches the login itself (ADR 0005). */
+const LOGIN_STEPS = ["In a terminal on the Mac, run `claude`.", "Type `/login`, and sign in with the account Flight Deck's sessions use."];
+
 const CLOSING = "Flight Deck comments here once it works again. Close the issue then.";
 
 export function troubleText(entry: Pick<TroubleEntry, "cause" | "since" | "facts">, version: string): TroubleText {
@@ -85,12 +88,30 @@ export function troubleText(entry: Pick<TroubleEntry, "cause" | "since" | "facts
       const title = "Flight Deck stopped: others can read credentials.env. Run chmod 600 on it.";
       return { title, body: null, notification: title };
     }
+    case "claude_login": {
+      const title = "Claude Code's login expired: run claude, then /login";
+      const body = issueBody({
+        what: `Flight Deck stopped starting sessions on this Mac at ${since}. Claude Code's login expired, so a session ended without finishing. Flight Deck starts a trial run every 15 minutes, and sessions start again once one passes.`,
+        steps: LOGIN_STEPS,
+        details: [`- Session: \`${facts.session}\``, ...(facts.error === undefined ? [] : ["", `The session ended with:\n\n${codeBlock(facts.error)}`])],
+        cause: entry.cause,
+        version,
+      });
+      return { title, body, notification: title };
+    }
+    case "claude_login_soon": {
+      const title = "Claude Code's login expires soon: run claude, then /login";
+      const body = issueBody({
+        what: `Claude Code warned at ${since} that its login expires soon. Nothing has stopped yet. Once the login expires, Flight Deck stops starting sessions on this Mac.`,
+        steps: LOGIN_STEPS,
+        details: [`- Session: \`${facts.session}\``, ...(facts.warning === undefined ? [] : ["", `Claude Code's warning:\n\n${codeBlock(facts.warning)}`])],
+        cause: entry.cause,
+        version,
+      });
+      return { title, body, notification: title };
+    }
     case "linear_token":
       return linearToken(entry, version);
-    case "claude_login":
-    case "claude_login_soon":
-      // FLD-112 adds these causes' texts.
-      throw new Error(`no trouble text for ${entry.cause} yet`);
   }
 }
 
@@ -146,6 +167,10 @@ export function clearedText(entry: Pick<TroubleEntry, "cause" | "facts">, now: T
       return { statusLine: `🟢 Fixed: Claude Code ${now.version ?? entry.facts.version} works with Flight Deck.`, sentence: "Sessions start again at the next poll." };
     case "github_token":
       return { statusLine: "🟢 Fixed: Flight Deck can sign in to GitHub again.", sentence: "Sessions start again at the next poll." };
+    case "claude_login":
+      return { statusLine: "🟢 Fixed: Claude Code is signed in again.", sentence: "Sessions start again at the next poll." };
+    case "claude_login_soon":
+      return { statusLine: "🟢 Fixed: Claude Code's login was renewed.", sentence: "Nothing had stopped." };
     default:
       return null;
   }

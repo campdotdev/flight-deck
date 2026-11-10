@@ -26,6 +26,14 @@ export interface SessionTarget extends Common {
   kind: "session";
 }
 
+/**
+ * A trial run (spec 1, "Trial run"): no record, so no hosts and no read paths, and no clone to read, because its
+ * throwaway repo isn't a worktree of one. Nothing denies writes to that repo's `.git`.
+ */
+export interface TrialTarget extends Omit<Common, "repo" | "record"> {
+  kind: "trial";
+}
+
 /** A dependency cache refresh, in its scratch worktree. */
 export interface RefreshTarget extends Common {
   kind: "refresh";
@@ -47,12 +55,14 @@ export interface RefreshSettings {
   filesystem: { denyRead: string[]; allowRead: string[]; allowWrite: string[]; denyWrite: string[] };
 }
 
-export function sandboxPolicy(target: SessionTarget): SessionSandbox;
+export function sandboxPolicy(target: SessionTarget | TrialTarget): SessionSandbox;
 export function sandboxPolicy(target: RefreshTarget): RefreshSettings;
-export function sandboxPolicy(target: SessionTarget | RefreshTarget): SessionSandbox | RefreshSettings {
+export function sandboxPolicy(target: SessionTarget | TrialTarget | RefreshTarget): SessionSandbox | RefreshSettings {
   const { folders, worktree, sessionFolder, versionFolder } = target;
   const parts = sessionParts(sessionFolder);
-  const network = { allowedDomains: [...target.record.sandbox.hosts], deniedDomains: [...GITHUB_HOSTS] };
+  const sandbox = target.kind === "trial" ? { hosts: [], read_paths: [] } : target.record.sandbox;
+  const clone = target.kind === "trial" ? null : paths.clone(folders, target.repo);
+  const network = { allowedDomains: [...sandbox.hosts], deniedDomains: [...GITHUB_HOSTS] };
   // `~/` and the session root, so no session reads another session's folder, worktree, or copied files,
   // or another repo's cache.
   const denyRead = [`${folders.home}/`, folders.sessionRoot];
@@ -62,14 +72,14 @@ export function sandboxPolicy(target: SessionTarget | RefreshTarget): SessionSan
     join(versionFolder, "skills"),
     join(versionFolder, "plugin"),
     paths.claudeProject(folders, worktree),
-    paths.clone(folders, target.repo),
+    ...(clone === null ? [] : [clone]),
     paths.etc(folders),
-    ...target.record.sandbox.read_paths.map((path) => expandHome(folders, path)),
+    ...sandbox.read_paths.map((path) => expandHome(folders, path)),
   ];
   // No session moves a ref, writes an object, or plants a graft in the clone (ADR 0007).
-  const denyWrite = [join(paths.clone(folders, target.repo), ".git")];
+  const denyWrite = clone === null ? [] : [join(clone, ".git")];
 
-  if (target.kind === "session") {
+  if (target.kind !== "refresh") {
     return {
       enabled: true,
       allowUnsandboxedCommands: false,
