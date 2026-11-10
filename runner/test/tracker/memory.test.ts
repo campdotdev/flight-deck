@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { Role } from "../../src/record/index.ts";
-import { InMemoryTracker, type IssueRef, type TrackerRepo } from "../../src/tracker/index.ts";
+import { InMemoryTracker, TrackerUnavailable, type IssueRef, type TrackerRepo } from "../../src/tracker/index.ts";
 
 const STATUSES: Record<Role, string> = {
   intake: "Triage",
@@ -252,5 +252,20 @@ describe("Reader tokens", () => {
     const token = await tracker.sessionToken({ id: "abc123", repo });
     await tracker.revoke({ id: "abc123", repo });
     expect(tracker.tokens).toEqual([{ session: "abc123", token, revoked: true }]);
+  });
+});
+
+describe("refuse", () => {
+  test("makes the next calls of a write fail as Linear being unavailable, records nothing for them, then lets one land", async () => {
+    const issue = tracker.addIssue({ team: "SHA", title: "x", status: "Planning", creator: "maintainer" });
+    tracker.refuse("post", { times: 2 });
+    for (let i = 0; i < 2; i++) {
+      const error = await tracker.post({ id: issue.id, repo }, "hi", { flag: true }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(TrackerUnavailable);
+      expect((error as TrackerUnavailable).reason).toBe("server");
+    }
+    expect(tracker.writes).toEqual([]);
+    await tracker.post({ id: issue.id, repo }, "hi", { flag: true });
+    expect(tracker.writes.map((write) => write.kind)).toEqual(["assign", "comment"]);
   });
 });

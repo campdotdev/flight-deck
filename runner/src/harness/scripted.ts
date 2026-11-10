@@ -15,6 +15,8 @@ export interface SessionScript {
   rateLimits?: RateLimitEvent[];
   /** How the session ends. Without one, it runs until the scenario calls `finish` or the runner calls `stop`. */
   exit?: ExitKind;
+  /** The last error message from the session's `result` event. */
+  error?: string;
 }
 
 /** One `start` call, with what the session found when it started. */
@@ -55,11 +57,11 @@ export class ScriptedHarness implements Harness {
     this.scripts.set(issue, [...(this.scripts.get(issue) ?? []), script]);
   }
 
-  /** Ends a running session. */
-  finish(session: string, exit: ExitKind): void {
+  /** Ends a running session, with the last error message from its `result` event when it has one. */
+  finish(session: string, exit: ExitKind, options: { error?: string } = {}): void {
     const running = this.running.get(session);
     if (running === undefined) throw new Error(`session ${session} isn't running`);
-    this.end(running, exit);
+    this.end(running, exit, options.error);
   }
 
   /** The IDs of the sessions still running. */
@@ -88,7 +90,7 @@ export class ScriptedHarness implements Harness {
       await writeFile(file, content);
     }
     for (const event of script.rateLimits ?? []) events.rateLimit(event);
-    if (script.exit !== undefined) this.end(running, script.exit);
+    if (script.exit !== undefined) this.end(running, script.exit, script.error);
     return handle;
   }
 
@@ -102,9 +104,10 @@ export class ScriptedHarness implements Harness {
     return this.claudeCodeVersion;
   }
 
-  private end(running: Running, kind: ExitKind): void {
+  private end(running: Running, kind: ExitKind, error?: string): void {
     this.running.delete(running.session.id);
     const exit: Exit = { ...kind, transcript: running.session.transcript, claudeCodeVersion: this.claudeCodeVersion };
+    if (error !== undefined) exit.error = error;
     // The adapter writes exit.json as soon as it sees the session end, before the runner handles the exit.
     writeFileSync(join(running.session.sessionFolder, "exit.json"), `${JSON.stringify(exit)}\n`);
     running.events.exit(exit);
