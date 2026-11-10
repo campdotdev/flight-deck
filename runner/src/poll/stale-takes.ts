@@ -44,7 +44,7 @@ export async function staleTakes(input: StaleTakeInput): Promise<Status["stale_t
 
     if ((await input.state.issueMemory(repo.name, issue.id)).stale_take === issue.status_since) continue;
     const text = staleTake({ status: issue.status, queue: repo.statuses[stage.queue], sinceMs });
-    const result = await input.comments.post(issue, runnerComment(text, {}, { version: input.version, statuses: repo.statuses }));
+    const result = await input.comments.post(issue, await runnerComment(text, {}, { version: input.version, statuses: repo.statuses }));
     const memory = await input.state.issueMemory(repo.name, issue.id);
     await input.state.writeIssueMemory(repo.name, issue.id, { ...memory, stale_take: issue.status_since });
     await input.state.log(now, `${issue.identifier}: stale take ${result}`);

@@ -7,6 +7,7 @@ import type { Role } from "../../record/index.ts";
 import type { Answer, FlagCause } from "../../state/index.ts";
 import { flattenFolds, fold } from "../../tracker/index.ts";
 import { answerLines } from "../comment.ts";
+import { SecretScanFailed, type SecretScan } from "../secret-scan.ts";
 
 /** What one case says. A case file builds it from the case's own inputs. */
 export interface RunnerText {
@@ -50,6 +51,8 @@ export interface FrameOptions {
   version: string;
   /** The team's status names, for the answer lines. */
   statuses: Record<Role, string>;
+  /** The scan the error and prepare messages go through, with the repo whose copied files count. A comment whose facts hold either needs it. */
+  secrets?: { scan: SecretScan; repo: string };
 }
 
 /** "Flight Deck <version> · runner" (ADR 0019). */
@@ -57,11 +60,14 @@ export function runnerFooter(version: string): string {
   return `Flight Deck ${version} · runner`;
 }
 
-/** Builds the comment: the status line, the sentences, a pause's answer lines, then the fold and the footer. */
-export function runnerComment(text: RunnerText, facts: RunnerFacts, options: FrameOptions): RunnerComment {
+/**
+ * Builds the comment: the status line, the sentences, a pause's answer lines, then the fold and the footer.
+ * The error and prepare messages go through the secret scan first, and a message the scan matches is left out.
+ */
+export async function runnerComment(text: RunnerText, facts: RunnerFacts, options: FrameOptions): Promise<RunnerComment> {
   const answers = text.answers ?? [];
   const lines = answers.length === 0 ? [] : [answerLines(answers.map(({ word, does, move }) => ({ word, does, status: options.statuses[move] })))];
-  const inFold = [factsText(facts), text.details ?? ""].filter((part) => part.trim() !== "").join("\n\n");
+  const inFold = [await factsText(facts, options), text.details ?? ""].filter((part) => part.trim() !== "").join("\n\n");
   const footer = runnerFooter(options.version);
   const details = fold("Details", inFold === "" ? footer : `${flattenFolds(inFold)}\n\n${footer}`);
   const body = [text.statusLine, ...(text.sentences === null ? [] : [text.sentences]), ...lines, details].join("\n\n");
@@ -69,17 +75,31 @@ export function runnerComment(text: RunnerText, facts: RunnerFacts, options: Fra
 }
 
 /** The facts as a list, then each message in a code block, so its Markdown stays inert. */
-function factsText(facts: RunnerFacts): string {
+async function factsText(facts: RunnerFacts, options: FrameOptions): Promise<string> {
   const list: string[] = [];
   if (facts.exit !== undefined) list.push(`- Exit: ${exitText(facts.exit)}`);
   if (facts.session !== undefined) list.push(`- Session: \`${facts.session}\``);
   if (facts.attempt !== undefined) list.push(`- Attempt: ${facts.attempt}`);
   if (facts.transcript !== undefined) list.push(`- Transcript: \`${facts.transcript}\``);
   const parts = list.length === 0 ? [] : [list.join("\n")];
-  // FLD-102 runs the secret scan over `error` here, and writes "Error message left out: it matched a secret rule." on a hit.
-  if (facts.error !== undefined) parts.push(`The session's last error:\n\n${codeBlock(facts.error)}`);
-  if (facts.prepare !== undefined) parts.push(`Preparing the worktree failed with:\n\n${codeBlock(facts.prepare)}`);
+  if (facts.error !== undefined) {
+    parts.push((await secret(facts.error, options)) ? "Error message left out: it matched a secret rule." : `The session's last error:\n\n${codeBlock(facts.error)}`);
+  }
+  if (facts.prepare !== undefined) {
+    parts.push((await secret(facts.prepare, options)) ? "Flight Deck's message left out: it matched a secret rule." : `Preparing the worktree failed with:\n\n${codeBlock(facts.prepare)}`);
+  }
   return parts.join("\n\n");
+}
+
+/** Whether the secret scan matches the message. A scan that can't run counts as a match, so nothing unscanned is posted. */
+async function secret(message: string, options: FrameOptions): Promise<boolean> {
+  if (options.secrets === undefined) throw new Error("a runner comment with an error or prepare message needs the secret scan");
+  try {
+    return await options.secrets.scan.matches(options.secrets.repo, message);
+  } catch (error) {
+    if (error instanceof SecretScanFailed) return true;
+    throw error;
+  }
 }
 
 function exitText(exit: ExitKind): string {

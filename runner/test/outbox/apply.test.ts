@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Outbox } from "../../src/outbox/index.ts";
+import { Outbox, SecretScan } from "../../src/outbox/index.ts";
 import type { Role } from "../../src/record/index.ts";
 import { State } from "../../src/state/index.ts";
 import { InMemoryTracker, TrackerRefused, type IssueRef, type RelationKind, type StatusType, type StoredIssue, type TrackerRepo } from "../../src/tracker/index.ts";
@@ -37,6 +37,8 @@ const repo: TrackerRepo = {
 const BRIEF = "## Summary\n\nThe Save button turns red.\n\n## Key interfaces\n\nNone.\n\n## Context\n\n- Slots: none";
 const SUMMARY = "Brief ready: the Save button turns red\n\nIt takes the shared red.";
 const VERSION = "0.1.0";
+/** The repo root, whose `vendor/betterleaks` stands in for a version folder's. */
+const REPO_ROOT = new URL("../../..", import.meta.url).pathname;
 
 /** A Tracker whose first `relate` fails, as a lost connection would. */
 class FlakyTracker extends InMemoryTracker {
@@ -62,8 +64,9 @@ beforeEach(async () => {
   tracker.addUser({ id: "maintainer", name: "Hunter" });
   tracker.addTeam({ key: "SHA", name: "Shaders", statuses: Object.values(STATUSES).map(([name, type]) => ({ name, type })) });
   issue = tracker.addIssue({ team: "SHA", title: "Save button is blue", description: "It should be red.", status: "Planning", creator: "maintainer" });
-  const state = new State({ data: join(root, "data"), config: join(root, "config"), sessionRoot: join(root, "sessions"), home: root });
-  outbox = new Outbox({ version: VERSION, state, clock: () => now, repo: () => repo });
+  const folders = { data: join(root, "data"), config: join(root, "config"), sessionRoot: join(root, "sessions"), home: root };
+  const state = new State(folders);
+  outbox = new Outbox({ version: VERSION, state, clock: () => now, repo: () => repo, secrets: new SecretScan({ folders, versionFolder: REPO_ROOT }) });
 });
 
 afterEach(async () => {

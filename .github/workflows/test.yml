@@ -24,6 +24,8 @@ jobs:
       # The pinned sandbox-runtime that a cache refresh runs, which Workspace's tests run for real.
       - run: bun install --frozen-lockfile
         working-directory: vendor/sandbox-runtime
+      # The pinned Betterleaks that the Outbox's secret scan runs, which the scenarios run for real.
+      - run: ../scripts/fetch-betterleaks.sh
       - run: bun run typecheck
-      # Scenarios run real git, sandbox-runtime, and APFS clones, so one can pass Bun's 5-second default.
+      # Scenarios run real git, sandbox-runtime, Betterleaks, and APFS clones, so one can pass Bun's 5-second default.
       - run: bun run test
