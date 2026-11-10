@@ -255,6 +255,20 @@ export function trackerContract(name: string, open: () => Promise<TrackerWorld>,
     );
 
     test(
+      "the setup key's viewer is the maintainer, and each app's token reaches the workspace as the app's own user",
+      async () => {
+        const workspace = world.repo.workspace;
+        const maintainer = await world.maintainer.viewer(workspace);
+        expect(maintainer).toMatchObject({ id: world.repo.maintainer, workspace });
+        const app = await world.maintainer.appViewer(workspace, "flight_deck");
+        const reader = await world.maintainer.appViewer(workspace, "reader");
+        expect([app.workspace, reader.workspace]).toEqual([workspace, workspace]);
+        expect(new Set([maintainer.id, app.id, reader.id]).size).toBe(3);
+      },
+      timeout,
+    );
+
+    test(
       "a session's Reader token reads, a second ask returns the same token, and a revoke ends it",
       async () => {
         const session: TokenSession = { id: `contract${Date.now().toString(36).slice(-6)}`, repo: world.repo };
