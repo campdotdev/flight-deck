@@ -1,7 +1,7 @@
 // The scenario harness: the in-memory world at the one seam (spec 1, "The seam"). A scenario builds the world,
 // scripts each session, runs ticks, and asserts on the in-memory Tracker, the scripted Harness, and
 // `status.json`. It never reads or writes the session list or issue memory.
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Folders } from "../../src/folders/index.ts";
@@ -73,6 +73,8 @@ export const outbox = {
 };
 
 const VERSION = "0.1.0";
+/** `credentials.env` with every campdotdev secret, so the workspace has a Linear login. */
+const CREDENTIALS = ["APP_ID", "APP_SECRET", "READER_ID", "READER_SECRET", "SETUP_KEY"].map((name) => `LINEAR_${name}_CAMPDOTDEV=test-${name.toLowerCase()}`).join("\n") + "\n";
 const START = new Date("2026-11-10T09:00:00Z");
 
 export interface WorldOptions {
@@ -144,6 +146,10 @@ export class World {
     // The shipped skill Shaders' record names in `plan.reproduce`, so its slot resolves.
     await mkdir(join(versionFolder, "skills", "reproducing-bugs"), { recursive: true });
     await writeFile(join(versionFolder, "skills", "reproducing-bugs", "SKILL.md"), "---\nname: reproducing-bugs\n---\n");
+    await writeFile(join(folders.config, "credentials.env"), CREDENTIALS, { mode: 0o600 });
+    // A stub `osascript` first on the runner's PATH, which records each notification instead of posting it.
+    await mkdir(join(root, "bin"));
+    await writeFile(join(root, "bin", "osascript"), `#!/bin/sh\nfor arg in "$@"; do last="$arg"; done\nprintf '%s\\n' "$last" >> '${join(root, "notifications.log")}'\n`, { mode: 0o755 });
     const remote = join(root, "remote.git");
     const commit = await makeRemote(root, remote, options.record === undefined ? SHADERS_RECORD : options.record);
     const world = new World(root, folders, versionFolder, remote, commit);
@@ -178,6 +184,22 @@ export class World {
     return JSON.parse(await readFile(join(this.folders.data, "state", "status.json"), "utf8")) as Status;
   }
 
+  /** The text of each macOS notification the runner posted, in order. */
+  async notifications(): Promise<string[]> {
+    const text = await readFile(join(this.root, "notifications.log"), "utf8").catch(() => "");
+    return text.split("\n").filter((line) => line !== "");
+  }
+
+  /** Replaces `credentials.env`, keeping its mode. */
+  async writeCredentials(text: string): Promise<void> {
+    await writeFile(join(this.folders.config, "credentials.env"), text);
+  }
+
+  /** Sets `credentials.env`'s mode. */
+  async credentialsMode(mode: number): Promise<void> {
+    await chmod(join(this.folders.config, "credentials.env"), mode);
+  }
+
   /** A new runner over the same data folder, as after a restart. */
   restart(): void {
     this.poll = this.newPoll();
@@ -204,6 +226,7 @@ export class World {
       versionFolder: this.versionFolder,
       tracker: this.tracker,
       harness: this.harness,
+      path: `${join(this.root, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`,
     });
   }
 }

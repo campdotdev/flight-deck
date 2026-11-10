@@ -1,7 +1,7 @@
 // The in-memory Tracker adapter. It keeps a Linear workspace in memory, models the Linear behavior the runner
 // relies on, and records every write. Scenarios build their world through its `add*` methods and assert on
 // `writes`. The Tracker contract suite checks the same behavior against real Linear.
-import type { Role } from "../record/index.ts";
+import { ROLES, type Role } from "../record/index.ts";
 import { briefDescription, plusFolds, unsigned } from "./folds.ts";
 import { FACTORY_ROLES, roleOf } from "./roles.ts";
 import { TrackerUnavailable, type UnavailableReason } from "./unavailable.ts";
@@ -13,6 +13,7 @@ import {
   type RelationKind,
   type StatusType,
   type SyncedIssueRef,
+  type TeamCheck,
   type UploadFile,
 } from "./types.ts";
 import type {
@@ -103,10 +104,12 @@ interface Team {
   name: string;
   statuses: { name: string; type: StatusType }[];
   next: number;
+  /** Whether the Flight Deck app can read the team. */
+  readable: boolean;
 }
 
 /** The writes a scenario can make Linear refuse. */
-export type RefusableWrite = "move" | "post" | "clearFlag" | "unsubscribe" | "writeBrief" | "markDuplicate" | "file" | "relate" | "detach" | "upload";
+export type RefusableWrite = "move" | "post" | "flag" | "clearFlag" | "unsubscribe" | "writeBrief" | "markDuplicate" | "file" | "relate" | "detach" | "upload";
 
 /** Roles whose issues a snapshot returns: the factory statuses and `intake`. */
 const SNAPSHOT_ROLES = new Set<Role>(["intake", ...FACTORY_ROLES]);
@@ -141,7 +144,19 @@ export class InMemoryTracker implements Tracker {
   }
 
   addTeam(team: { key: string; name: string; statuses: { name: string; type: StatusType }[] }): void {
-    this.teams.set(team.key, { ...team, next: 1 });
+    this.teams.set(team.key, { ...team, next: 1, readable: true });
+  }
+
+  /** The maintainer renames one of the team's statuses. Issues in it keep it under its new name. */
+  renameStatus(teamKey: string, from: string, to: string): void {
+    const team = this.team(teamKey);
+    this.statusOf(team, from).name = to;
+    for (const issue of this.issues.values()) if (issue.team === teamKey && issue.status === from) issue.status = to;
+  }
+
+  /** The team turns private, or its key changes, so the Flight Deck app can't read it. `true` undoes it. */
+  setReadable(teamKey: string, readable: boolean): void {
+    this.team(teamKey).readable = readable;
   }
 
   /** Files an issue as its creator, which subscribes them. */
@@ -253,6 +268,14 @@ export class InMemoryTracker implements Tracker {
     };
   }
 
+  async checkTeam(repo: TrackerRepo): Promise<TeamCheck> {
+    const team = this.teams.get(repo.team);
+    if (team === undefined || !team.readable) return { ok: false, reason: "unreadable" };
+    const names = new Set(team.statuses.map((status) => status.name));
+    const roles = ROLES.filter((role) => !names.has(repo.statuses[role]));
+    return roles.length === 0 ? { ok: true } : { ok: false, reason: "missing", roles };
+  }
+
   // Writes.
 
   async move(ref: IssueRef, role: Role): Promise<void> {
@@ -276,6 +299,11 @@ export class InMemoryTracker implements Tracker {
     }
     const posted = this.comment(issue, this.actor, plusFolds(comment), null, false);
     return { id: posted.id, created_at: posted.created_at };
+  }
+
+  async flag(ref: IssueRef): Promise<void> {
+    this.refused("flag");
+    this.assign(this.stored(ref.id), ref.repo.maintainer);
   }
 
   async clearFlag(ref: IssueRef): Promise<void> {
