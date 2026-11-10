@@ -34,11 +34,13 @@ function repoPath(repo: string): string {
 export const paths = {
   configToml: (f: Folders) => join(f.config, "config.toml"),
   runnerGitconfig: (f: Folders) => join(f.config, "gitconfig-runner"),
+  credentials: (f: Folders) => join(f.config, "credentials.env"),
 
   state: (f: Folders) => join(f.data, "state"),
   sessionList: (f: Folders) => join(f.data, "state", "sessions.json"),
   status: (f: Folders) => join(f.data, "state", "status.json"),
   heartbeat: (f: Folders) => join(f.data, "state", "heartbeat"),
+  trouble: (f: Folders) => join(f.data, "state", "trouble.json"),
   log: (f: Folders) => join(f.data, "state", "runner.log"),
   /** The log before the current one, which a new log replaces. */
   oldLog: (f: Folders) => join(f.data, "state", "runner.log.1"),
@@ -55,7 +57,7 @@ export const paths = {
   files: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "files"),
   /** The repo's last cache refresh: its commit, when it started, and whether it passed. */
   refresh: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "refresh.json"),
-  /** The last valid record the runner read on the repo's default branch. */
+  /** The last valid record the runner read on the default branch, for stale-take limits (spec 1, poll step 8). */
   lastRecord: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "record.json"),
   issues: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "issues"),
   issueMemory: (f: Folders, repo: string, uuid: string) => join(f.data, "repos", repoPath(repo), "issues", `${uuid}.json`),
