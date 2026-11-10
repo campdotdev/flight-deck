@@ -32,8 +32,8 @@ export interface SettleContext {
 /** An issue counts as open in a backlog, unstarted, started, or triage status (spec 1, "Trouble issues"). */
 const OPEN_TYPES: ReadonlySet<StatusType> = new Set(["triage", "backlog", "unstarted", "started"]);
 
-/** The causes that file a trouble issue. The others only notify. FLD-109 and FLD-112 add theirs. */
-const FILES: ReadonlySet<TroubleCause> = new Set(["missing_status", "claude_code_version", "github_token"]);
+/** The causes that file a trouble issue. The others only notify. FLD-109 adds its own. */
+const FILES: ReadonlySet<TroubleCause> = new Set(["missing_status", "claude_code_version", "github_token", "claude_login", "claude_login_soon"]);
 
 /** `claude_login_soon` stops nothing. Every other cause holds sessions. */
 const HOLDS_NOTHING: ReadonlySet<TroubleCause> = new Set(["claude_login_soon"]);
@@ -82,6 +82,13 @@ export class Trouble {
     if (this.opened.has(k)) return true;
     if (this.cleared.has(k)) return false;
     return this.entries.some((entry) => entry.cause === cause && entry.id === id && entry.open);
+  }
+
+  /** When the open cause opened: its stored time, or `now` for one this poll opened. `null` when it isn't open. */
+  since(cause: TroubleCause, id: string, now: Date): string | null {
+    if (!this.isOpen(cause, id)) return null;
+    const entry = this.entries.find((each) => each.cause === cause && each.id === id);
+    return entry?.open === true ? entry.since : now.toISOString();
   }
 
   /**

@@ -142,7 +142,7 @@ export interface PendingComment {
  * Why the runner put an issue back in its queue without using the stage's retry: a plan limit, an expired
  * login, a failed Reader mint, or a shutdown (spec 1, "Exits"). Each ticket that requeues adds its exit here.
  */
-export type RestartCause = "rate_limited";
+export type RestartCause = "rate_limited" | "login_expired";
 
 /** The next take keeps this attempt, because the requeue that set it used no retry (ADR 0002). */
 export interface Restart {
@@ -209,6 +209,18 @@ export interface PortPause {
   port: number;
   /** ISO time of the pause. */
   at: string;
+}
+
+/**
+ * `state/trial.json`: the last trial run that passed, with the Flight Deck version it ran on. Install's trial
+ * step is done when it names the running version (spec 1, "Install").
+ */
+export interface TrialPass {
+  version: string;
+  claude_code_version: string;
+  session: string;
+  /** ISO time. */
+  passed_at: string;
 }
 
 const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, stale_take: null, restart: null, kept: null };
@@ -322,6 +334,15 @@ export class State {
   async writePortPause(repo: string, pause: PortPause | null): Promise<void> {
     if (pause === null) await rm(paths.portPause(this.folders, repo), { force: true });
     else await writeJson(paths.portPause(this.folders, repo), pause);
+  }
+
+  /** The last trial run that passed, or `null` before one did. */
+  async trial(): Promise<TrialPass | null> {
+    return readJson<TrialPass | null>(paths.trial(this.folders), null);
+  }
+
+  async writeTrial(pass: TrialPass): Promise<void> {
+    await writeJson(paths.trial(this.folders), pass);
   }
 
   /** `state/trouble.json`: each trouble cause the runner knows, open or cleared with its issue still open. */

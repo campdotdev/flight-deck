@@ -45,6 +45,17 @@ export interface PreparePlan {
   heldPorts?: readonly number[];
 }
 
+/** What a trial run's `prepare` needs (spec 1, "Trial run"). It has no repo, no issue, and no record. */
+export interface TrialPlan {
+  session: string;
+  /** ISO time: 5 minutes after the trial starts. */
+  deadline: string;
+  version: string;
+  versionFolder: string;
+  /** The `PATH` a trial gets: the folders of `[paths]` `claude`, `git`, and `gh`, then the system's. */
+  path: string;
+}
+
 /** What `prepare` returns, and what `dispose` takes. */
 export interface PreparedWorkspace {
   session: string;
@@ -189,6 +200,53 @@ export class Workspace {
   }
 
   /**
+   * Makes a trial run's session folder, and a throwaway git repo at `worktrees/<session-id>` with one empty
+   * commit on `main`. The repo isn't a clone of anything, so `dispose` deletes it outright.
+   */
+  async prepareTrial(plan: TrialPlan): Promise<PreparedWorkspace> {
+    const sessionFolder = paths.sessionFolder(this.folders, plan.session);
+    const parts = sessionParts(sessionFolder);
+    const worktree = paths.worktree(this.folders, plan.session);
+    for (const folder of [parts.inbox, join(parts.outbox, "media"), parts.tmp, parts.deps, ...emptyConfigFolders(sessionFolder)]) {
+      await mkdir(folder, { recursive: true });
+    }
+    await mkdir(paths.worktrees(this.folders), { recursive: true });
+    await this.must(null, "init", "--quiet", "--initial-branch", "main", worktree);
+    await this.must(worktree, "-c", "user.name=Flight Deck", "-c", "user.email=flight-deck@localhost", "commit", "--quiet", "--allow-empty", "-m", "Trial run");
+    const commit = await this.must(worktree, "rev-parse", "HEAD");
+
+    const json: SessionJson = {
+      version: plan.version,
+      session: plan.session,
+      stage: "trial",
+      mode: "issue",
+      repo: "",
+      issue: "",
+      branch: "main",
+      base: "main",
+      commit,
+      worktree,
+      deadline: plan.deadline,
+      port: null,
+      app_url: null,
+      inbox: parts.inbox,
+      outbox: parts.outbox,
+      skills: join(plan.versionFolder, "skills"),
+      slots: {},
+      maintainer: null,
+      app_user: "",
+      team: "",
+      plugin: join(plan.versionFolder, "plugin"),
+      attempt: 1,
+      agents_md: null,
+    };
+    await writeFile(parts.sessionJson, `${JSON.stringify(json, null, 2)}\n`);
+    const env = sessionEnv({ folders: this.folders, sessionFolder, path: plan.path });
+    const { sessionJson, inbox, outbox, tmp, deps, home } = parts;
+    return { session: plan.session, sessionFolder, sessionJson, inbox, outbox, tmp, deps, home, worktree, port: null, appUrl: null, env };
+  }
+
+  /**
    * Deletes the worktree, the session folder, and the session's folder under `~/.claude/projects/`. With
    * `keepFolder`, it leaves the session folder, which an `apply_waiting` entry still needs. The transcript stays.
    */
@@ -200,6 +258,7 @@ export class Workspace {
 
   private async takenIds(): Promise<Set<string>> {
     const taken = new Set<string>([...(await list(paths.sessions(this.folders))), ...(await list(paths.worktrees(this.folders)))]);
+    for (const file of await list(paths.trials(this.folders))) taken.add(file.replace(/\.jsonl$/, ""));
     for (const owner of await list(join(this.folders.data, "repos"))) {
       for (const repo of await list(join(this.folders.data, "repos", owner))) {
         for (const file of await list(paths.transcripts(this.folders, `${owner}/${repo}`))) taken.add(file.replace(/\.jsonl$/, ""));

@@ -16,7 +16,7 @@ export interface HarnessSession {
   sessionFolder: string;
   /** The path of `session.json`, which `FLIGHT_DECK_SESSION` names. */
   sessionJson: string;
-  /** Where the `stream-json` output goes: `repos/<owner>/<repo>/transcripts/<session-id>.jsonl`. */
+  /** Where the `stream-json` output goes: `repos/<owner>/<repo>/transcripts/<session-id>.jsonl`, or `state/trials/<session-id>.jsonl` for a trial. */
   transcript: string;
   /** ISO time the stage's time limit ends. */
   deadline: string;
