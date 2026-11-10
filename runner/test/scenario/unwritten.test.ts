@@ -57,6 +57,27 @@ describe("an apply Linear doesn't take", () => {
   });
 });
 
+describe("a pause whose move Linear doesn't take", () => {
+  test("counts a reply the maintainer posted after its comment, before the move landed", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const answers = [{ word: "brand", does: "Use the brand red", move: "ready_to_plan" as const }];
+    world.send(issue);
+    world.harness.script(issue.identifier, { outbox: outbox.pause({ summary: "Which red?\n\nTwo reds fit.", pause: "## Question\n\nWhich red?", answers, needs: "answer" }), exit: { kind: "exited", code: 0 } });
+    await world.tick();
+    // The take landed. The pause's move doesn't, at its apply and at the next poll's try.
+    world.tracker.refuse("move", { times: 2 });
+    await world.tick();
+    expect(afterTake(issue).map((write) => write.kind)).toEqual(["assign", "comment"]);
+    world.reply(issue, "Brand.");
+    world.reply(issue, "Thanks for asking.");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
+    // The move lands, and the same poll reads the answer.
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+  });
+});
+
 /** Ticks at each of these minutes after the clock's current reading. */
 async function tickAt(minutes: number[]): Promise<void> {
   const start = world.now.getTime();

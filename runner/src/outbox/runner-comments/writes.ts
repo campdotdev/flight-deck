@@ -1,11 +1,12 @@
 // The writes a runner comment makes (spec 1, "The runner's own comments"). A pause makes the same writes as an
 // outbox's `paused`, in the same order, and files no follow-up issue: the flag in issue memory, `Tracker.post`
-// (flagged, except for the stop pause), `Lifecycle.move(issue, paused)`, then the answers and the comment's
-// time in issue memory. When Linear doesn't take a write, the comment waits in issue memory, and the next poll
+// (flagged, except for the stop pause), `Lifecycle.move(issue, paused)`, then the answers, the comment's time,
+// and any reply already posted in issue memory. When Linear doesn't take a write, the comment waits in issue memory, and the next poll
 // tries the writes still to land. Nothing else happens to the issue until it lands.
 import { Lifecycle } from "../../lifecycle/index.ts";
 import type { Role } from "../../record/index.ts";
-import type { PendingComment, State } from "../../state/index.ts";
+import type { PendingComment, Reply, State } from "../../state/index.ts";
+import { repliesAfter } from "../replies.ts";
 import { isUnavailable, type Tracker, type TrackerRepo } from "../../tracker/index.ts";
 import type { RunnerComment } from "./frame.ts";
 
@@ -95,6 +96,7 @@ export class RunnerComments {
       await this.state.writeIssueMemory(repo.name, uuid, { ...memory, pending });
     };
     const ref = { id: uuid, repo };
+    let replies: Reply[] = [];
     try {
       if (!pending.landed.includes("post")) {
         if (pending.flag !== null) {
@@ -117,13 +119,15 @@ export class RunnerComments {
         }
         await save({ landed: [...pending.landed, "move"] });
       }
+      // A reply posted after the comment, before the move landed, counts too.
+      if (pending.pause !== null) replies = repliesAfter(await this.tracker.issue(ref), pending.comment_at ?? pending.tried_at);
     } catch (error) {
       if (!isUnavailable(error)) throw error;
       await this.state.log(this.clock(), `${pending.issue}: runner comment pending: ${error.message}`);
       return "pending";
     }
     const memory = await this.state.issueMemory(repo.name, uuid);
-    const pause = pending.pause === null ? memory.pause : { answers: pending.pause.answers, comment_at: pending.comment_at ?? pending.tried_at, replies: [] };
+    const pause = pending.pause === null ? memory.pause : { answers: pending.pause.answers, comment_at: pending.comment_at ?? pending.tried_at, replies };
     await this.state.writeIssueMemory(repo.name, uuid, { ...memory, pause, pending: null });
     return "landed";
   }

@@ -396,6 +396,22 @@ describe("a runner comment Linear refuses with a 5xx", () => {
     expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
   });
 
+  test("counts a reply the maintainer posted after the comment, before its move landed", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "no_init" } });
+    await world.tick();
+    world.tracker.refuse("move");
+    await world.tick();
+    expect(afterTake(issue).map((write) => write.kind)).toEqual(["assign", "comment"]);
+    world.reply(issue, "retry");
+    world.reply(issue, "Thanks.");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+  });
+
   test("is dropped when the maintainer moves the issue before it lands", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     world.tracker.refuse("post");

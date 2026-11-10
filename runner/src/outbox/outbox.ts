@@ -10,6 +10,7 @@ import type { SessionJson } from "../workspace/index.ts";
 import { duplicateLine, followUpFooter, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope, type Envelope } from "./envelope.ts";
 import { contentType, embedImages, nameImages } from "./media.ts";
+import { repliesAfter } from "./replies.ts";
 import { runnerComment, type RunnerFacts } from "./runner-comments/frame.ts";
 import { secretScanPause } from "./runner-comments/secret-scan.ts";
 import { SecretScanFailed, type ScanText, type SecretHit, type SecretScan } from "./secret-scan.ts";
@@ -223,7 +224,9 @@ export class Outbox {
             const memory = await state.issueMemory(session.repo, issue.id);
             // A resumed apply lost the comment's time, and the flag's start comes just before it.
             const at = commentAt ?? memory.flag?.since ?? this.options.clock().toISOString();
-            await this.memory.write(session.repo, issue.id, { pause: { answers: [...pauseAnswers], comment_at: at, replies: [] } });
+            // A reply posted after the comment, before the move landed, counts too.
+            const replies = repliesAfter(await tracker.issue(ref), at);
+            await this.memory.write(session.repo, issue.id, { pause: { answers: [...pauseAnswers], comment_at: at, replies } });
             return null;
           },
         ],
