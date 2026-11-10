@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { RunnerSocket } from "../../src/runner/index.ts";
-import type { StoredIssue, TrackerWrite } from "../../src/tracker/index.ts";
+import { TrackerRefused, type StoredIssue, type TrackerWrite } from "../../src/tracker/index.ts";
 import { outbox, STATUSES, World } from "../scenario/world.ts";
 import { cli, listen } from "./cli.ts";
 
@@ -195,4 +195,152 @@ describe("a hand run's pause", () => {
       expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
     });
   }
+});
+
+/** A brief with a Key interfaces section, for the rules that read it. */
+const KEYED_BRIEF = "## Summary\n\nThe Save button turns red.\n\n## Key interfaces\n\nNone.\n\n## Context\n\n- Slots: none";
+const KEYED_SUMMARY = "Brief ready: the Save button turns red\n\nIt takes the shared red.";
+
+function briefWith(extra: Record<string, string> = {}, outcome: Record<string, unknown> = {}): Record<string, string> {
+  return {
+    "outcome.json": JSON.stringify({ version: "0.1.0", stage: "plan", move: "ready_to_build", ...outcome }),
+    "summary.md": KEYED_SUMMARY,
+    "brief.md": KEYED_BRIEF,
+    ...extra,
+  };
+}
+
+function duplicateOf(of: string, extra: Record<string, string> = {}): Record<string, string> {
+  return { "outcome.json": JSON.stringify({ version: "0.1.0", stage: "plan", move: "duplicate", of }), "summary.md": KEYED_SUMMARY, ...extra };
+}
+
+describe("a hand run's refused outbox names the rule, and writes nothing", () => {
+  test.each<[string, () => Record<string, string>, string]>([
+    [
+      "an unaccepted break",
+      () => briefWith({ "brief.md": KEYED_BRIEF.replace("None.", "- `Button`: break, drops the color prop") }),
+      "brief.md's Key interfaces lists a break of `Button` that isn't marked (accepted)",
+    ],
+    ["a second handoff file", () => briefWith({ "pause.md": "Which red?" }), "the outbox holds 2 handoff files: brief.md, pause.md"],
+    ["a stray file", () => briefWith({ "notes.txt": "scratch" }), "notes.txt isn't part of the outbox's envelope"],
+    ["a Report fold in brief.md", () => briefWith({ "brief.md": `${KEYED_BRIEF}\n\n+++ Report\n\nold\n\n+++` }), "brief.md holds a Report fold line, which the next re-plan would take for the report"],
+    ["a >>> Report fold in brief.md", () => briefWith({ "brief.md": `${KEYED_BRIEF}\n\n>>> Report\n\nold\n\n>>>` }), "brief.md holds a Report fold line, which the next re-plan would take for the report"],
+    ["an extra outcome.json key", () => briefWith({}, { of: "SHA-9" }), "outcome.json holds of, which a move to ready_to_build doesn't take"],
+    ["a duplicate with a handoff file", () => duplicateOf("SHA-2", { "brief.md": KEYED_BRIEF }), "a move to duplicate holds no handoff file, but the outbox holds brief.md"],
+    ["a duplicate with no of", () => ({ "outcome.json": JSON.stringify({ version: "0.1.0", stage: "plan", move: "duplicate" }) }), "a move to duplicate needs of, an issue identifier"],
+    ["an image not in media/", () => briefWith({ "brief.md": `${KEYED_BRIEF}\n\n![Before](before.png)` }), "brief.md names the image before.png, which media/ doesn't hold"],
+    [
+      "an image URL",
+      () => briefWith({ "summary.md": `${KEYED_SUMMARY}\n\n![Before](https://uploads.linear.app/x/before.png)` }),
+      "summary.md names the image https://uploads.linear.app/x/before.png, which isn't a bare file name in media/",
+    ],
+    ["a follow-up's file name", () => briefWith({ "follow-ups/one.md": "# One\n\nx" }), "follow-ups/one.md isn't named follow-ups/<n>.md"],
+    ["a follow-up with no title", () => briefWith({ "follow-ups/1.md": "One\n\nx" }), "follow-ups/1.md doesn't open with # <title>"],
+  ])("%s", async (_, files, rule) => {
+    await world.tick();
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    const folder = await handRun(issue, files());
+    const before = world.tracker.writes.length;
+    const command = cli(world);
+    expect(await command.run("apply", folder)).toBe(1);
+    expect(command.err).toEqual([`Refused: ${rule}`]);
+    expect(world.tracker.writes.length).toBe(before);
+  });
+
+  test.each<[string, (issue: StoredIssue) => string, (of: string) => string]>([
+    [
+      "a closed issue",
+      () => world.issue({ title: "Old", status: STATUSES.done[0] }).identifier,
+      (of) => `outcome.json's of ${of} is in Done, which isn't open`,
+    ],
+    ["the issue itself", (issue) => issue.identifier, (of) => `outcome.json's of ${of} is the issue itself`],
+    ["an unknown issue", () => "SHA-99", (of) => `outcome.json's of ${of} names no issue Flight Deck can read`],
+    [
+      "another team's issue",
+      () => {
+        world.tracker.addTeam({ key: "OTH", name: "Other", statuses: [{ name: "Todo", type: "unstarted" }] });
+        return world.tracker.addIssue({ team: "OTH", title: "Elsewhere", status: "Todo", creator: world.maintainer.id }).identifier;
+      },
+      (of) => `outcome.json's of ${of} is on team OTH, not SHA`,
+    ],
+  ])("a duplicate of %s", async (_, original, rule) => {
+    await world.tick();
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    const of = original(issue);
+    const folder = await handRun(issue, duplicateOf(of));
+    const command = cli(world);
+    expect(await command.run("apply", folder)).toBe(1);
+    expect(command.err).toEqual([`Refused: ${rule(of)}`]);
+  });
+});
+
+describe("a hand run's comment", () => {
+  test("turns fold lines inside the handoff file into #### headings in the Details fold", async () => {
+    await world.tick();
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    const pause = "## Question\n\nWhich red?\n\n+++ Proof\n\nThe log.\n\n+++\n\n>>> More\n\nText.\n\n>>>";
+    const folder = await handRun(issue, {
+      "outcome.json": JSON.stringify({ version: "0.1.0", stage: "plan", move: "paused", answers: [], needs: "help" }),
+      "summary.md": "Which red?\n\nThere are two.",
+      "pause.md": pause,
+    });
+    expect(await cli(world).run("apply", folder)).toBe(0);
+    expect(writesOn(issue).find((write) => (write as TrackerWrite).kind === "comment")).toEqual({
+      kind: "comment",
+      issue: "<issue>",
+      body: "🟡 Needs your help: Which red?\n\nThere are two.\n\n+++ Details\n\n## Question\n\nWhich red?\n\n#### Proof\n\nThe log.\n\n#### More\n\nText.\n\nFlight Deck 0.1.0 · plan · session <id>\n\n+++",
+    });
+  });
+});
+
+describe("a hand run's second apply on the same folder", () => {
+  test("skips the writes that landed, uploads nothing again, and relates the follow-up it filed", async () => {
+    await world.tick();
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    const folder = await handRun(issue, { ...briefWith({ "brief.md": `${KEYED_BRIEF}\n\n![Before](before.png)`, "follow-ups/1.md": "# Cancel is blue too\n\nx" }), "media/before.png": "png" });
+    world.tracker.refuse("relate");
+    const first = cli(world);
+    expect(await first.run("apply", folder)).toBe(75);
+    expect(first.out).toEqual(["Wrote upload before.png.", "Wrote writeBrief.", "Wrote post.", "Wrote move.", "Wrote file follow-ups/1.md."]);
+    const landed = world.tracker.writes.length;
+    const followUp = world.tracker.writes.find((write) => write.kind === "file") as { issue: string };
+
+    const rerun = cli(world);
+    expect(await rerun.run("apply", folder)).toBe(0);
+    expect(rerun.out).toEqual(["Wrote relate follow-ups/1.md.", `Applied: ${issue.identifier} moved to Ready to build.`]);
+    expect(world.tracker.writes.slice(landed)).toEqual([{ kind: "relate", issue: followUp.issue, other: issue.identifier, relation: "related" }]);
+  });
+
+  test("a write Linear refused exits 1 with Linear's reason, after the writes that landed", async () => {
+    await world.tick();
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    const folder = await handRun(issue, briefWith());
+    const maintainer = world.tracker.as(world.maintainer.id);
+    maintainer.post = async () => {
+      throw new TrackerRefused("Linear refused the call: body is too long");
+    };
+    const command = cli(world, { maintainerTracker: () => maintainer });
+    expect(await command.run("apply", folder)).toBe(1);
+    expect(command.out).toEqual(["Wrote writeBrief."]);
+    expect(command.err).toEqual(["Refused: Linear refused post: Linear refused the call: body is too long"]);
+  });
+
+  test("--dry-run lists the uploads and the follow-ups' writes too", async () => {
+    await world.tick();
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    const folder = await handRun(issue, { ...briefWith({ "brief.md": `${KEYED_BRIEF}\n\n![Before](before.png)`, "follow-ups/1.md": "# Cancel\n\nx" }), "media/before.png": "png" });
+    const before = world.tracker.writes.length;
+    const command = cli(world);
+    expect(await command.run("apply", "--dry-run", folder)).toBe(0);
+    expect(command.out).toEqual([
+      "Would write upload before.png.",
+      "Would write writeBrief.",
+      "Would write post.",
+      "Would write move.",
+      "Would write file follow-ups/1.md.",
+      "Would write relate follow-ups/1.md.",
+      "Dry run: no write made.",
+    ]);
+    expect(world.tracker.writes.length).toBe(before);
+  });
 });
