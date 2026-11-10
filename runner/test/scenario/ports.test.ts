@@ -4,10 +4,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type Server } from "node:net";
 import type { StoredIssue } from "../../src/tracker/index.ts";
-import { outbox, World } from "./world.ts";
-
-/** Shaders' record with its `[app]` table, which runs on any port. */
-const SHADERS_APP_RECORD = await Bun.file(new URL("../record/fixtures/shaders.toml", import.meta.url)).text();
+import { outbox, SHADERS_APP_RECORD, World } from "./world.ts";
 
 /** Shaders' record with a single-instance app on `port`. */
 function singleInstance(port: number): string {

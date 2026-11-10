@@ -47,6 +47,12 @@ export const SHADERS_RECORD = (await Bun.file(new URL("../record/fixtures/shader
   .replace(/\n\[app\]\n(?:[^\n[]*\n)*/, "\n")
   .replace('command = "pnpm install --frozen-lockfile"', `command = '${INSTALL}'`);
 
+/** Shaders' whole schema-1 record, `[app]` included, with `INSTALL` as its dependency install. */
+export const SHADERS_APP_RECORD = (await Bun.file(new URL("../record/fixtures/shaders.toml", import.meta.url)).text()).replace(
+  'command = "pnpm install --frozen-lockfile"',
+  `command = '${INSTALL}'`,
+);
+
 /** Each outbox a scenario's session can leave, as files. */
 export const outbox = {
   /** Plan's handoff: a brief that moves the issue to Ready to build. */
