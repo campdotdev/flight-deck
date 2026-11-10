@@ -15,7 +15,8 @@ export interface SweepInput {
 
 /**
  * Removes every worktree and session folder not in `keep`, with the `~/.claude/projects/` folder Claude Code
- * made for each removed worktree, then every transcript and hand-run folder older than 30 days. Returns what
+ * made for each removed worktree, then every transcript, trial run's transcript, and hand-run folder older
+ * than 30 days. Returns what
  * it removed, as paths.
  */
 export async function sweep({ folders, now, keep }: SweepInput): Promise<string[]> {
@@ -35,15 +36,16 @@ export async function sweep({ folders, now, keep }: SweepInput): Promise<string[
   }
 
   const old = (time: number) => now.getTime() - time > KEEP_MS;
+  const transcriptFolders = [paths.trials(folders)];
   for (const owner of await list(join(folders.data, "repos"))) {
-    for (const repo of await list(join(folders.data, "repos", owner))) {
-      const transcripts = paths.transcripts(folders, `${owner}/${repo}`);
-      for (const name of await list(transcripts)) {
-        const file = join(transcripts, name);
-        if (!old((await stat(file)).mtimeMs)) continue;
-        await rm(file, { recursive: true, force: true });
-        removed.push(file);
-      }
+    for (const repo of await list(join(folders.data, "repos", owner))) transcriptFolders.push(paths.transcripts(folders, `${owner}/${repo}`));
+  }
+  for (const transcripts of transcriptFolders) {
+    for (const name of await list(transcripts)) {
+      const file = join(transcripts, name);
+      if (!old((await stat(file)).mtimeMs)) continue;
+      await rm(file, { recursive: true, force: true });
+      removed.push(file);
     }
   }
   for (const name of await list(paths.handRuns(folders))) {

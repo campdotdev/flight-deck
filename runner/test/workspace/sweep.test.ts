@@ -51,10 +51,12 @@ test("removes each worktree and session folder it isn't told to keep, with Claud
   expect(removed.sort()).toEqual([...stray, leftover].sort());
 });
 
-test("deletes transcripts and hand-run folders older than 30 days", async () => {
+test("deletes transcripts, trial runs' transcripts, and hand-run folders older than 30 days", async () => {
   const transcripts = paths.transcripts(world.folders, "campdotdev/shaders");
   const oldTranscript = await file(join(transcripts, "aaaaaa.jsonl"), 31 * DAY);
   const newTranscript = await file(join(transcripts, "bbbbbb.jsonl"), 29 * DAY);
+  const oldTrial = await file(paths.trialTranscript(world.folders, "tttttt"), 31 * DAY);
+  const newTrial = await file(paths.trialTranscript(world.folders, "uuuuuu"), 29 * DAY);
   const handRuns = paths.handRuns(world.folders);
   // A hand-run folder's name carries its time, whatever its files' times say.
   const oldRun = await folder(join(handRuns, "SHA-1-20261119T030000Z"));
@@ -64,6 +66,8 @@ test("deletes transcripts and hand-run folders older than 30 days", async () => 
 
   expect(existsSync(oldTranscript)).toBe(false);
   expect(existsSync(newTranscript)).toBe(true);
+  expect(existsSync(oldTrial)).toBe(false);
+  expect(existsSync(newTrial)).toBe(true);
   expect(existsSync(oldRun)).toBe(false);
   expect(existsSync(newRun)).toBe(true);
 });
