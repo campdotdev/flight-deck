@@ -16,19 +16,21 @@ import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
 import { blockerPause } from "../outbox/runner-comments/blocker.ts";
 import { failedTwice, type FailedExit } from "../outbox/runner-comments/failed-twice.ts";
+import { portPause } from "../outbox/runner-comments/port.ts";
 import { stopPause } from "../outbox/runner-comments/stop.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from "../outbox/runner-comments/index.ts";
 import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/record.ts";
 import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
-import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusHold, type StatusRepo, type StopCause } from "../state/index.ts";
+import { State, type OpenPause, type PortPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
 import { FACTORY_ROLES, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
-import { Workspace, type FetchResult, type RefreshJob } from "../workspace/index.ts";
+import { portInUse, Workspace, type FetchResult, type RefreshJob } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
 import { ApplyWaiting } from "./apply-waiting.ts";
 import { blockerTest } from "./blockers.ts";
 import { EXITS, type ExitContext } from "./exits/index.ts";
 import { movedOut, stillWorking } from "./moved-out.ts";
 import { currentHolds, holdsRepo, runnerState, type HoldContext } from "./holds.ts";
+import { openPortPause, runsOne, singleInstanceApp } from "./single-instance.ts";
 import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
 import { staleTakes } from "./stale-takes.ts";
 import { Trouble } from "./trouble/trouble.ts";
@@ -72,6 +74,8 @@ interface RepoPoll {
   waitingForSpecs: SnapshotIssue[];
   /** The sent issues the blocker test left waiting at this poll, each with its blockers that aren't done. */
   waitingForBlockers: { issue: SnapshotIssue; open: BlockerIssue[] }[];
+  /** A single-instance app's port pause that still stands, with the repo's other queued issues, in the start order. */
+  waitingForPort: { port: number; issues: SnapshotIssue[] } | null;
   /** The issues with a runner comment that hadn't landed at the start of this poll. Nothing else happens to them. */
   blocked: Set<string>;
   /** Step 8's stale takes, for `status.json`. */
@@ -502,7 +506,7 @@ export class Poll {
       });
     }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
-    return { registration, tracker: repo?.repo ?? null, fetch, record, snapshot, waitingForSpecs, waitingForBlockers: [], blocked, staleTakes: stale };
+    return { registration, tracker: repo?.repo ?? null, fetch, record, snapshot, waitingForSpecs, waitingForBlockers: [], waitingForPort: null, blocked, staleTakes: stale };
   }
 
   /**
@@ -772,28 +776,72 @@ export class Poll {
       await this.startSession(now, config, poll, issue, workspace, entry);
     }
 
+    // Each single-instance app's port pause that still stands, held repos' too, for `waiting_for_port`.
+    const portPauses = new Map<string, PortPause | null>();
+    for (const poll of repos) {
+      const { name } = poll.registration;
+      portPauses.set(name, await openPortPause({ state: this.state, repo: name, app: singleInstanceApp(poll.record), snapshot: poll.snapshot, blocked: poll.blocked }));
+    }
+
     const candidates: { poll: RepoPoll; issue: SnapshotIssue }[] = [];
     for (const poll of startable) {
       if (!poll.fetch.ok || poll.snapshot === null) continue;
-      // Nothing starts for a repo while its cache refresh runs.
-      if (this.refreshes.has(poll.registration.name)) continue;
-      for (const issue of poll.snapshot.issues) {
-        if (issue.role !== "ready_to_plan" || hasSpec(issue) || busy.has(issue.id) || poll.blocked.has(issue.id) || blockerTest(issue).kind !== "take") continue;
+      for (const issue of queued(poll, busy)) {
         // A kept outbox is applied instead of a session, and takes no place under the cap.
         if (poll.tracker !== null && (await this.applyWaiting.applyKept(now, this.outbox(now, config), poll.tracker, issue, workspace))) continue;
+        // Nothing starts for a repo while its cache refresh runs.
+        if (this.refreshes.has(poll.registration.name)) continue;
         candidates.push({ poll, issue });
       }
     }
     // Priority, then how many issues each one unblocks, then age, across every repo (ADR 0002).
-    candidates.sort(
-      (a, b) => priorityRank(a.issue) - priorityRank(b.issue) || b.issue.unblocks - a.issue.unblocks || a.issue.created_at.localeCompare(b.issue.created_at),
-    );
+    candidates.sort((a, b) => startOrder(a.issue, b.issue));
+    /** The single-instance repos that start nothing more this poll: their one session runs, or their port is in use. */
+    const full = new Set(repos.filter((poll) => runsOne(sessions, poll.registration.name)).map((poll) => poll.registration.name));
     for (const { poll, issue } of candidates) {
       if (!(await room())) break;
+      const app = singleInstanceApp(poll.record);
+      if (app !== null) {
+        if (full.has(poll.registration.name)) continue;
+        full.add(poll.registration.name);
+        if (await this.portTaken(now, poll, issue, app.default_port, portPauses)) continue;
+      }
       free--;
       running++;
       await this.startSession(now, config, poll, issue, workspace);
     }
+
+    for (const poll of repos) {
+      const pause = portPauses.get(poll.registration.name) ?? null;
+      if (pause !== null) poll.waitingForPort = { port: pause.port, issues: queued(poll, busy).filter((issue) => issue.id !== pause.issue) };
+    }
+  }
+
+  /**
+   * The port test before a single-instance app's take (ADR 0003). A free port ends the repo's port pause. A port
+   * in use takes nothing: it pauses `issue`, the first in the order, from Ready to plan with no retry used, unless
+   * a port pause already stands, and then the repo's queued issues go on waiting.
+   */
+  private async portTaken(now: Date, poll: RepoPoll, issue: SnapshotIssue, port: number, pauses: Map<string, PortPause | null>): Promise<boolean> {
+    const repo = poll.registration.name;
+    const standing = pauses.get(repo) ?? null;
+    if (!(await portInUse(port))) {
+      if (standing !== null) {
+        await this.state.writePortPause(repo, null);
+        pauses.set(repo, null);
+        await this.state.log(now, `${repo}: port ${port} is free, ${standing.identifier}'s port pause ends`);
+      }
+      return false;
+    }
+    if (standing !== null || poll.tracker === null) return true;
+    const pause: PortPause = { issue: issue.id, identifier: issue.identifier, port, at: now.toISOString() };
+    // Recorded first, so the other issues wait even while the comment waits for Linear.
+    await this.state.writePortPause(repo, pause);
+    pauses.set(repo, pause);
+    const comment = runnerComment(portPause(port), {}, { version: this.version, statuses: poll.tracker.statuses });
+    const result = await this.comments(now).post(issue, comment);
+    await this.state.log(now, `${issue.identifier}: port pause ${result}: ${comment.statusLine}`);
+    return true;
   }
 
   /**
@@ -897,6 +945,7 @@ export class Poll {
           previousBrief: memory.brief,
           syncedComments: full.comments.filter((comment) => comment.synced).map((comment) => comment.id),
         },
+        heldPorts: await this.heldPorts(),
       });
       launch = await buildLaunch({
         folders: this.folders,
@@ -949,8 +998,15 @@ export class Poll {
       started_at: now.toISOString(),
       deadline,
       state: "running",
+      port: prepared.port,
     };
     await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === id ? running : each)));
+  }
+
+  /** The ports the listed sessions with a process hold. A waiting entry's session has ended, so it holds none. */
+  private async heldPorts(): Promise<number[]> {
+    const live = (await this.state.sessions()).filter((entry) => entry.state !== "retry_waiting" && entry.state !== "apply_waiting");
+    return live.flatMap((entry) => (entry.port === undefined || entry.port === null ? [] : [entry.port]));
   }
 
   private holdContext(now: Date, config: Config, trouble: Trouble): HoldContext {
@@ -1091,6 +1147,18 @@ function recordPause(read: Exclude<RecordResult, { ok: true }> | null, branch: s
   return invalidRecord(branch, read.errors);
 }
 
+/** The issues in Ready to plan a take could start, in the start order. */
+function queued(poll: RepoPoll, busy: ReadonlySet<string>): SnapshotIssue[] {
+  return (poll.snapshot?.issues ?? [])
+    .filter((issue) => issue.role === "ready_to_plan" && !hasSpec(issue) && !busy.has(issue.id) && !poll.blocked.has(issue.id) && blockerTest(issue).kind === "take")
+    .sort(startOrder);
+}
+
+/** Priority, then how many issues each one unblocks, then age, across every repo (ADR 0002). */
+function startOrder(a: SnapshotIssue, b: SnapshotIssue): number {
+  return priorityRank(a) - priorityRank(b) || b.unblocks - a.unblocks || a.created_at.localeCompare(b.created_at);
+}
+
 /** Urgent first, and no priority after Low. */
 function priorityRank(issue: SnapshotIssue): number {
   return issue.priority === 0 ? 5 : issue.priority;
@@ -1110,6 +1178,6 @@ function statusRepo(poll: RepoPoll, cache: StatusRepo["cache"]): StatusRepo {
         blocker.readable ? { issue: blocker.identifier, title: blocker.title, status: blocker.status } : { issue: blocker.identifier, title: null, status: null },
       ),
     })),
-    waiting_for_port: null,
+    waiting_for_port: poll.waitingForPort === null ? null : { port: poll.waitingForPort.port, issues: poll.waitingForPort.issues.map((issue) => issue.identifier) },
   };
 }

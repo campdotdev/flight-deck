@@ -13,6 +13,7 @@ import type { Mode, Stage } from "../state/index.ts";
 import { cloneFolder, copyFiles, fillDeps, linkDeps } from "./deps.ts";
 import { emptyConfigFolders, sessionEnv } from "./env.ts";
 import { refreshCache, type RefreshInput, type RefreshJob } from "./refresh.ts";
+import { appUrl, sessionPort } from "./ports.ts";
 import type { SessionJson } from "./session.ts";
 import { sweep } from "./sweep.ts";
 
@@ -63,6 +64,8 @@ export interface PreparePlan {
     /** The IDs of the issue's comments that came through the GitHub sync. */
     syncedComments: string[];
   };
+  /** The ports the session list's live sessions hold, which a session of an app that runs more than once skips. */
+  heldPorts?: readonly number[];
 }
 
 /** What a trial run's `prepare` needs (spec 1, "Trial run"). It has no repo, no issue, and no record. */
@@ -196,6 +199,11 @@ export class Workspace {
     await linkDeps(worktree, parts.deps, plan.record.dependencies.folders);
     await copyFiles(plan.repo.name, paths.files(this.folders, plan.repo.name), worktree, plan.record.copy_files);
 
+    // The runner prepares one session at a time, so two sessions never pick the same port.
+    const app = plan.record.app;
+    const port = app === undefined ? null : await sessionPort(app, new Set(plan.heldPorts ?? []));
+    const url = app === undefined || port === null ? null : appUrl(app, port);
+
     const json: SessionJson = {
       version: plan.version,
       session: plan.session,
@@ -208,8 +216,8 @@ export class Workspace {
       commit: plan.commit,
       worktree,
       deadline: plan.deadline,
-      port: null,
-      app_url: null,
+      port,
+      app_url: url,
       inbox: parts.inbox,
       outbox: parts.outbox,
       skills: join(plan.versionFolder, "skills"),
@@ -225,7 +233,7 @@ export class Workspace {
     await writeFile(parts.sessionJson, `${JSON.stringify(json, null, 2)}\n`);
     const env = sessionEnv({ folders: this.folders, sessionFolder, path: plan.repo.path });
     const { sessionJson, inbox, outbox, tmp, deps, home } = parts;
-    return { session: plan.session, sessionFolder, sessionJson, inbox, outbox, tmp, deps, home, worktree, port: null, appUrl: null, env };
+    return { session: plan.session, sessionFolder, sessionJson, inbox, outbox, tmp, deps, home, worktree, port, appUrl: url, env };
   }
 
   /**

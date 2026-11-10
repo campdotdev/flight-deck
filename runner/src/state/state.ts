@@ -41,6 +41,8 @@ export interface SessionEntry {
    * `moved_out` for an issue that left its working status. The `stopped` exit reads it.
    */
   stop_cause?: StopCause;
+  /** The app's port, which `prepare` gave the session, for a repo with an app. Absent or `null` otherwise. */
+  port?: number | null;
   /** An `apply_waiting` entry's tries. Absent on every other entry. */
   apply?: ApplyWait;
 }
@@ -200,6 +202,19 @@ export interface LastRecord {
 }
 
 /**
+ * The pause the runner posted when a single-instance app's port was in use (spec 1's "Starts", ADR 0003). The
+ * repo's other queued issues wait until that pause's `retry` or a free port.
+ */
+export interface PortPause {
+  /** The paused issue's UUID and identifier. */
+  issue: string;
+  identifier: string;
+  port: number;
+  /** ISO time of the pause. */
+  at: string;
+}
+
+/**
  * `state/trial.json`: the last trial run that passed, with the Flight Deck version it ran on. Install's trial
  * step is done when it names the running version (spec 1, "Install").
  */
@@ -311,6 +326,17 @@ export class State {
 
   async writeLastRecord(repo: string, last: LastRecord): Promise<void> {
     await writeJson(paths.lastRecord(this.folders, repo), last);
+  }
+
+  /** The repo's open port pause, or `null`. */
+  async portPause(repo: string): Promise<PortPause | null> {
+    return readJson<PortPause | null>(paths.portPause(this.folders, repo), null);
+  }
+
+  /** Writes the repo's open port pause, or removes it for `null`. */
+  async writePortPause(repo: string, pause: PortPause | null): Promise<void> {
+    if (pause === null) await rm(paths.portPause(this.folders, repo), { force: true });
+    else await writeJson(paths.portPause(this.folders, repo), pause);
   }
 
   /** The last trial run that passed, or `null` before one did. */
