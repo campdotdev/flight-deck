@@ -171,6 +171,14 @@ describe("a second apply on the same folder", () => {
     expect(tracker.writes.slice(landed.length)).toEqual([{ kind: "relate", issue: "SHA-2", other: issue.identifier, relation: "related" }]);
   });
 
+  test("after a write Linear didn't take returns unwritten with the writes that landed, then finishes the rest", async () => {
+    const folder = await session(brief());
+    tracker.refuse("post", { reason: "rate_limited" });
+    expect(await outbox.apply(folder, { identity: tracker })).toEqual({ result: "unwritten", writes: ["writeBrief"] });
+    expect(await outbox.apply(folder, { identity: tracker })).toEqual({ result: "applied", writes: ["post", "move"] });
+    expect(tracker.writes.map((write) => write.kind)).toEqual(["description", "unsubscribe", "comment", "move"]);
+  });
+
   test("a dry run makes no write and lists each one", async () => {
     const folder = await session(brief({ "brief.md": `${BRIEF}\n\n![Before](before.png)`, "follow-ups/1.md": "# Cancel\n\nx", "media/before.png": "png" }));
     const result = await outbox.apply(folder, { identity: tracker, dryRun: true });

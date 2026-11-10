@@ -1,11 +1,13 @@
 export {
   State,
   type Answer,
+  type ApplyWait,
   type Flag,
   type HoldMarker,
   type Holds,
   type FlagCause,
   type IssueMemory,
+  type KeptOutbox,
   type LastRecord,
   type OpenPause,
   type PendingComment,

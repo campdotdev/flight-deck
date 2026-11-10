@@ -276,6 +276,11 @@ export class InMemoryTracker implements Tracker {
     this.refusals.set(write, queue);
   }
 
+  /** Linear takes the write again: any refusals still queued for it go. */
+  accept(write: RefusableWrite): void {
+    this.refusals.delete(write);
+  }
+
   /** The stored issue, by UUID or identifier. */
   stored(id: string): StoredIssue {
     const issue = this.issues.get(id) ?? [...this.issues.values()].find((each) => each.identifier === id);
