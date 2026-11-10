@@ -4,6 +4,7 @@
 import type { Role } from "../record/index.ts";
 import { briefDescription, plusFolds, unsigned } from "./folds.ts";
 import { FACTORY_ROLES, roleOf } from "./roles.ts";
+import { TrackerUnavailable, type UnavailableReason } from "./unavailable.ts";
 import {
   IssueNotFoundError,
   type FiledIssue,
@@ -104,6 +105,9 @@ interface Team {
   next: number;
 }
 
+/** The writes a scenario can make Linear refuse. */
+export type RefusableWrite = "move" | "post" | "clearFlag" | "unsubscribe" | "writeBrief" | "markDuplicate" | "file" | "relate" | "detach" | "upload";
+
 /** Roles whose issues a snapshot returns: the factory statuses and `intake`. */
 const SNAPSHOT_ROLES = new Set<Role>(["intake", ...FACTORY_ROLES]);
 
@@ -121,6 +125,8 @@ export class InMemoryTracker implements Tracker {
   private readonly teams = new Map<string, Team>();
   private readonly users = new Map<string, string>();
   private readonly issues = new Map<string, StoredIssue>();
+  /** For each write, the refusals still to come, in order. */
+  private readonly refusals = new Map<RefusableWrite, UnavailableReason[]>();
   private ids = 0;
 
   constructor(options: { clock: () => Date; appUser: string }) {
@@ -201,6 +207,16 @@ export class InMemoryTracker implements Tracker {
     issue.status_since = this.now();
   }
 
+  /**
+   * Linear refuses the next `times` calls of the write, as a 5xx unless told otherwise, and records nothing
+   * for them. The call after them lands.
+   */
+  refuse(write: RefusableWrite, options: { times?: number; reason?: UnavailableReason } = {}): void {
+    const queue = this.refusals.get(write) ?? [];
+    for (let i = 0; i < (options.times ?? 1); i++) queue.push(options.reason ?? "server");
+    this.refusals.set(write, queue);
+  }
+
   /** The stored issue, by UUID or identifier. */
   stored(id: string): StoredIssue {
     const issue = this.issues.get(id) ?? [...this.issues.values()].find((each) => each.identifier === id);
@@ -240,6 +256,7 @@ export class InMemoryTracker implements Tracker {
   // Writes.
 
   async move(ref: IssueRef, role: Role): Promise<void> {
+    this.refused("move");
     const issue = this.stored(ref.id);
     const status = this.statusFor(ref.repo, role);
     issue.status = status;
@@ -248,6 +265,7 @@ export class InMemoryTracker implements Tracker {
   }
 
   async post(ref: IssueRef, comment: string, options: PostOptions): Promise<PostedComment> {
+    this.refused("post");
     const issue = this.stored(ref.id);
     const maintainer = ref.repo.maintainer;
     if (options.flag) {
@@ -261,6 +279,7 @@ export class InMemoryTracker implements Tracker {
   }
 
   async clearFlag(ref: IssueRef): Promise<void> {
+    this.refused("clearFlag");
     const issue = this.stored(ref.id);
     if (issue.assignee !== null) {
       issue.assignee = null;
@@ -270,6 +289,7 @@ export class InMemoryTracker implements Tracker {
   }
 
   async unsubscribe(ref: IssueRef): Promise<void> {
+    this.refused("unsubscribe");
     const issue = this.stored(ref.id);
     const user = ref.repo.maintainer;
     if (!issue.subscribers.includes(user)) return;
@@ -278,12 +298,14 @@ export class InMemoryTracker implements Tracker {
   }
 
   async writeBrief(ref: IssueRef, brief: string, options: WriteBriefOptions): Promise<void> {
+    this.refused("writeBrief");
     const issue = this.stored(ref.id);
     issue.description = briefDescription(brief, issue.description, options.runnerWroteBrief);
     this.writes.push({ kind: "description", issue: issue.identifier, description: issue.description });
   }
 
   async markDuplicate(ref: IssueRef, of: IssueRef): Promise<void> {
+    this.refused("markDuplicate");
     const issue = this.stored(ref.id);
     const original = this.stored(of.id);
     if (original.id === issue.id) throw new Error(`${issue.identifier} can't be a duplicate of itself`);
@@ -295,6 +317,7 @@ export class InMemoryTracker implements Tracker {
   }
 
   async file(draft: IssueDraft, role: Role): Promise<FiledIssue> {
+    this.refused("file");
     const status = this.statusFor(draft.repo, role);
     // Filing subscribes the creator, as Linear does.
     const issue = this.create({ team: draft.repo.team, title: draft.title, description: draft.description, status, creator: this.actor });
@@ -303,6 +326,7 @@ export class InMemoryTracker implements Tracker {
   }
 
   async relate(ref: IssueRef, other: IssueRef, kind: RelationKind): Promise<void> {
+    this.refused("relate");
     const issue = this.stored(ref.id);
     const to = this.stored(other.id);
     issue.relations.push({ kind, issue: to.id });
@@ -310,6 +334,7 @@ export class InMemoryTracker implements Tracker {
   }
 
   async detach(ref: SyncedIssueRef): Promise<void> {
+    this.refused("detach");
     const issue = this.stored(ref.id);
     if (!issue.synced || issue.sync_attachment !== ref.sync_attachment) throw new Error(`${issue.identifier} isn't synced through ${ref.sync_attachment}`);
     issue.synced = false;
@@ -317,6 +342,7 @@ export class InMemoryTracker implements Tracker {
   }
 
   async upload(file: UploadFile): Promise<string> {
+    this.refused("upload");
     // Linear's `fileUpload` returns a signed asset URL. The adapter strips the signature, as the Linear adapter does.
     const url = unsigned(`https://uploads.linear.app/workspace/${this.newId("upload")}/${encodeURIComponent(file.name)}?signature=signed`);
     this.uploads.set(url, file.data);
@@ -335,6 +361,11 @@ export class InMemoryTracker implements Tracker {
   }
 
   // Helpers.
+
+  private refused(write: RefusableWrite): void {
+    const reason = this.refusals.get(write)?.shift();
+    if (reason !== undefined) throw new TrackerUnavailable(reason, `Linear refused ${write}: ${reason}`);
+  }
 
   private assign(issue: StoredIssue, user: string): void {
     issue.assignee = user;
