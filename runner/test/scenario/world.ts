@@ -148,6 +148,20 @@ export class World {
     return world;
   }
 
+  /**
+   * Registers a second repo on its own team, with Shaders' statuses and record, on its own bare remote. Issues on
+   * it are filed with `world.issue({ team, ... })`.
+   */
+  async addRepo(input: { name: string; team: string }): Promise<void> {
+    const slug = input.name.replace("/", "-");
+    const remote = join(this.root, `${slug}.git`);
+    await makeRemote(this.root, remote, SHADERS_RECORD.replace('team = "SHA"', `team = "${input.team}"`));
+    this.tracker.addTeam({ key: input.team, name: input.name, statuses: Object.values(STATUSES).map(([name, type]) => ({ name, type })) });
+    const first = this.config.repos[0]!;
+    this.config.repos.push({ ...first, name: input.name, remote, checkout: join(this.root, `checkout-${slug}`), tracker: { ...first.tracker, team: input.team } });
+    await this.writeConfig();
+  }
+
   /** Files an issue as the maintainer, in Backlog unless it says otherwise. */
   issue(input: Partial<NewIssue> & { title: string }): StoredIssue {
     return this.tracker.addIssue({ team: "SHA", status: "Backlog", creator: this.maintainer.id, description: "", ...input });

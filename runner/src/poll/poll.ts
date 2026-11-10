@@ -11,13 +11,16 @@ import { buildLaunch, type Auth, type Exit, type ExitKind, type Harness, type Ha
 import { readConfig, writeEtc, type Config, type Registration } from "../install/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
+import { blockerPause } from "../outbox/runner-comments/blocker.ts";
 import { failedTwice, type FailedExit } from "../outbox/runner-comments/failed-twice.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from "../outbox/runner-comments/index.ts";
 import { durationMs, readRecord, type RecordResult, type RepoRecord } from "../record/index.ts";
 import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
-import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
+import { FACTORY_ROLES, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
+import { blockerTest } from "./blockers.ts";
+import { MIN_VERSION, supported } from "./claude-code-version.ts";
 import { EXITS, type ExitContext } from "./exits/index.ts";
 import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
 
@@ -43,6 +46,8 @@ interface RepoPoll {
   record: RecordResult | null;
   snapshot: Snapshot | null;
   waitingForSpecs: SnapshotIssue[];
+  /** The sent issues the blocker test left waiting at this poll, each with its blockers that aren't done. */
+  waitingForBlockers: { issue: SnapshotIssue; open: BlockerIssue[] }[];
   /** The issues with a runner comment that hadn't landed at the start of this poll. Nothing else happens to them. */
   blocked: Set<string>;
 }
@@ -233,7 +238,7 @@ export class Poll {
       await this.subscriptions(repo, snapshot, handled);
     }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
-    return { registration, tracker: repo, fetch, record, snapshot, waitingForSpecs, blocked };
+    return { registration, tracker: repo, fetch, record, snapshot, waitingForSpecs, waitingForBlockers: [], blocked };
   }
 
   /**
@@ -338,6 +343,7 @@ export class Poll {
   private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace): Promise<void> {
     const sessions = await this.state.sessions();
     const busy = new Set(sessions.map((entry) => entry.issue_id));
+    for (const poll of repos) await this.blockers(now, poll, busy);
     let free = config.concurrency_cap - sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
 
     // A retry waiting for a free place starts before any new take.
@@ -352,6 +358,7 @@ export class Poll {
         await this.dropEntry(entry.id);
         continue;
       }
+      if (!(await this.versionSupported(now))) return;
       free--;
       await this.start(now, config, poll, issue, workspace, entry);
     }
@@ -360,14 +367,47 @@ export class Poll {
     for (const poll of repos) {
       if (!poll.fetch.ok || poll.record?.ok !== true || poll.snapshot === null) continue;
       for (const issue of poll.snapshot.issues) {
-        if (issue.role === "ready_to_plan" && !hasSpec(issue) && !busy.has(issue.id) && !poll.blocked.has(issue.id)) candidates.push({ poll, issue });
+        if (issue.role === "ready_to_plan" && !hasSpec(issue) && !busy.has(issue.id) && !poll.blocked.has(issue.id) && blockerTest(issue).kind === "take") {
+          candidates.push({ poll, issue });
+        }
       }
     }
-    candidates.sort((a, b) => priorityRank(a.issue) - priorityRank(b.issue) || a.issue.created_at.localeCompare(b.issue.created_at));
+    // Priority, then how many issues each one unblocks, then age, across every repo (ADR 0002).
+    candidates.sort(
+      (a, b) => priorityRank(a.issue) - priorityRank(b.issue) || b.issue.unblocks - a.issue.unblocks || a.issue.created_at.localeCompare(b.issue.created_at),
+    );
     for (const { poll, issue } of candidates) {
       if (free <= 0) break;
+      if (!(await this.versionSupported(now))) return;
       free--;
       await this.start(now, config, poll, issue, workspace);
+    }
+  }
+
+  /** Before each start: below `data/claude-code.toml`'s `min_version`, the runner starts nothing (ADR 0015). */
+  private async versionSupported(now: Date): Promise<boolean> {
+    const version = await this.harness.version();
+    if (supported(version)) return true;
+    // FLD-106 opens the trouble cause `claude_code_version` here.
+    await this.state.log(now, `Claude Code ${version} is below ${MIN_VERSION}, no session starts`);
+    return false;
+  }
+
+  /**
+   * The blocker test, on each sent issue spec 1 can take, before the order and even with no free place (ADR 0002).
+   * A canceled blocker, or a duplicate of nothing, pauses the issue from Ready to plan with no session and no
+   * retry used. An open blocker leaves it waiting with nothing posted, under `waiting_for_blockers`.
+   */
+  private async blockers(now: Date, poll: RepoPoll, busy: Set<string>): Promise<void> {
+    if (poll.tracker === null || poll.snapshot === null) return;
+    for (const issue of poll.snapshot.issues) {
+      if (issue.role !== "ready_to_plan" || hasSpec(issue) || busy.has(issue.id) || poll.blocked.has(issue.id)) continue;
+      const test = blockerTest(issue);
+      if (test.kind === "wait") poll.waitingForBlockers.push({ issue, open: test.open });
+      if (test.kind !== "pause") continue;
+      const comment = runnerComment(blockerPause(test), {}, { version: this.version, statuses: poll.tracker.statuses });
+      const result = await this.comments(now).post(issue, comment);
+      await this.state.log(now, `${issue.identifier}: blocker pause ${result}: ${comment.statusLine}`);
     }
   }
 
@@ -603,7 +643,13 @@ function statusRepo(poll: RepoPoll): StatusRepo {
     // FLD-99 adds the dependency cache.
     cache: "missing",
     waiting_for_specs: poll.waitingForSpecs.map((issue) => ({ issue: issue.identifier, title: issue.title })),
-    waiting_for_blockers: [],
+    waiting_for_blockers: poll.waitingForBlockers.map(({ issue, open }) => ({
+      issue: issue.identifier,
+      title: issue.title,
+      blockers: open.map((blocker) =>
+        blocker.readable ? { issue: blocker.identifier, title: blocker.title, status: blocker.status } : { issue: blocker.identifier, title: null, status: null },
+      ),
+    })),
     waiting_for_port: null,
   };
 }
