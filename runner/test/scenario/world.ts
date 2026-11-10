@@ -12,7 +12,7 @@ import { readRecord, type Role } from "../../src/record/index.ts";
 import type { Status } from "../../src/state/index.ts";
 import { InMemoryTracker, type NewIssue, type StatusType, type StoredIssue } from "../../src/tracker/index.ts";
 import { Workspace } from "../../src/workspace/index.ts";
-import { toToml } from "./toml.ts";
+import { toToml } from "../../src/install/toml.ts";
 
 /** Shaders' statuses, with the status type Linear gives each. */
 export const STATUSES: Record<Role, [string, StatusType]> = {

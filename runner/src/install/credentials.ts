@@ -1,7 +1,9 @@
 // `credentials.env`: each Linear workspace's app secrets and setup key, and any Claude API key (spec 1,
-// "`config.toml` and `credentials.env`", ADR 0005). The runner reads it at every poll. FLD-113 adds the writes.
+// "`config.toml` and `credentials.env`", ADR 0005). The runner reads it at every poll, and `login linear` and
+// `install` write it.
 import { readFile, stat } from "node:fs/promises";
 import { paths, type Folders } from "../folders/index.ts";
+import { writeAtomic } from "../state/files.ts";
 
 export interface Credentials {
   /** The file's permission bits, such as `0o600`. */
@@ -52,6 +54,34 @@ export function linearApps(
     flight_deck: app(credentials.values[`LINEAR_APP_ID_${key}`], credentials.values[`LINEAR_APP_SECRET_${key}`]),
     reader: app(credentials.values[`LINEAR_READER_ID_${key}`], credentials.values[`LINEAR_READER_SECRET_${key}`]),
   };
+}
+
+/**
+ * Merges keys into `credentials.env`: each key's line is replaced, a new key is appended, and every other line
+ * stays. The file is written beside itself and renamed into place with mode `0600`, so the runner never reads
+ * half of it and nobody else can read it (ADR 0005).
+ */
+export async function writeCredentials(folders: Folders, values: Record<string, string>): Promise<void> {
+  for (const [key, value] of Object.entries(values)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`${key} isn't a credentials.env key`);
+    if (/[\r\n]/.test(value)) throw new Error(`${key}'s value holds a line break`);
+  }
+  const path = paths.credentials(folders);
+  const old = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  });
+  const left = new Map(Object.entries(values));
+  const lines = old === "" ? [] : old.replace(/\n$/, "").split("\n");
+  const merged = lines.map((line) => {
+    const key = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line)?.[1];
+    if (key === undefined || !left.has(key)) return line;
+    const value = left.get(key)!;
+    left.delete(key);
+    return `${key}=${value}`;
+  });
+  for (const [key, value] of left) merged.push(`${key}=${value}`);
+  await writeAtomic(path, `${merged.join("\n")}\n`, 0o600);
 }
 
 /** `KEY=value` lines. Blank lines and `#` lines are skipped, and one pair of surrounding quotes comes off a value. */

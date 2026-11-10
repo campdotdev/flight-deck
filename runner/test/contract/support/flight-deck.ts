@@ -19,8 +19,18 @@ const context: CommandContext = {
   clock: () => new Date(),
   out: (line) => void process.stdout.write(`${line}\n`),
   err: (line) => void process.stderr.write(`${line}\n`),
+  prompt: {
+    secret: () => {
+      throw new Error("the contract rig's flight-deck runs only linear-token");
+    },
+  },
+  cwd: process.cwd(),
+  env: process.env,
   adapters: {
     maintainerTracker: () => {
+      throw new Error("the contract rig's flight-deck runs only linear-token");
+    },
+    appTracker: () => {
       throw new Error("the contract rig's flight-deck runs only linear-token");
     },
   },

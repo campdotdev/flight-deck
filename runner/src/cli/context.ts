@@ -4,6 +4,7 @@ import type { Folders } from "../folders/index.ts";
 import type { Harness } from "../harness/index.ts";
 import type { Config } from "../install/index.ts";
 import type { Tracker } from "../tracker/index.ts";
+import type { Prompt } from "./prompt.ts";
 
 /**
  * The production adapters a command builds. The runner gets the Tracker as the Flight Deck app, and
@@ -12,6 +13,8 @@ import type { Tracker } from "../tracker/index.ts";
 export interface Adapters {
   /** The Tracker as the maintainer, with their setup key for the workspace. */
   maintainerTracker(input: { folders: Folders; workspace: string; setupKey: string }): Tracker;
+  /** The Tracker as the Flight Deck app, as the runner builds it, for `register`'s team check. */
+  appTracker(input: { folders: Folders }): Tracker;
 }
 
 /** The adapters `flight-deck runner` runs on: the Tracker as the Flight Deck app, and the Harness. */
@@ -32,6 +35,14 @@ export interface CommandContext {
   out(line: string): void;
   /** Prints one line to stderr. */
   err(line: string): void;
+  /** Reads each secret with echo off. */
+  prompt: Prompt;
+  /** The folder the command runs in, `register`'s default checkout. */
+  cwd: string;
+  /** The command's environment, whose `PATH` `register` captures. */
+  env: Record<string, string | undefined>;
+  /** The URL Flight Deck's clone of a repo fetches from. `https://github.com/<owner>/<repo>.git` by default. */
+  remoteOf?: (repo: string) => string;
   adapters: Adapters;
   /** How long a command waits for the runner's answer before it acts on its own. 10 seconds by default. */
   answerMs?: number;

@@ -1,6 +1,7 @@
 // The Tracker port: the only module that reaches Linear. Callers speak in roles, and each adapter maps a
 // role to the team's status name through the record's `[tracker.statuses]`.
 import type { Role } from "../record/index.ts";
+import type { LinearApp } from "./mint.ts";
 
 /** What a Tracker call needs to know about the repo an issue belongs to. */
 export interface TrackerRepo {
@@ -197,6 +198,15 @@ export interface WriteBriefOptions {
  */
 export type TeamCheck = { ok: true } | { ok: false; reason: "unreadable" } | { ok: false; reason: "missing"; roles: Role[] };
 
+/** Whom a token or key acts as, from Linear's `viewer`, and the workspace it reaches. */
+export interface Viewer {
+  /** The user's ID: the maintainer for a setup key, or the app's own user for an app token. */
+  id: string;
+  name: string;
+  /** The URL key of the workspace the token or key reaches. */
+  workspace: string;
+}
+
 /** A session the Reader token is for. */
 export interface TokenSession {
   id: string;
@@ -280,4 +290,15 @@ export interface Tracker {
    * so the retry takes no issue.
    */
   tryReaderMint(workspace: string): Promise<void>;
+
+  // Who the adapter acts as (spec 1, "Install"). `flight-deck login linear` reads both, through the maintainer's
+  // setup key.
+
+  /** The adapter's own identity in the workspace: for a setup key, the maintainer. */
+  viewer(workspace: string): Promise<Viewer>;
+  /**
+   * Mints one token from the workspace's app, reads its viewer with that token, and revokes it, so a check that
+   * the app reaches the workspace leaves no token behind. A mint Linear refuses throws `MintFailed`.
+   */
+  appViewer(workspace: string, app: LinearApp): Promise<Viewer>;
 }

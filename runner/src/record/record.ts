@@ -43,6 +43,42 @@ export function readRecord(text: string): RecordResult {
   return { ok: true, record: data as unknown as RepoRecord };
 }
 
+/** The parts of a record `readRecordPart` reads on their own. */
+export type RecordPart = "tracker" | "copy_files";
+
+export type RecordPartResult<K extends RecordPart> = { ok: true; value: RepoRecord[K] } | { ok: false; errors: string[] };
+
+/** One validator per part, each the schema's own subschema for it, so the two never disagree. */
+const partValidators = new Map<RecordPart, ReturnType<typeof ajv.compile>>();
+
+function partValidator(part: RecordPart): ReturnType<typeof ajv.compile> {
+  let validator = partValidators.get(part);
+  if (validator === undefined) {
+    const schema = schemaJson as { $defs: unknown; properties: Record<string, unknown> };
+    validator = ajv.compile({ type: "object", required: [part], properties: { [part]: schema.properties[part] }, $defs: schema.$defs });
+    partValidators.set(part, validator);
+  }
+  return validator;
+}
+
+/**
+ * Checks one part of a record and nothing else, as `flight-deck register` reads `[tracker]` from a record still
+ * being written (spec 1, "Install"). The errors read as `readRecord`'s do, the part's rules included.
+ */
+export function readRecordPart<K extends RecordPart>(text: string, part: K): RecordPartResult<K> {
+  const parsed = parse(text);
+  if (!parsed.ok) return { ok: false, errors: [parsed.error] };
+  const data = { [part]: (parsed.data as Record<string, unknown>)[part] };
+  if (data[part] === undefined) delete data[part];
+  const validate = partValidator(part);
+  const problems: Problem[] = [];
+  if (!validate(data)) problems.push(...(validate.errors ?? []).flatMap((error) => problemOf(error, data)));
+  const rejected = new Set(problems.map((problem) => JSON.stringify(problem.path)));
+  problems.push(...checkRules(data).filter((problem) => !rejected.has(JSON.stringify(problem.path))));
+  if (problems.length > 0) return { ok: false, errors: [...new Set(sortByLine(problems, keyLines(text)).map(format))] };
+  return { ok: true, value: data[part] as RepoRecord[K] };
+}
+
 const PARSE_PREFIX = "TOML Parse error: ";
 
 function parse(text: string): { ok: true; data: unknown } | { ok: false; error: string } {

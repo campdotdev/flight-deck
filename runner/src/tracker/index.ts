@@ -7,6 +7,7 @@ export { briefDescription, flattenFolds, fold, plusFolds, reportOf, unsigned } f
 export { FACTORY_ROLES, QUEUE_ROLES, WORKING_ROLES, roleOf } from "./roles.ts";
 export {
   InMemoryTracker,
+  type CheckTokenRecord,
   type NewComment,
   type MintRecord,
   type NewIssue,

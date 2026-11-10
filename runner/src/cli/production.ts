@@ -13,17 +13,21 @@ function apps(folders: Folders): LinearTrackerOptions["apps"] {
   return async (workspace) => linearApps(await readCredentials(folders), workspace);
 }
 
+/** The Flight Deck app, as the runner acts. A failed revoke goes to the runner's log. */
+function flightDeckApp(folders: Folders): LinearTracker {
+  const state = new State(folders);
+  return new LinearTracker({ identity: { kind: "flight_deck" }, apps: apps(folders), log: (message) => void state.log(new Date(), message) });
+}
+
 export const PRODUCTION_ADAPTERS: Adapters = {
-  // The setup key goes to Linear as it is, and mints and revokes nothing, so the adapter has nothing to log.
+  // The setup key goes to Linear as it is. A check's revoke that fails leaves a token that expires on its own,
+  // so the adapter has nothing to log.
   maintainerTracker: ({ folders, setupKey }) => new LinearTracker({ identity: { kind: "setup_key", key: setupKey }, apps: apps(folders) }),
+  appTracker: ({ folders }) => flightDeckApp(folders),
 };
 
 export const PRODUCTION_RUNNER: RunnerAdapters = {
-  // A failed revoke goes to the runner's log.
-  runnerTracker: ({ folders }) => {
-    const state = new State(folders);
-    return new LinearTracker({ identity: { kind: "flight_deck" }, apps: apps(folders), log: (message) => void state.log(new Date(), message) });
-  },
+  runnerTracker: ({ folders }) => flightDeckApp(folders),
   // The adapter takes `[paths]` `claude` at its start, so a changed path takes effect when the runner restarts.
   harness: ({ config }) => new ClaudeCodeHarness({ claude: config.paths.claude }),
 };
