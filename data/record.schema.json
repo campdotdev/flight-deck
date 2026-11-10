@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Flight Deck repo record, schema 1",
+  "description": "The fields spec 1 defines. Every table and key is required except [app]. A key not listed here is an error. `message` gives the text an error shows when a pattern fails.",
+  "type": "object",
+  "required": [
+    "schema",
+    "tracker",
+    "dependencies",
+    "commands",
+    "extras",
+    "slots",
+    "sandbox",
+    "copy_files",
+    "time_limits",
+    "conflicts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": 1 },
+    "tracker": {
+      "type": "object",
+      "required": ["kind", "workspace", "team", "statuses"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "linear" },
+        "workspace": { "$ref": "#/$defs/text" },
+        "team": { "$ref": "#/$defs/text" },
+        "statuses": {
+          "type": "object",
+          "required": [
+            "intake",
+            "backlog",
+            "ready_to_plan",
+            "planning",
+            "ready_to_build",
+            "building",
+            "ready_to_check",
+            "checking",
+            "landed",
+            "paused",
+            "in_review",
+            "done",
+            "canceled",
+            "duplicate"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "intake": { "$ref": "#/$defs/text" },
+            "backlog": { "$ref": "#/$defs/text" },
+            "ready_to_plan": { "$ref": "#/$defs/text" },
+            "planning": { "$ref": "#/$defs/text" },
+            "ready_to_build": { "$ref": "#/$defs/text" },
+            "building": { "$ref": "#/$defs/text" },
+            "ready_to_check": { "$ref": "#/$defs/text" },
+            "checking": { "$ref": "#/$defs/text" },
+            "landed": { "$ref": "#/$defs/text" },
+            "paused": { "$ref": "#/$defs/text" },
+            "in_review": { "$ref": "#/$defs/text" },
+            "done": { "$ref": "#/$defs/text" },
+            "canceled": { "$ref": "#/$defs/text" },
+            "duplicate": { "$ref": "#/$defs/text" }
+          }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "required": ["command", "folders"],
+      "additionalProperties": false,
+      "properties": {
+        "command": { "$ref": "#/$defs/text" },
+        "folders": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/worktreePath" }
+        }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "category", "run", "where"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "$ref": "#/$defs/text" },
+          "category": { "enum": ["types", "lint", "format", "unit", "integration", "e2e"] },
+          "run": { "$ref": "#/$defs/text" },
+          "where": { "$ref": "#/$defs/where" }
+        }
+      }
+    },
+    "extras": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "where"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "$ref": "#/$defs/text" },
+          "where": { "$ref": "#/$defs/where" },
+          "run": { "$ref": "#/$defs/text" }
+        },
+        "if": {
+          "required": ["where"],
+          "properties": { "where": { "const": "local" } }
+        },
+        "then": {
+          "required": ["run"],
+          "properties": { "run": { "$ref": "#/$defs/text" } }
+        }
+      }
+    },
+    "app": {
+      "type": "object",
+      "required": ["start", "url", "default_port", "ready_timeout", "single_instance"],
+      "additionalProperties": false,
+      "properties": {
+        "start": { "$ref": "#/$defs/withPort" },
+        "url": { "$ref": "#/$defs/withPort" },
+        "default_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "ready_timeout": { "$ref": "#/$defs/duration" },
+        "single_instance": { "type": "boolean" }
+      }
+    },
+    "slots": {
+      "type": "object",
+      "required": ["plan", "build", "check"],
+      "additionalProperties": false,
+      "properties": {
+        "plan": {
+          "type": "object",
+          "required": ["reproduce", "design"],
+          "additionalProperties": false,
+          "properties": {
+            "reproduce": { "$ref": "#/$defs/slot" },
+            "design": { "$ref": "#/$defs/slot" }
+          }
+        },
+        "build": {
+          "type": "object",
+          "required": ["finish"],
+          "additionalProperties": false,
+          "properties": {
+            "finish": { "$ref": "#/$defs/slot" }
+          }
+        },
+        "check": {
+          "type": "object",
+          "required": ["review"],
+          "additionalProperties": false,
+          "properties": {
+            "review": { "$ref": "#/$defs/slot" }
+          }
+        }
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "required": ["hosts", "read_paths"],
+      "additionalProperties": false,
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/host" }
+        },
+        "read_paths": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/homePath" }
+        }
+      }
+    },
+    "copy_files": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/checkoutPath" }
+    },
+    "time_limits": {
+      "type": "object",
+      "required": ["plan", "build", "check"],
+      "additionalProperties": false,
+      "properties": {
+        "plan": { "$ref": "#/$defs/duration" },
+        "build": { "$ref": "#/$defs/duration" },
+        "check": { "$ref": "#/$defs/duration" }
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "rule", "answer"],
+        "additionalProperties": false,
+        "properties": {
+          "source": { "$ref": "#/$defs/text" },
+          "rule": { "$ref": "#/$defs/text" },
+          "answer": { "$ref": "#/$defs/text" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "text": { "type": "string", "minLength": 1 },
+    "where": { "enum": ["local", "ci"] },
+    "duration": {
+      "type": "string",
+      "pattern": "^([0-9]+[hms])+$",
+      "message": "must be a duration such as \"30m\" or \"1h30m\""
+    },
+    "withPort": {
+      "type": "string",
+      "pattern": "\\{port\\}",
+      "message": "must hold \"{port}\""
+    },
+    "host": {
+      "type": "string",
+      "pattern": "^(\\*\\.([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\\.)*[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?|([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\\.)+[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)$",
+      "message": "must be a full host name such as \"registry.npmjs.org\", or a wildcard such as \"*.example.com\""
+    },
+    "homePath": {
+      "type": "string",
+      "pattern": "^~(/(?!\\.\\.?(/|$))[^/]+)+/?$",
+      "message": "must be a path inside \"~/\", such as \"~/.npm\", with no \".\" or \"..\" part"
+    },
+    "checkoutPath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!(.*/)?\\.\\.(/|$)).+$",
+      "message": "must be a path relative to the checkout, with no leading \"/\" and no \"..\" part"
+    },
+    "worktreePath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!(.*/)?\\.\\.(/|$)).+$",
+      "message": "must be a path relative to the worktree, with no leading \"/\" and no \"..\" part"
+    },
+    "slot": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(?!\\.\\.?$)(\\.claude/skills/(?!\\.\\.?$)[^/]+|[^/]+)$",
+        "message": "must be a skill name, or a path \".claude/skills/<name>\" naming one folder"
+      }
+    }
+  }
+}
