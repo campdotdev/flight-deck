@@ -387,3 +387,36 @@ describe("the handle", () => {
     await run.exit;
   });
 });
+
+describe("killLeftover, at a restart", () => {
+  test("kills a live session the old runner started, with what it left in its worktree, and reports no exit", async () => {
+    const old = await makeHarness(
+      await fakeClaude(`set -m
+sleep 300 &
+echo $! > ${root}/worktree-pid
+cat ${INIT}; trap 'exit 143' TERM; while true; do sleep 0.05; done`),
+    );
+    const run = await start(old, "left01");
+    await waitFor(() => existsSync(join(root, "worktree-pid")));
+    const worktreePid = Number((await readFile(join(root, "worktree-pid"), "utf8")).trim());
+    stray(worktreePid);
+
+    const restarted = new ClaudeCodeHarness({ claude: join(root, "bin", "claude"), caffeinate: await fakeCaffeinate() });
+    const live = await restarted.killLeftover({ handle: run.handle, worktree: run.session.worktree, sessionFolder: run.session.sessionFolder });
+    expect(live).toBe(true);
+    await waitFor(() => !alive(run.handle.pid) && !alive(worktreePid));
+    await restarted.close();
+  });
+
+  test("leaves alone a process whose start time doesn't match, as when its ID was reused", async () => {
+    const other = Bun.spawn(["/bin/sleep", "300"], { cwd: root });
+    stray(other.pid);
+    await waitFor(() => processStartedAt(other.pid) !== null);
+    const session = await makeSession("left02");
+    const handle: Handle = { session: "left02", uuid: "", pid: other.pid, pidStartedAt: "2026-01-01T00:00:00.000Z" };
+    const restarted = await makeHarness(await fakeClaude("true"));
+    expect(await restarted.killLeftover({ handle, worktree: session.worktree, sessionFolder: session.sessionFolder })).toBe(false);
+    expect(alive(other.pid)).toBe(true);
+    kill(other.pid);
+  });
+});

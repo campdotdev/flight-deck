@@ -96,4 +96,18 @@ export interface Harness {
   stop(handle: Handle): Promise<void>;
   /** The installed Claude Code version. */
   version(): Promise<string>;
+  /**
+   * At the runner's start: kills a session an earlier runner started, when its process still runs, with the
+   * process groups still running from its worktree or `deps/` (spec 1, "Watchdogs and exits"). The process ID
+   * and its start time must both match, so a reused ID never does. It reports no exit, because the session's
+   * output went to the old runner. Returns whether the session was live.
+   */
+  killLeftover(leftover: Leftover): Promise<boolean>;
+}
+
+/** A session an earlier runner started, as its session list recorded it. */
+export interface Leftover {
+  handle: Handle;
+  worktree: string;
+  sessionFolder: string;
 }

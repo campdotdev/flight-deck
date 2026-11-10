@@ -5,7 +5,7 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { SessionJson } from "../workspace/index.ts";
 import { transcriptUuid, writeLaunch, type McpConfig, type Settings } from "./launch.ts";
-import type { Exit, ExitKind, Handle, Harness, HarnessSession, RateLimitEvent, SessionEvents } from "./types.ts";
+import type { Exit, ExitKind, Handle, Harness, HarnessSession, Leftover, RateLimitEvent, SessionEvents } from "./types.ts";
 
 /** What one session does. */
 export interface SessionScript {
@@ -51,6 +51,8 @@ export class ScriptedHarness implements Harness {
   readonly started: StartRecord[] = [];
   /** The session ID of every stop request, in order. */
   readonly stops: string[] = [];
+  /** The handle of each live session a restarted runner killed, in order. */
+  readonly kills: Handle[] = [];
   /** The Claude Code version `version()` returns. */
   claudeCodeVersion: string;
 
@@ -72,6 +74,14 @@ export class ScriptedHarness implements Harness {
     const running = this.running.get(session);
     if (running === undefined) throw new Error(`session ${session} isn't running`);
     this.end(running, exit, options.error);
+  }
+
+  /**
+   * Ends a running session's process with no exit and no `exit.json`, as a crash or a power loss that took the
+   * session down with the runner does.
+   */
+  lose(session: string): void {
+    if (!this.running.delete(session)) throw new Error(`session ${session} isn't running`);
   }
 
   /** The IDs of the sessions still running. */
@@ -121,6 +131,16 @@ export class ScriptedHarness implements Harness {
 
   async version(): Promise<string> {
     return this.claudeCodeVersion;
+  }
+
+  async killLeftover(leftover: Leftover): Promise<boolean> {
+    const running = this.running.get(leftover.handle.session);
+    const { pid, pidStartedAt } = leftover.handle;
+    if (running === undefined || running.handle.pid !== pid || running.handle.pidStartedAt !== pidStartedAt) return false;
+    // The old runner's events died with it, so the kill reports nothing.
+    this.running.delete(leftover.handle.session);
+    this.kills.push(leftover.handle);
+    return true;
   }
 
   private end(running: Running, kind: ExitKind, error?: string): void {
