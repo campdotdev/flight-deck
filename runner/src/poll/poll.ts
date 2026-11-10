@@ -422,6 +422,8 @@ export class Poll {
       if (free <= 0) break;
       const poll = repos.find((each) => each.registration.name === entry.repo);
       if (poll === undefined || !poll.fetch.ok || poll.record?.ok !== true || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
+      // Nothing starts for a repo while its cache refresh runs, a retry included.
+      if (this.refreshes.has(entry.repo)) continue;
       const issue = poll.snapshot.issues.find((each) => each.id === entry.issue_id);
       if (issue === undefined || issue.role !== WORKING[entry.stage]) {
         // The issue left its working status while the retry waited. FLD-104's step 4 handles a move out in full.

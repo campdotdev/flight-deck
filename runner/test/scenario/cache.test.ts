@@ -72,6 +72,24 @@ describe("the dependency cache", () => {
     expect((await world.status()).jobs).toEqual([]);
   });
 
+  test("a retry waiting for its place doesn't start while the repo's refresh runs", async () => {
+    world = await World.create();
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "timed_out" } });
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    await world.push({ "src/a.ts": "export {};\n" }, "Change", { refresh: false });
+
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+    expect((await world.status()).sessions.map(({ state }) => state)).toEqual(["retry_waiting"]);
+
+    await world.poll.refreshesEnded();
+    await world.tick();
+    expect(world.harness.started.map((start) => start.sessionJson.attempt)).toEqual([1, 2]);
+  });
+
   test("a failed refresh keeps the last good cache, shows failed, and runs again only after an hour", async () => {
     world = await World.create();
     await world.push({ ".flight-deck/record.toml": withInstall("mkdir -p node_modules/pkg && echo broken > node_modules/pkg/index.js && exit 1") }, "Break", { refresh: false });
