@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { Outbox } from "../../src/outbox/index.ts";
 import type { Role } from "../../src/record/index.ts";
 import { State } from "../../src/state/index.ts";
-import { InMemoryTracker, type IssueRef, type RelationKind, type StatusType, type StoredIssue, type TrackerRepo } from "../../src/tracker/index.ts";
+import { InMemoryTracker, TrackerRefused, type IssueRef, type RelationKind, type StatusType, type StoredIssue, type TrackerRepo } from "../../src/tracker/index.ts";
 
 const STATUSES: Record<Role, [string, StatusType]> = {
   intake: ["Triage", "triage"],
@@ -177,6 +177,14 @@ describe("a second apply on the same folder", () => {
     expect(await outbox.apply(folder, { identity: tracker })).toEqual({ result: "unwritten", writes: ["writeBrief"] });
     expect(await outbox.apply(folder, { identity: tracker })).toEqual({ result: "applied", writes: ["post", "move"] });
     expect(tracker.writes.map((write) => write.kind)).toEqual(["description", "unsubscribe", "comment", "move"]);
+  });
+
+  test("a write Linear refused fails with Linear's reason and the writes that landed", async () => {
+    const folder = await session(brief());
+    tracker.post = async () => {
+      throw new TrackerRefused("Linear refused the call: body is too long");
+    };
+    expect(await outbox.apply(folder, { identity: tracker })).toEqual({ result: "failed", rule: "Linear refused post: Linear refused the call: body is too long", writes: ["writeBrief"] });
   });
 
   test("a dry run makes no write and lists each one", async () => {
