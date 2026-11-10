@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { readJson, writeJson, type State } from "../state/index.ts";
-import { IssueNotFoundError, isUnavailable, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
+import { IssueNotFoundError, isUnavailable, TrackerRefused, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
 import { duplicateLine, followUpFooter, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope } from "./envelope.ts";
@@ -63,7 +63,7 @@ export class Outbox {
   /**
    * Checks the outbox, then makes each write that `applied.json` doesn't record yet. A read or write Linear
    * doesn't take (`TrackerUnavailable`) stops it with `unwritten` and the writes that landed, so a later apply
-   * on the same folder finishes the rest.
+   * on the same folder finishes the rest. One Linear refuses (`TrackerRefused`) stops it with `failed`.
    */
   async apply(sessionFolder: string, options: ApplyOptions): Promise<ApplyResult> {
     const writes: string[] = [];
@@ -71,6 +71,7 @@ export class Outbox {
       return await this.applyWrites(sessionFolder, options, writes);
     } catch (error) {
       if (isUnavailable(error)) return { result: "unwritten", writes };
+      if (error instanceof TrackerRefused) return { result: "failed", rule: error.message, writes };
       throw error;
     }
   }
@@ -220,7 +221,14 @@ export class Outbox {
     for (const [name, write] of [...uploadSteps, ...steps]) {
       if (applied.writes.includes(name)) continue;
       if (options.dryRun !== true) {
-        const violation = await write(applied);
+        let violation: string | null;
+        try {
+          violation = await write(applied);
+        } catch (error) {
+          // A write Linear refused won't land on a later try, so the outbox fails, unlike one Linear didn't take.
+          if (!(error instanceof TrackerRefused)) throw error;
+          violation = `Linear refused ${name}: ${error.message}`;
+        }
         if (violation !== null) return { result: "failed", rule: violation, writes };
         applied.writes.push(name);
         await writeJson(appliedFile, applied);
