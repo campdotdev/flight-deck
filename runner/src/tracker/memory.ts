@@ -7,6 +7,8 @@ import { FACTORY_ROLES, roleOf } from "./roles.ts";
 import { TrackerUnavailable, type UnavailableReason } from "./unavailable.ts";
 import {
   IssueNotFoundError,
+  type Blocker,
+  type BlockerIssue,
   type FiledIssue,
   type IssueDraft,
   type IssueRef,
@@ -73,8 +75,11 @@ export interface StoredIssue {
   /** Whether the GitHub sync is on. */
   synced: boolean;
   duplicate_of: string | null;
+  archived: boolean;
   /** The relations `relate` made from this issue, by the other issue's UUID. */
   relations: { kind: RelationKind; issue: string }[];
+  /** The UUIDs of the issues that block this one. */
+  blockers: string[];
 }
 
 export interface NewIssue {
@@ -104,9 +109,12 @@ interface Team {
   name: string;
   statuses: { name: string; type: StatusType }[];
   next: number;
-  /** Whether the Flight Deck app can read the team. */
+  /** Whether the Flight Deck app can read the team and its issues. A private team it has no access to can't be. */
   readable: boolean;
 }
+
+/** The status types of an issue that's still open: not done, canceled, or a duplicate. */
+const CLOSED_TYPES = new Set<StatusType>(["completed", "canceled", "duplicate"]);
 
 /** The writes a scenario can make Linear refuse. */
 export type RefusableWrite = "move" | "post" | "flag" | "clearFlag" | "unsubscribe" | "writeBrief" | "markDuplicate" | "file" | "relate" | "detach" | "upload";
@@ -119,6 +127,8 @@ export class InMemoryTracker implements Tracker {
   readonly writes: TrackerWrite[] = [];
   /** Every Reader token minted, in order. */
   readonly tokens: TokenRecord[] = [];
+  /** The workspace of each revoke of the runner's own token, in order. */
+  readonly runnerRevokes: string[] = [];
   /** Each uploaded file's bytes, by the URL `upload` returned. */
   readonly uploads = new Map<string, Uint8Array>();
 
@@ -143,8 +153,9 @@ export class InMemoryTracker implements Tracker {
     this.users.set(user.id, user.name);
   }
 
-  addTeam(team: { key: string; name: string; statuses: { name: string; type: StatusType }[] }): void {
-    this.teams.set(team.key, { ...team, next: 1, readable: true });
+  /** A team. One with `readable: false` is a private team the Flight Deck app can see issues on but not read. */
+  addTeam(team: { key: string; name: string; statuses: { name: string; type: StatusType }[]; readable?: boolean }): void {
+    this.teams.set(team.key, { ...team, readable: team.readable ?? true, next: 1 });
   }
 
   /** The maintainer renames one of the team's statuses. Issues in it keep it under its new name. */
@@ -189,7 +200,9 @@ export class InMemoryTracker implements Tracker {
       sync_attachment: input.synced === true ? this.newId("attachment") : null,
       synced: input.synced === true,
       duplicate_of: null,
+      archived: false,
       relations: [],
+      blockers: [],
     };
     this.issues.set(issue.id, issue);
     return issue;
@@ -214,10 +227,41 @@ export class InMemoryTracker implements Tracker {
     if (user !== null && !issue.subscribers.includes(user)) issue.subscribers.push(user);
   }
 
+  /** The maintainer marks `blocker` as blocking `issueId`. */
+  addBlocker(issueId: string, blocker: string): void {
+    this.stored(issueId).blockers.push(this.stored(blocker).id);
+  }
+
+  /** The maintainer gives an issue a `duplicate` relation to `of`, or removes it with `null`. Its status stays. */
+  setDuplicate(issueId: string, of: string | null): void {
+    this.stored(issueId).duplicate_of = of === null ? null : this.stored(of).id;
+  }
+
   /** A move the maintainer makes by hand, such as sending an issue. */
   setStatus(issueId: string, status: string): void {
     const issue = this.stored(issueId);
     this.statusOf(this.team(issue.team), status);
+    issue.status = status;
+    issue.status_since = this.now();
+  }
+
+  /** The maintainer deletes the issue. `issue` no longer finds it. */
+  deleteIssue(issueId: string): void {
+    this.issues.delete(this.stored(issueId).id);
+  }
+
+  /** The maintainer archives the issue. A snapshot no longer returns it. */
+  archive(issueId: string): void {
+    this.stored(issueId).archived = true;
+  }
+
+  /** The maintainer moves the issue to another team, into one of that team's statuses. */
+  moveToTeam(issueId: string, team: string, status: string): void {
+    const issue = this.stored(issueId);
+    const to = this.team(team);
+    this.statusOf(to, status);
+    issue.team = to.key;
+    issue.identifier = `${to.key}-${to.next++}`;
     issue.status = status;
     issue.status_since = this.now();
   }
@@ -243,7 +287,7 @@ export class InMemoryTracker implements Tracker {
 
   async snapshot(repo: TrackerRepo, options: SnapshotOptions = {}): Promise<Snapshot> {
     const issues = [...this.issues.values()]
-      .filter((issue) => issue.team === repo.team)
+      .filter((issue) => issue.team === repo.team && !issue.archived)
       .map((issue) => this.snapshotIssue(issue, repo))
       .filter((issue): issue is SnapshotIssue => issue !== null && SNAPSHOT_ROLES.has(issue.role));
     const since = options.since ?? null;
@@ -265,6 +309,7 @@ export class InMemoryTracker implements Tracker {
       comments: issue.comments.map((comment) => ({ ...comment })),
       synced: issue.synced,
       sync_attachment: issue.synced ? issue.sync_attachment : null,
+      archived: issue.archived,
     };
   }
 
@@ -388,6 +433,10 @@ export class InMemoryTracker implements Tracker {
     for (const record of this.tokens) if (record.session === session.id) record.revoked = true;
   }
 
+  async revokeRunnerToken(workspace: string): Promise<void> {
+    this.runnerRevokes.push(workspace);
+  }
+
   // Helpers.
 
   private refused(write: RefusableWrite): void {
@@ -433,7 +482,50 @@ export class InMemoryTracker implements Tracker {
       children: issue.children,
       priority: issue.priority,
       created_at: issue.created_at,
+      ...this.blocking(issue, repo),
     };
+  }
+
+  /** `blockers` and `unblocks`, which Linear's filtered query reads only for an issue in `ready_to_plan`. */
+  private blocking(issue: StoredIssue, repo: TrackerRepo): { blockers: Blocker[]; unblocks: number } {
+    if (issue.team !== repo.team || roleOf(repo, issue.status) !== "ready_to_plan") return { blockers: [], unblocks: 0 };
+    const blockers = issue.blockers.map((id): Blocker => {
+      const blocker = this.blockerIssue(this.stored(id), repo);
+      return blocker.readable ? { ...blocker, original: this.original(this.stored(id), repo) } : blocker;
+    });
+    const unblocks = [...this.issues.values()].filter(
+      (other) =>
+        other.blockers.includes(issue.id) &&
+        this.open(other) &&
+        other.blockers.every((id) => id === issue.id || !this.open(this.stored(id))),
+    ).length;
+    return { blockers, unblocks };
+  }
+
+  /** The issue a duplicate relation leads to, through further duplicates, or `null` with none or a loop. */
+  private original(issue: StoredIssue, repo: TrackerRepo): BlockerIssue | null {
+    const seen = new Set([issue.id]);
+    let current = issue;
+    while (current.duplicate_of !== null) {
+      if (seen.has(current.duplicate_of)) return null;
+      seen.add(current.duplicate_of);
+      current = this.stored(current.duplicate_of);
+      // The app can't read an unreadable issue's relations, so the chain stops there.
+      if (!this.team(current.team).readable) break;
+    }
+    return current === issue ? null : this.blockerIssue(current, repo);
+  }
+
+  private blockerIssue(issue: StoredIssue, repo: TrackerRepo): BlockerIssue {
+    if (!this.team(issue.team).readable) return { readable: false, identifier: issue.identifier };
+    const { type } = this.statusOf(this.team(issue.team), issue.status);
+    return { readable: true, identifier: issue.identifier, title: issue.title, url: this.url(repo, issue), status: issue.status, status_type: type };
+  }
+
+  /** An issue the app can't read counts as open. */
+  private open(issue: StoredIssue): boolean {
+    const team = this.team(issue.team);
+    return !team.readable || !CLOSED_TYPES.has(this.statusOf(team, issue.status).type);
   }
 
   private url(repo: TrackerRepo, issue: StoredIssue): string {

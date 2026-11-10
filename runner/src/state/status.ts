@@ -51,7 +51,8 @@ export interface StatusRepo {
   record: "ok" | "waiting" | "invalid" | "newer";
   cache: "ok" | "refreshing" | "missing" | "failed";
   waiting_for_specs: { issue: string; title: string }[];
-  waiting_for_blockers: { issue: string; title: string; blockers: { issue: string; title: string; status: string }[] }[];
+  /** A blocker the Flight Deck app can't read has a `null` title and status. */
+  waiting_for_blockers: { issue: string; title: string; blockers: { issue: string; title: string | null; status: string | null }[] }[];
   waiting_for_port: { port: number; issues: string[] } | null;
 }
 

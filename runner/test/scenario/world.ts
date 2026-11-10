@@ -178,12 +178,14 @@ export class World {
   }
 
   /**
-   * Builds the repo's dependency cache from the default branch's tip, as a refresh the runner made earlier
-   * would have, so the next poll finds a good cache for the tip. Does nothing when the fetch fails or the tip holds no valid record.
+   * Builds a repo's dependency cache from its default branch's tip, as a refresh the runner made earlier
+   * would have, so the next poll finds a good cache for the tip. Does nothing when the fetch fails or the tip
+   * holds no valid record.
    */
-  async refreshCache(): Promise<void> {
+  async refreshCache(name = this.repo): Promise<void> {
     const workspace = new Workspace({ folders: this.folders, git: this.config.paths.git });
-    const repo = this.config.repos[0]!;
+    const repo = this.config.repos.find((each) => each.name === name);
+    if (repo === undefined) throw new Error(`no repo ${name}`);
     const fetched = await workspace.fetch(repo);
     // A scenario that breaks the remote gets no cache.
     if (!fetched.ok) return;
@@ -193,6 +195,21 @@ export class World {
     const job = await workspace.refreshCache({ repo, record: record.record, commit: fetched.head, versionFolder: this.versionFolder, now: this.now });
     const result = await job.done;
     if (!result.ok) throw new Error(`the world's cache refresh failed: ${result.error}`);
+  }
+
+  /**
+   * Registers a second repo on its own team, with Shaders' statuses and record, on its own bare remote. Issues on
+   * it are filed with `world.issue({ team, ... })`.
+   */
+  async addRepo(input: { name: string; team: string }): Promise<void> {
+    const slug = input.name.replace("/", "-");
+    const remote = join(this.root, `${slug}.git`);
+    await makeRemote(this.root, remote, SHADERS_RECORD.replace('team = "SHA"', `team = "${input.team}"`));
+    this.tracker.addTeam({ key: input.team, name: input.name, statuses: Object.values(STATUSES).map(([name, type]) => ({ name, type })) });
+    const first = this.config.repos[0]!;
+    this.config.repos.push({ ...first, name: input.name, remote, checkout: join(this.root, `checkout-${slug}`), tracker: { ...first.tracker, team: input.team } });
+    await this.writeConfig();
+    await this.refreshCache(input.name);
   }
 
   /** Files an issue as the maintainer, in Backlog unless it says otherwise. */
@@ -215,6 +232,30 @@ export class World {
   async tick(at?: Date): Promise<void> {
     this.now = at ?? new Date(this.now.getTime() + 60_000);
     await this.poll.tick(this.now);
+  }
+
+  /** `flight-deck hold`, at the clock's time. */
+  async hold(): Promise<void> {
+    await this.poll.hold(this.now);
+  }
+
+  /** `flight-deck start`. */
+  async start(): Promise<void> {
+    await this.poll.start(this.now);
+  }
+
+  /** `flight-deck stop`, at the clock's time. */
+  async stop(): Promise<void> {
+    await this.poll.stop(this.now);
+  }
+
+  /**
+   * `flight-deck hold` or `stop` when the runner doesn't answer: the command writes the hold marker itself, and
+   * the runner reads it at its next start (spec 1, "The runner's socket").
+   */
+  async writeHoldMarker(by: "hold" | "stop"): Promise<void> {
+    await mkdir(join(this.folders.data, "state"), { recursive: true });
+    await writeFile(join(this.folders.data, "state", "hold"), `${JSON.stringify({ by, since: this.now.toISOString() })}\n`);
   }
 
   /** `status.json`, the state file. */

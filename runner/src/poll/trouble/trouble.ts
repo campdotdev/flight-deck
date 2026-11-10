@@ -84,19 +84,27 @@ export class Trouble {
     return this.entries.some((entry) => entry.cause === cause && entry.id === id && entry.open);
   }
 
-  /** Whether an open cause stops every session on the Mac. */
-  stopsRunner(): boolean {
-    return this.current().some((each) => each.scope === "runner" && !HOLDS_NOTHING.has(each.cause));
-  }
-
-  /** Each open cause that stops sessions, as `status.json`'s holds: one per repo for a repo's cause. */
-  holds(): StatusHold[] {
-    return this.entries
-      .filter((entry) => entry.open && !HOLDS_NOTHING.has(entry.cause))
-      .flatMap((entry): StatusHold[] => {
-        const cause = entry.cause as StatusHold["cause"];
-        if (entry.scope === "runner") return [{ cause, scope: "runner", name: null, since: entry.since, until: null }];
-        return entry.repos.map((repo) => ({ cause, scope: entry.scope, name: repo, since: entry.since, until: null }));
+  /**
+   * Each open cause that stops sessions, as holds: one per repo for a repo's cause. It reads this poll's view, so
+   * a cause a step opened holds the starts that follow it, from `now`, before step 10 writes it down.
+   */
+  holds(now: Date): StatusHold[] {
+    const at = now.toISOString();
+    const open = new Map<string, { cause: TroubleCause; scope: TroubleEntry["scope"]; repos: string[]; since: string }>();
+    for (const entry of this.entries) {
+      if (!this.isOpen(entry.cause, entry.id)) continue;
+      const finding = this.opened.get(key(entry.cause, entry.id))?.finding;
+      open.set(key(entry.cause, entry.id), { cause: entry.cause, scope: entry.scope, repos: finding?.repos ?? entry.repos, since: entry.open ? entry.since : at });
+    }
+    for (const [k, { cause, finding }] of this.opened) {
+      if (!open.has(k)) open.set(k, { cause, scope: finding.scope, repos: finding.repos, since: at });
+    }
+    return [...open.values()]
+      .filter((each) => !HOLDS_NOTHING.has(each.cause))
+      .flatMap((each): StatusHold[] => {
+        const cause = each.cause as StatusHold["cause"];
+        if (each.scope === "runner") return [{ cause, scope: "runner", name: null, since: each.since, until: null }];
+        return each.repos.map((repo) => ({ cause, scope: each.scope, name: repo, since: each.since, until: null }));
       });
   }
 
@@ -258,12 +266,5 @@ export class Trouble {
       await log(`${what} not written: ${error.message}`);
       return null;
     }
-  }
-
-  /** The causes open now: those that opened this poll, and those still open from before that nothing checked. */
-  private current(): { cause: TroubleCause; scope: TroubleEntry["scope"] }[] {
-    const now = [...this.opened.values()].map(({ cause, finding }) => ({ cause, scope: finding.scope }));
-    const before = this.entries.filter((entry) => entry.open && this.isOpen(entry.cause, entry.id));
-    return [...now, ...before];
   }
 }
