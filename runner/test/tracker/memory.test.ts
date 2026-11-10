@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { Role } from "../../src/record/index.ts";
-import { InMemoryTracker, IssueNotFoundError, TrackerUnavailable, unsigned, type IssueRef, type TrackerRepo } from "../../src/tracker/index.ts";
+import { InMemoryTracker, IssueNotFoundError, MintFailed, TrackerUnavailable, unsigned, type IssueRef, type TrackerRepo } from "../../src/tracker/index.ts";
 
 const STATUSES: Record<Role, string> = {
   intake: "Triage",
@@ -358,6 +358,75 @@ describe("Reader tokens", () => {
     const token = await tracker.sessionToken({ id: "abc123", repo });
     await tracker.revoke({ id: "abc123", repo });
     expect(tracker.tokens).toEqual([{ session: "abc123", token, revoked: true }]);
+    expect(tracker.mints).toEqual([{ app: "reader", workspace: "campdotdev", session: "abc123", ok: true }]);
+  });
+
+  test("asking again returns the same token, and a replacement only once Linear rejects it", async () => {
+    const first = await tracker.sessionToken({ id: "abc123", repo });
+    expect(await tracker.sessionToken({ id: "abc123", repo })).toBe(first);
+    tracker.rejectToken(first);
+    const second = await tracker.sessionToken({ id: "abc123", repo });
+    expect(second).not.toBe(first);
+    expect(await tracker.sessionToken({ id: "abc123", repo })).toBe(second);
+    expect(tracker.tokens).toEqual([
+      { session: "abc123", token: first, revoked: true },
+      { session: "abc123", token: second, revoked: false },
+    ]);
+  });
+
+  test("a failed mint throws MintFailed, a kind of TrackerUnavailable, and mints nothing", async () => {
+    tracker.failMints("reader", "campdotdev");
+    const error = await tracker.sessionToken({ id: "abc123", repo }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(MintFailed);
+    expect(error).toBeInstanceOf(TrackerUnavailable);
+    expect([(error as MintFailed).app, (error as MintFailed).workspace, (error as MintFailed).reason]).toEqual(["reader", "campdotdev", "mint"]);
+    expect(tracker.tokens).toEqual([]);
+    expect(tracker.mints).toEqual([{ app: "reader", workspace: "campdotdev", session: "abc123", ok: false }]);
+
+    tracker.failMints("reader", "campdotdev", false);
+    await tracker.tryReaderMint("campdotdev");
+    expect(tracker.mints.at(-1)).toEqual({ app: "reader", workspace: "campdotdev", session: null, ok: true });
+    expect(tracker.tokens).toEqual([]);
+  });
+});
+
+describe("the runner's token", () => {
+  test("is minted once per workspace, and again after a revoke", async () => {
+    await tracker.runnerToken("campdotdev");
+    await tracker.runnerToken("campdotdev");
+    await tracker.runnerToken("other");
+    await tracker.revokeRunnerToken("campdotdev");
+    await tracker.runnerToken("campdotdev");
+    expect(tracker.mints).toEqual([
+      { app: "flight_deck", workspace: "campdotdev", session: null, ok: true },
+      { app: "flight_deck", workspace: "other", session: null, ok: true },
+      { app: "flight_deck", workspace: "campdotdev", session: null, ok: true },
+    ]);
+    expect(tracker.runnerTokens.map(({ workspace, revoked }) => ({ workspace, revoked }))).toEqual([
+      { workspace: "campdotdev", revoked: true },
+      { workspace: "other", revoked: false },
+      { workspace: "campdotdev", revoked: false },
+    ]);
+    expect(tracker.runnerRevokes).toEqual(["campdotdev"]);
+  });
+
+  test("is minted again once Linear rejects it, as after a 401", async () => {
+    await tracker.runnerToken("campdotdev");
+    tracker.rejectToken(tracker.runnerTokens[0]!.token);
+    await tracker.runnerToken("campdotdev");
+    await tracker.runnerToken("campdotdev");
+    expect(tracker.mints.map((mint) => mint.app)).toEqual(["flight_deck", "flight_deck"]);
+  });
+
+  test("a failed mint throws MintFailed for that workspace only", async () => {
+    tracker.failMints("flight_deck", "campdotdev");
+    const error = await tracker.runnerToken("campdotdev").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(MintFailed);
+    expect((error as MintFailed).app).toBe("flight_deck");
+    await tracker.runnerToken("other");
+    // The Reader app is a separate app, so its mints still work.
+    await tracker.sessionToken({ id: "abc123", repo });
+    expect(tracker.runnerTokens.map(({ workspace }) => workspace)).toEqual(["other"]);
   });
 });
 

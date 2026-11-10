@@ -22,12 +22,13 @@ import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from
 import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/record.ts";
 import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
 import { State, type OpenPause, type PortPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
-import { FACTORY_ROLES, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
+import { FACTORY_ROLES, MintFailed, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { portInUse, Workspace, type FetchResult, type RefreshJob } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
-import { ApplyWaiting } from "./apply-waiting.ts";
+import { ApplyWaiting, waitingEntry as applyWaitingEntry } from "./apply-waiting.ts";
 import { blockerTest } from "./blockers.ts";
 import { EXITS, type ExitContext } from "./exits/index.ts";
+import { LinearTokens } from "./linear-tokens.ts";
 import { movedOut, stillWorking } from "./moved-out.ts";
 import { currentHolds, holdsRepo, runnerState, type HoldContext } from "./holds.ts";
 import { openPortPause, runsOne, singleInstanceApp } from "./single-instance.ts";
@@ -96,6 +97,7 @@ export class Poll {
   private readonly path: string;
   private readonly lifecycle: Lifecycle;
   private readonly state: State;
+  private readonly tokens: LinearTokens;
   private readonly applyWaiting: ApplyWaiting;
   private readonly usage: Usage;
   /** Exits queue as they happen, and the next tick handles them first. */
@@ -125,6 +127,7 @@ export class Poll {
     this.path = options.path ?? process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
     this.lifecycle = new Lifecycle(options.tracker);
     this.state = new State(options.folders);
+    this.tokens = new LinearTokens(options.tracker);
     this.usage = new Usage(this.state);
     this.applyWaiting = new ApplyWaiting({
       folders: options.folders,
@@ -206,10 +209,23 @@ export class Poll {
         if (entry.state === "running") await this.stopSession(now, entry, "stop");
         if (entry.state === "retry_waiting") await this.pauseStopped(now, config, entry, { session: entry.id, attempt: entry.attempt }, workspace);
       }
-      for (const name of new Set(config.repos.map((registration) => repoOf(config, registration.name)?.workspace))) {
-        if (name !== undefined) await this.tracker.revokeRunnerToken(name);
-      }
+      await this.revokeTokens(config);
     });
+  }
+
+  /**
+   * Revokes the runner's Flight Deck app token in every workspace it serves, on a clean shutdown other than
+   * `stop`, which revokes on its own: `flight-deck update` and launchd's SIGTERM (ADR 0005). The next poll
+   * mints a new one.
+   */
+  revokeRunnerTokens(): Promise<void> {
+    return this.serial(async () => this.revokeTokens(await readConfig(this.folders)));
+  }
+
+  private async revokeTokens(config: Config): Promise<void> {
+    for (const name of new Set(config.repos.map((registration) => repoOf(config, registration.name)?.workspace))) {
+      if (name !== undefined) await this.tracker.revokeRunnerToken(name);
+    }
   }
 
   /**
@@ -242,10 +258,21 @@ export class Poll {
       await this.atStart(now, config, workspace);
     }
     const trouble = await Trouble.load(this.state);
+    this.tokens.newPoll();
     this.login.poll(trouble);
     await this.handleExits(now, config, workspace, trouble);
-    // Outboxes Linear didn't take, each on its backoff, with no session.
-    await this.applyWaiting.retry(now, this.outbox(now, config), (name) => repoNamed(config, name), workspace);
+    // Outboxes Linear didn't take, each on its backoff, with no session. A workspace whose Flight Deck app can't
+    // mint waits.
+    const usable = new Set<string>();
+    for (const entry of await this.state.sessions()) {
+      const repo = entry.state === "apply_waiting" ? repoNamed(config, entry.repo) : null;
+      if (repo !== null && !usable.has(repo.workspace) && (await this.tokens.usable(now, config, repo.workspace, trouble))) usable.add(repo.workspace);
+    }
+    const ready = (name: string) => {
+      const repo = repoNamed(config, name);
+      return repo !== null && usable.has(repo.workspace) ? repo : null;
+    };
+    await this.applyWaiting.retry(now, this.outbox(now, config), ready, workspace);
     await this.endRefreshes(now);
     await this.sweep(now, workspace);
     await this.state.rotateLog();
@@ -332,6 +359,7 @@ export class Poll {
     const queued = this.exits.splice(0);
     if (queued.length === 0) return;
     const outbox = this.outbox(now, config);
+    const waiting: QueuedExit[] = [];
     for (const { session, exit } of queued) {
       const entry = (await this.state.sessions()).find((each) => each.id === session);
       if (entry === undefined) continue;
@@ -352,7 +380,24 @@ export class Poll {
         continue;
       }
       await this.tracker.revoke({ id: entry.id, repo });
+      const usable = await this.tokens.usable(now, config, repo.workspace, trouble);
+      if (!usable && exit.kind !== "exited") {
+        // The Flight Deck app can't mint, and this exit's handling reads or writes Linear, so the exit waits in the
+        // queue for the first poll whose mint works.
+        await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind} waits for a Linear token for ${repo.workspace}`);
+        waiting.push({ session, exit });
+        continue;
+      }
       await this.usage.spent(now, config, exit);
+      if (!usable) {
+        // A handoff the runner can't apply yet waits as `apply_waiting`, with its outbox kept (ADR 0005).
+        await workspace.dispose({ session: entry.id, worktree: entry.worktree }, { keepFolder: true });
+        const sessionFolder = paths.sessionFolder(this.folders, entry.id);
+        const kept = applyWaitingEntry(entry, { folder: sessionFolder, phase: "apply", now });
+        await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? kept : each)));
+        await this.state.log(now, `${entry.id} ${entry.issue}: no Linear token for ${repo.workspace}, the outbox waits to apply`);
+        continue;
+      }
 
       const sessionFolder = paths.sessionFolder(this.folders, entry.id);
       const { transcript, claudeCodeVersion: _, error, costUsd: __, ...kind } = exit;
@@ -377,6 +422,7 @@ export class Poll {
       };
       await EXITS[exit.kind](context);
     }
+    this.exits.unshift(...waiting);
   }
 
   private outbox(now: Date, config: Config): Outbox {
@@ -462,7 +508,7 @@ export class Poll {
       }
     }
     if (fetch.ok && record?.ok === true) await this.refreshIfDue(now, registration, record.record, fetch.head, workspace);
-    const repo = await this.checkTeam(config, credentials, registration, record?.ok === true ? record.record : null, trouble);
+    const repo = await this.checkTeam(now, config, credentials, registration, record?.ok === true ? record.record : null, trouble);
 
     // 3. Snapshot, with the comments since the repo's cursor.
     const snapshot = repo === null || !repo.usable ? null : await this.tracker.snapshot(repo.repo, { since: await this.state.cursor(registration.name) });
@@ -515,6 +561,7 @@ export class Poll {
    * the rest of the repo's poll. Returns the repo for the Tracker, and whether the poll goes on.
    */
   private async checkTeam(
+    now: Date,
     config: Config,
     credentials: Credentials | null,
     registration: Registration,
@@ -529,6 +576,8 @@ export class Poll {
       return null;
     }
     trouble.clear("linear_login", name);
+    // While the Flight Deck app can't mint, every Linear step skips the workspace (ADR 0005).
+    if (!(await this.tokens.usable(now, config, workspace, trouble))) return null;
     if (trouble.isOpen("shared_team", `${registration.tracker.workspace}/${registration.tracker.team}`)) return { repo, usable: false };
 
     const team = await this.tracker.checkTeam(repo);
@@ -768,12 +817,13 @@ export class Poll {
       if (poll === undefined || !poll.fetch.ok || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
       // Nothing starts for a repo while its cache refresh runs, a retry included.
       if (this.refreshes.has(entry.repo)) continue;
+      if (poll.tracker === null || !(await this.tokens.canStart(poll.tracker.workspace))) continue;
       const issue = poll.snapshot.issues.find((each) => each.id === entry.issue_id);
       // Step 4 dropped the retry of an issue that left its working status.
       if (issue === undefined || issue.role !== WORKING[entry.stage]) continue;
       free--;
       running++;
-      await this.startSession(now, config, poll, issue, workspace, entry);
+      await this.startSession(now, config, poll, issue, workspace, trouble, entry);
     }
 
     // Each single-instance app's port pause that still stands, held repos' too, for `waiting_for_port`.
@@ -786,6 +836,8 @@ export class Poll {
     const candidates: { poll: RepoPoll; issue: SnapshotIssue }[] = [];
     for (const poll of startable) {
       if (!poll.fetch.ok || poll.snapshot === null) continue;
+      // A workspace whose Reader app can't mint starts nothing (ADR 0005).
+      if (poll.tracker === null || !(await this.tokens.canStart(poll.tracker.workspace))) continue;
       for (const issue of queued(poll, busy)) {
         // A kept outbox is applied instead of a session, and takes no place under the cap.
         if (poll.tracker !== null && (await this.applyWaiting.applyKept(now, this.outbox(now, config), poll.tracker, issue, workspace))) continue;
@@ -800,6 +852,8 @@ export class Poll {
     const full = new Set(repos.filter((poll) => runsOne(sessions, poll.registration.name)).map((poll) => poll.registration.name));
     for (const { poll, issue } of candidates) {
       if (!(await room())) break;
+      // A Reader mint that failed at an earlier start this poll holds the rest of its workspace.
+      if (!(await this.tokens.canStart(poll.tracker!.workspace))) continue;
       const app = singleInstanceApp(poll.record);
       if (app !== null) {
         if (full.has(poll.registration.name)) continue;
@@ -808,7 +862,7 @@ export class Poll {
       }
       free--;
       running++;
-      await this.startSession(now, config, poll, issue, workspace);
+      await this.startSession(now, config, poll, issue, workspace, trouble);
     }
 
     for (const poll of repos) {
@@ -866,7 +920,15 @@ export class Poll {
    * Starts a session: a take, or, with `retry`, the fresh session that takes a `retry_waiting` entry's place.
    * A retry restarts in place, so the issue already sits in the working status and no take happens.
    */
-  private async startSession(now: Date, config: Config, poll: RepoPoll, issue: SnapshotIssue, workspace: Workspace, retry?: SessionEntry): Promise<void> {
+  private async startSession(
+    now: Date,
+    config: Config,
+    poll: RepoPoll,
+    issue: SnapshotIssue,
+    workspace: Workspace,
+    trouble: Trouble,
+    retry?: SessionEntry,
+  ): Promise<void> {
     if (!poll.fetch.ok || poll.tracker === null) return;
     const registration = poll.registration;
     const repo = poll.tracker;
@@ -969,7 +1031,14 @@ export class Poll {
     }
 
     // 4. The Reader token, then the session.
-    await this.tracker.sessionToken({ id, repo });
+    try {
+      await this.tracker.sessionToken({ id, repo });
+    } catch (error) {
+      if (!(error instanceof MintFailed)) throw error;
+      this.tokens.readerFailed(now, config, repo.workspace, error, trouble);
+      await this.readerMintFailed(now, entry, issue, workspace, retry);
+      return;
+    }
     const session: HarnessSession = {
       id,
       stage,
@@ -1001,6 +1070,26 @@ export class Poll {
       port: prepared.port,
     };
     await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === id ? running : each)));
+  }
+
+  /**
+   * The session's Reader mint failed, so the session doesn't start, and the start uses no retry (ADR 0005). A
+   * take puts the issue back in Ready to plan with no comment. A retry restarts in place, so its entry waits as
+   * `retry_waiting` again, with the attempt it had.
+   */
+  private async readerMintFailed(now: Date, entry: SessionEntry, issue: SnapshotIssue, workspace: Workspace, retry: SessionEntry | undefined): Promise<void> {
+    await workspace.dispose({ session: entry.id, worktree: entry.worktree });
+    if (retry !== undefined) {
+      await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? retry : each)));
+      await this.state.log(now, `${entry.id} ${entry.issue}: no Reader token, attempt ${retry.attempt} waits again`);
+      return;
+    }
+    await this.dropEntry(entry.id);
+    // The next take keeps this one's attempt, as after any requeue (ADR 0002).
+    const memory = await this.state.issueMemory(entry.repo, issue.id);
+    await this.state.writeIssueMemory(entry.repo, issue.id, { ...memory, restart: { attempt: entry.attempt, after: "linear_token" } });
+    const moved = await this.lifecycle.move({ ...issue, role: "planning" }, "ready_to_plan", "requeue");
+    await this.state.log(now, `${entry.id} ${entry.issue}: no Reader token, ${moved.ok ? "back in ready_to_plan" : `requeue refused: ${moved.violation}`}`);
   }
 
   /** The ports the listed sessions with a process hold. A waiting entry's session has ended, so it holds none. */

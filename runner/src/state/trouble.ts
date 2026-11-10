@@ -34,6 +34,10 @@ export interface TroubleFacts {
   error?: string;
   /** `credentials.env`'s mode, such as `0640`. */
   mode?: string;
+  /** For `linear_token`: the app whose mint failed last. */
+  app?: "flight_deck" | "reader";
+  /** For `linear_token`: ISO time a mint worked again. */
+  ended?: string;
 }
 
 /** One trouble issue the runner filed for a cause, in one repo's `intake` role. */
@@ -65,4 +69,9 @@ export interface TroubleEntry {
   since: string;
   facts: TroubleFacts;
   issues: TroubleIssue[];
+  /**
+   * The repos still owed a trouble issue for a cause that files only once it clears: `linear_token`, after a
+   * failure of 15 minutes or more. A filing Linear didn't take is tried again at the next poll.
+   */
+  unfiled?: string[];
 }
