@@ -136,7 +136,7 @@ describe("a failed Flight Deck app mint", () => {
     expect((await world.status()).trouble).toEqual([]);
   });
 
-  test("a session that exits during the hold waits, and its outbox applies once a mint works", async () => {
+  test("a session that exits during the hold waits as apply_waiting, and its outbox applies once a mint works", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     world.send(issue);
     world.harness.script(issue.identifier, { outbox: BRIEF });
@@ -149,12 +149,19 @@ describe("a failed Flight Deck app mint", () => {
     world.harness.finish(session, { kind: "exited", code: 0 });
     expect(await nextTick()).toEqual([]);
     expect(world.tracker.stored(issue.id).status).toBe("Planning");
+    expect((await world.status()).sessions.map(({ id, state }) => ({ id, state }))).toEqual([{ id: session, state: "apply_waiting" }]);
     // The Reader token goes at the exit all the same.
     expect(world.tracker.tokens.map(({ session, revoked }) => ({ session, revoked }))).toEqual([{ session, revoked: true }]);
 
+    // The next poll's retry fails to mint again, so the apply's own backoff runs while the mint's does.
+    expect(await nextTick()).toEqual([]);
+
+    // A mint works again, but the next mint isn't due until 4 minutes after the take, so the apply waits for it.
     world.tracker.failMints("flight_deck", "campdotdev", false);
+    expect(await nextTick()).toEqual([]);
     await world.tick();
     expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    expect((await world.status()).sessions).toEqual([]);
   });
 
   test("leaves another workspace's factory running", async () => {

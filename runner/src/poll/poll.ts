@@ -24,7 +24,7 @@ import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type 
 import { FACTORY_ROLES, MintFailed, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
-import { ApplyWaiting } from "./apply-waiting.ts";
+import { ApplyWaiting, waitingEntry as applyWaitingEntry } from "./apply-waiting.ts";
 import { blockerTest } from "./blockers.ts";
 import { EXITS, type ExitContext } from "./exits/index.ts";
 import { LinearTokens } from "./linear-tokens.ts";
@@ -209,8 +209,18 @@ export class Poll {
     const trouble = await Trouble.load(this.state);
     this.tokens.newPoll();
     await this.handleExits(now, config, workspace, trouble);
-    // Outboxes Linear didn't take, each on its backoff, with no session.
-    await this.applyWaiting.retry(now, this.outbox(now, config), (name) => repoNamed(config, name), workspace);
+    // Outboxes Linear didn't take, each on its backoff, with no session. A workspace whose Flight Deck app can't
+    // mint waits.
+    const usable = new Set<string>();
+    for (const entry of await this.state.sessions()) {
+      const repo = entry.state === "apply_waiting" ? repoNamed(config, entry.repo) : null;
+      if (repo !== null && !usable.has(repo.workspace) && (await this.tokens.usable(now, config, repo.workspace, trouble))) usable.add(repo.workspace);
+    }
+    const ready = (name: string) => {
+      const repo = repoNamed(config, name);
+      return repo !== null && usable.has(repo.workspace) ? repo : null;
+    };
+    await this.applyWaiting.retry(now, this.outbox(now, config), ready, workspace);
     const credentials = await this.checkCredentials(trouble);
     checkSharedTeams(config, trouble);
 
@@ -296,13 +306,24 @@ export class Poll {
         continue;
       }
       await this.tracker.revoke({ id: entry.id, repo });
-      if (!(await this.tokens.usable(now, config, repo.workspace, trouble))) {
-        // The Flight Deck app can't mint, so the outbox waits for the first poll whose mint works.
+      const usable = await this.tokens.usable(now, config, repo.workspace, trouble);
+      if (!usable && exit.kind !== "exited") {
+        // The Flight Deck app can't mint, and this exit's handling reads or writes Linear, so the exit waits in the
+        // queue for the first poll whose mint works.
         await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind} waits for a Linear token for ${repo.workspace}`);
         waiting.push({ session, exit });
         continue;
       }
       await this.usage.spent(now, config, exit);
+      if (!usable) {
+        // A handoff the runner can't apply yet waits as `apply_waiting`, with its outbox kept (ADR 0005).
+        await workspace.dispose({ session: entry.id, worktree: entry.worktree }, { keepFolder: true });
+        const sessionFolder = paths.sessionFolder(this.folders, entry.id);
+        const kept = applyWaitingEntry(entry, { folder: sessionFolder, phase: "apply", now });
+        await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? kept : each)));
+        await this.state.log(now, `${entry.id} ${entry.issue}: no Linear token for ${repo.workspace}, the outbox waits to apply`);
+        continue;
+      }
 
       const sessionFolder = paths.sessionFolder(this.folders, entry.id);
       const { transcript, claudeCodeVersion: _, error, costUsd: __, ...kind } = exit;
