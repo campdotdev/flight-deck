@@ -119,6 +119,35 @@ describe("missing_status", () => {
     expect(await nextTick()).toEqual([{ kind: "comment", issue: "SHA-1", body: `🟡 Needs your help: ${title}\n\n${FOOTER}` }]);
   });
 
+  test("a cleared comment Linear didn't take posts at the next poll", async () => {
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    await world.tick();
+    world.tracker.renameStatus("SHA", "Plan", "Planning");
+    world.tracker.refuse("post");
+    expect(await nextTick()).toEqual([]);
+    expect(await nextTick()).toEqual([
+      { kind: "comment", issue: "SHA-1", body: `🟢 Fixed: Linear status Planning is back.\n\nThis repo's sessions start again at the next poll.\n\n${FOOTER}` },
+    ]);
+    expect(await nextTick()).toEqual([]);
+  });
+
+  test("a reopened comment Linear didn't take posts at the next poll, flagged when the issue is unassigned", async () => {
+    const title = "Linear status Planning is missing: rename it back or rerun setup";
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    await world.tick();
+    world.tracker.renameStatus("SHA", "Plan", "Planning");
+    await world.tick();
+    world.tracker.setAssignee("SHA-1", null);
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    world.tracker.refuse("post");
+    expect(await nextTick()).toEqual([]);
+    expect(await nextTick()).toEqual([
+      { kind: "assign", issue: "SHA-1", user: world.maintainer.id },
+      { kind: "comment", issue: "SHA-1", body: `🟡 Needs your help: ${title}\n\n${FOOTER}` },
+    ]);
+    expect(await nextTick()).toEqual([]);
+  });
+
   test("once the maintainer closes the issue, the cause opening again files a new one", async () => {
     world.tracker.renameStatus("SHA", "Planning", "Plan");
     await world.tick();

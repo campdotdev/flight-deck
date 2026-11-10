@@ -142,6 +142,8 @@ export class Trouble {
     for (const entry of this.entries) {
       const k = key(entry.cause, entry.id);
       const assigned = await this.sync(context, entry);
+      // A cleared or reopened comment an earlier poll couldn't post goes first.
+      for (const issue of entry.issues) if (issue.unposted !== undefined) await this.comment(context, issue, issue.unposted, save);
       const opening = this.opened.get(k);
       if (opening !== undefined) {
         const reopened = !entry.open;
@@ -168,10 +170,8 @@ export class Trouble {
         }
         const cleared = clearedText(entry, this.cleared.get(k) ?? {});
         for (const issue of cleared === null ? [] : entry.issues) {
-          const repo = context.repos.get(issue.repo);
-          if (repo === undefined) continue;
-          const comment = await runnerComment({ statusLine: cleared!.statusLine, sentences: cleared!.sentence, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses });
-          await this.attempt(log, `${issue.identifier}: cleared comment`, () => context.tracker.post({ id: issue.id, repo }, comment.body, { flag: false }));
+          const comment = await runnerComment({ statusLine: cleared!.statusLine, sentences: cleared!.sentence, flag: null, answers: null }, {}, { version: context.version });
+          await this.comment(context, issue, { body: comment.body, flag: false }, save);
         }
       }
       if (!entry.open && entry.unfiled !== undefined && entry.unfiled.length > 0) await this.fileLate(context, entry, assigned, save);
@@ -236,13 +236,8 @@ export class Trouble {
       if (repo === undefined) continue;
       let issue = entry.issues.find((each) => each.repo === name);
       if (issue !== undefined && reopened !== null) {
-        const unassigned = reopened.get(issue.id) === false;
-        if (unassigned) await this.rememberFlag(context, issue);
-        const comment = await runnerComment({ statusLine: `🟡 Needs your help: ${issue.title}`, sentences: null, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses });
-        const target = issue;
-        const posted = await this.attempt(log, `${issue.identifier}: reopened comment`, () => context.tracker.post({ id: target.id, repo }, comment.body, { flag: unassigned }));
-        if (posted !== null && unassigned) issue.flagged = true;
-        await save();
+        const comment = await runnerComment({ statusLine: `🟡 Needs your help: ${issue.title}`, sentences: null, flag: null, answers: null }, {}, { version: context.version });
+        await this.comment(context, issue, { body: comment.body, flag: reopened.get(issue.id) === false }, save);
         continue;
       }
       if (issue === undefined) {
@@ -274,6 +269,25 @@ export class Trouble {
     await this.file(context, { ...entry, repos: owed }, text.title, text.body, assigned, save);
     entry.unfiled = owed.filter((repo) => !entry.issues.some((issue) => issue.repo === repo && issue.flagged));
     if (entry.unfiled.length === 0) delete entry.unfiled;
+  }
+
+  /**
+   * Posts a cleared or reopened comment on a trouble issue. One Linear doesn't take, or one for a repo Linear
+   * can't reach this poll, stays in `unposted`, and the next poll tries it again. A flagging comment flags the
+   * issue once it lands.
+   */
+  private async comment(context: SettleContext, issue: TroubleIssue, comment: { body: string; flag: boolean }, save: () => Promise<void>): Promise<void> {
+    issue.unposted = comment;
+    await save();
+    const repo = context.repos.get(issue.repo);
+    if (repo === undefined) return;
+    if (comment.flag) await this.rememberFlag(context, issue);
+    const log = (message: string) => context.state.log(context.now, message);
+    const posted = await this.attempt(log, `${issue.identifier}: trouble comment`, () => context.tracker.post({ id: issue.id, repo }, comment.body, { flag: comment.flag }));
+    if (posted === null) return;
+    delete issue.unposted;
+    if (comment.flag) issue.flagged = true;
+    await save();
   }
 
   /** The flag goes into issue memory before the write, as every runner flag does. Its status line is the title. */
