@@ -154,6 +154,7 @@ describe("the dependency cache", () => {
     await world.push({ ".flight-deck/record.toml": withInstall("sleep 41") }, "Slow", { refresh: false });
     await world.tick();
     expect((await world.status()).jobs).toHaveLength(1);
+    expect(await started("sleep 41")).toBe(true);
 
     await world.stop();
     await world.poll.refreshesEnded();
@@ -172,6 +173,22 @@ describe("the dependency cache", () => {
     await world.poll.refreshesEnded();
   });
 
+  test("a SIGTERM kills a running refresh, and the next start runs it again", async () => {
+    world = await World.create();
+    await world.push({ ".flight-deck/record.toml": withInstall("sleep 43") }, "Slow", { refresh: false });
+    await world.tick();
+    expect((await world.status()).jobs).toHaveLength(1);
+    expect(await started("sleep 43")).toBe(true);
+
+    await world.shutdown();
+    expect(await gone("sleep 43")).toBe(true);
+    world.restart();
+    await world.tick();
+    const status = await world.status();
+    expect(status.repos.map((repo) => repo.cache)).toEqual(["refreshing"]);
+    await world.shutdown();
+  });
+
   test("a repo with no record on its default branch gets no refresh", async () => {
     world = await World.create({ record: null });
     await world.tick();
@@ -185,6 +202,15 @@ describe("the dependency cache", () => {
 async function gone(command: string): Promise<boolean> {
   for (let i = 0; i < 30; i++) {
     if (Bun.spawnSync(["pgrep", "-f", command]).stdout.toString().trim() === "") return true;
+    await Bun.sleep(100);
+  }
+  return false;
+}
+
+/** Whether a process runs the command within 5 seconds: the sandboxed install starts a moment after the refresh. */
+async function started(command: string): Promise<boolean> {
+  for (let i = 0; i < 50; i++) {
+    if (Bun.spawnSync(["pgrep", "-f", command]).stdout.toString().trim() !== "") return true;
     await Bun.sleep(100);
   }
   return false;

@@ -217,12 +217,15 @@ export class Poll {
    * SIGTERM from launchd, at logout, shutdown, or `bootout` (spec 1, "Exits", ADR 0002). The runner stops each
    * running session as `stop` does, but writes no hold marker and posts nothing: it marks each entry `shutdown`,
    * and the next start puts each issue back in its queue with the attempt kept and no comment. `retry_waiting`
-   * and `apply_waiting` entries have no process, so they stay as they are. Last, it revokes the runner's Linear
+   * and `apply_waiting` entries have no process, so they stay as they are. A running cache refresh's process
+   * group dies, and the cache stays at its last good copy (ADR 0021). Last, it revokes the runner's Linear
    * token in each workspace it serves, so a SIGTERM needs no `revokeRunnerTokens` after it.
    */
   shutdown(now: Date): Promise<void> {
     return this.serial(async () => {
       await this.state.log(now, "shutting down on SIGTERM");
+      for (const { job } of this.refreshes.values()) job.kill();
+      await this.refreshesEnded();
       const config = await readConfig(this.folders);
       for (const entry of await this.state.sessions()) {
         if (entry.state !== "running" || entry.pid === null || entry.pid_started_at === null) continue;
