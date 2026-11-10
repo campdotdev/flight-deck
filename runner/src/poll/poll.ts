@@ -5,7 +5,8 @@
 // Each kind of exit has its handler in `exits/`, and each comment the runner writes on its own has its text in
 // `../outbox/runner-comments/`. Later tickets add the team check, moved-out issues, stale takes, trouble,
 // usage, holds, and the start order.
-import { basename } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, join } from "node:path";
 import type { Folders } from "../folders/index.ts";
 import { paths, sessionParts } from "../folders/index.ts";
 import { buildLaunch, type Auth, type Exit, type ExitKind, type Harness, type HarnessSession, type Launch } from "../harness/index.ts";
@@ -14,7 +15,8 @@ import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
 import { failedTwice, type FailedExit } from "../outbox/runner-comments/failed-twice.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from "../outbox/runner-comments/index.ts";
-import { durationMs, readRecord, type RecordResult, type RepoRecord } from "../record/index.ts";
+import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/record.ts";
+import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
 import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
 import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult, type RefreshJob } from "../workspace/index.ts";
@@ -233,10 +235,13 @@ export class Poll {
     if (!fetch.ok) await this.state.log(now, `${registration.name}: fetch failed: ${fetch.error}`);
 
     // 2. Check the team. The record on the default branch names it, or else the registration's copy does.
+    // State keeps the last valid record, for the stale-take limits.
     let record: RecordResult | null = null;
     if (fetch.ok) {
-      const text = await workspace.show(registration, fetch.head, RECORD_PATH);
-      record = text === null ? null : readRecord(text);
+      record = await this.recordAt(workspace, registration, fetch.head);
+      if (record?.ok === true && (await this.state.lastRecord(registration.name))?.commit !== fetch.head) {
+        await this.state.writeLastRecord(registration.name, { commit: fetch.head, read_at: now.toISOString(), record: record.record });
+      }
     }
     if (fetch.ok && record?.ok === true) await this.refreshIfDue(now, registration, record.record, fetch.head, workspace);
     const repo = trackerRepo(config, registration, record?.ok === true ? record.record : null);
@@ -259,6 +264,22 @@ export class Poll {
     }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
     return { registration, tracker: repo, fetch, record, snapshot, waitingForSpecs, blocked };
+  }
+
+  /**
+   * The record at a commit, with every slot entry resolved: a name against the running version's `skills/`,
+   * and a `.claude/skills/` path against the commit (ADR 0014). `null` when the commit holds no record.
+   */
+  private async recordAt(workspace: Workspace, registration: Registration, commit: string): Promise<RecordResult | null> {
+    const text = await workspace.show(registration, commit, RECORD_PATH);
+    if (text === null) return null;
+    const read = readRecord(text);
+    if (!read.ok) return read;
+    return resolveSlots(read.record, {
+      commit,
+      shipped: (name) => existsSync(join(this.versionFolder, "skills", name, "SKILL.md")),
+      inRepo: async (path) => (await workspace.show(registration, commit, `${path}/SKILL.md`)) !== null,
+    });
   }
 
   /**
@@ -421,7 +442,7 @@ export class Poll {
     for (const entry of sessions.filter((each) => each.state === "retry_waiting")) {
       if (free <= 0) break;
       const poll = repos.find((each) => each.registration.name === entry.repo);
-      if (poll === undefined || !poll.fetch.ok || poll.record?.ok !== true || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
+      if (poll === undefined || !poll.fetch.ok || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
       // Nothing starts for a repo while its cache refresh runs, a retry included.
       if (this.refreshes.has(entry.repo)) continue;
       const issue = poll.snapshot.issues.find((each) => each.id === entry.issue_id);
@@ -437,7 +458,7 @@ export class Poll {
 
     const candidates: { poll: RepoPoll; issue: SnapshotIssue }[] = [];
     for (const poll of repos) {
-      if (!poll.fetch.ok || poll.record?.ok !== true || poll.snapshot === null) continue;
+      if (!poll.fetch.ok || poll.snapshot === null) continue;
       // Nothing starts for a repo while its cache refresh runs.
       if (this.refreshes.has(poll.registration.name)) continue;
       for (const issue of poll.snapshot.issues) {
@@ -457,9 +478,8 @@ export class Poll {
    * A retry restarts in place, so the issue already sits in the working status and no take happens.
    */
   private async start(now: Date, config: Config, poll: RepoPoll, issue: SnapshotIssue, workspace: Workspace, retry?: SessionEntry): Promise<void> {
-    if (!poll.fetch.ok || poll.record?.ok !== true || poll.tracker === null) return;
+    if (!poll.fetch.ok || poll.tracker === null) return;
     const registration = poll.registration;
-    const record: RepoRecord = poll.record.record;
     const repo = poll.tracker;
     const stage: Stage = "plan";
     const id = await workspace.newSessionId();
@@ -495,8 +515,15 @@ export class Poll {
       await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
     }
 
-    // 2. The record at the commit the session starts from: the default branch's tip at this poll.
+    // 2. The record at the commit the session starts from: the default branch's tip at this poll. A retry reads
+    // it again at its own commit. A missing, invalid, or too-new record pauses the issue and uses no retry.
     const commit = poll.fetch.head;
+    const read = await this.recordAt(workspace, registration, commit);
+    if (read?.ok !== true) {
+      await this.runnerPause(now, repo, entry, recordPause(read, poll.fetch.branch, this.version), {}, workspace);
+      return;
+    }
+    const record: RepoRecord = read.record;
     const deadline = new Date(now.getTime() + durationMs(record.time_limits.plan)).toISOString();
     const linear = config.linear[repo.workspace];
     const full = await this.tracker.issue(issue);
@@ -677,6 +704,13 @@ function auth(config: Config): Auth {
 /** Spec 1 takes only standalone issues: one with a parent or sub-issues waits for spec 4 (ADR 0004). */
 function hasSpec(issue: SnapshotIssue): boolean {
   return issue.parent !== null || issue.children > 0;
+}
+
+/** The pause for a record a session can't start from: missing, newer than the runner, or invalid. */
+function recordPause(read: Exclude<RecordResult, { ok: true }> | null, branch: string, version: string): RunnerText {
+  if (read === null) return noRecord(branch);
+  if (read.reason === "newer") return newerRecord(branch, read.schema, RUNNER_SCHEMA, version);
+  return invalidRecord(branch, read.errors);
 }
 
 /** Urgent first, and no priority after Low. */

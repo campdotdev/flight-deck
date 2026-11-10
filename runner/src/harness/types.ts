@@ -53,15 +53,40 @@ export type ExitKind =
  */
 export type Exit = ExitKind & { transcript: string; claudeCodeVersion: string; error?: string };
 
-/** One `rate_limit_event` from the stream. The Harness contract suite's fixtures pin its fields. */
+/** One window of a `rate_limit_event`, such as `five_hour` or `seven_day`. */
+export interface RateLimitWindow {
+  /** A fraction of the window: 0.04 is 4%. */
+  utilization: number | null;
+  /** ISO time. The stream gives Unix seconds. */
+  resetsAt: string | null;
+  /** `allowed` or `rejected`. */
+  status: string | null;
+}
+
+/**
+ * One `rate_limit_event` from the stream: its `rate_limit_info`, with each time as ISO. The fixtures in
+ * `test/harness/fixtures/`, which the Harness contract suite records, pin its fields.
+ */
 export interface RateLimitEvent {
-  [field: string]: unknown;
+  /** `allowed`, or `rejected` when the session hit a plan limit. */
+  status: string;
+  /** `rateLimitType`, the window the event is about, such as `five_hour`. */
+  type: string | null;
+  /** When that window resets, as an ISO time. */
+  resetsAt: string | null;
+  /** `unifiedWindows`, by name: `five_hour` and `seven_day`. */
+  windows: Record<string, RateLimitWindow>;
 }
 
 /** What a running session reports. The runner queues each exit and handles it at the next tick. */
 export interface SessionEvents {
   exit(exit: Exit): void;
   rateLimit(event: RateLimitEvent): void;
+  /**
+   * Claude Code warned that its login expires soon, with the warning's text. Reported at most once per session.
+   * The runner opens the trouble cause `claude_login_soon` on it (FLD-106 passes it).
+   */
+  loginExpiring?(warning: string): void;
 }
 
 export interface Harness {

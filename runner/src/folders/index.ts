@@ -55,6 +55,8 @@ export const paths = {
   files: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "files"),
   /** The repo's last cache refresh: its commit, when it started, and whether it passed. */
   refresh: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "refresh.json"),
+  /** The last valid record the runner read on the repo's default branch. */
+  lastRecord: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "record.json"),
   issues: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "issues"),
   issueMemory: (f: Folders, repo: string, uuid: string) => join(f.data, "repos", repoPath(repo), "issues", `${uuid}.json`),
 

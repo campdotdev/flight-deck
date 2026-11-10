@@ -160,6 +160,9 @@ export class World {
     await symlink(process.execPath, join(versionFolder, "bin", "flight-deck"));
     await mkdir(join(versionFolder, "vendor"), { recursive: true });
     await symlink(VENDOR_SANDBOX_RUNTIME, join(versionFolder, "vendor", "sandbox-runtime"));
+    // The shipped skill Shaders' record names in `plan.reproduce`, so its slot resolves.
+    await mkdir(join(versionFolder, "skills", "reproducing-bugs"), { recursive: true });
+    await writeFile(join(versionFolder, "skills", "reproducing-bugs", "SKILL.md"), "---\nname: reproducing-bugs\n---\n");
     const remote = join(root, "remote.git");
     const commit = await makeRemote(root, remote, options.record === undefined ? SHADERS_RECORD : options.record);
     const world = new World(root, folders, versionFolder, remote, commit);
