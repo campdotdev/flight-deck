@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { readJson, writeJson, type State } from "../state/index.ts";
-import { IssueNotFoundError, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
+import { IssueNotFoundError, isUnavailable, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
 import { duplicateLine, followUpFooter, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope } from "./envelope.ts";
@@ -60,7 +60,23 @@ const OPEN_TYPES = new Set(["backlog", "unstarted", "started", "triage"]);
 export class Outbox {
   constructor(private readonly options: OutboxOptions) {}
 
+  /**
+   * Checks the outbox, then makes each write that `applied.json` doesn't record yet. A read or write Linear
+   * doesn't take (`TrackerUnavailable`) stops it with `unwritten` and the writes that landed, so a later apply
+   * on the same folder finishes the rest.
+   */
   async apply(sessionFolder: string, options: ApplyOptions): Promise<ApplyResult> {
+    const writes: string[] = [];
+    try {
+      return await this.applyWrites(sessionFolder, options, writes);
+    } catch (error) {
+      if (isUnavailable(error)) return { result: "unwritten", writes };
+      throw error;
+    }
+  }
+
+  /** `apply`, pushing each write's name onto `writes` as it lands. */
+  private async applyWrites(sessionFolder: string, options: ApplyOptions, writes: string[]): Promise<ApplyResult> {
     const session = JSON.parse(await readFile(sessionParts(sessionFolder).sessionJson, "utf8")) as SessionJson;
     const repo = this.options.repo(session.repo);
     if (repo === null) return { result: "failed", rule: `${session.repo} isn't registered on this Mac`, writes: [] };
@@ -201,7 +217,6 @@ export class Outbox {
       ];
     }
 
-    const writes: string[] = [];
     for (const [name, write] of [...uploadSteps, ...steps]) {
       if (applied.writes.includes(name)) continue;
       if (options.dryRun !== true) {

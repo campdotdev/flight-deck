@@ -2,11 +2,8 @@
 // working status, or was deleted, archived, or moved to another team, the runner stops the session and
 // discards its outbox. Pushed commits and other writes stay. The maintainer moved the issue, so the runner
 // posts nothing and uses no retry.
-import { join } from "node:path";
-import { paths, type Folders } from "../folders/index.ts";
-import { readJson, type SessionEntry, type State } from "../state/index.ts";
+import type { SessionEntry, State } from "../state/index.ts";
 import { IssueNotFoundError, type Snapshot, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
-import type { Workspace } from "../workspace/index.ts";
 import { WORKING } from "./stages.ts";
 
 export interface MovedOutContext {
@@ -14,14 +11,14 @@ export interface MovedOutContext {
   repo: TrackerRepo;
   snapshot: Snapshot;
   state: State;
-  workspace: Workspace;
-  folders: Folders;
   /** Asks the Harness to stop a running session because its issue moved out. Its `stopped` exit disposes it. */
   stop(entry: SessionEntry): Promise<void>;
+  /** Discards an `apply_waiting` entry's outbox, its folder, and a kept outbox it applies, and drops the entry. */
+  discard(entry: SessionEntry): Promise<void>;
 }
 
 export async function movedOut(context: MovedOutContext): Promise<void> {
-  const { now, repo, snapshot, state, workspace } = context;
+  const { now, repo, snapshot, state } = context;
   for (const entry of await state.sessions()) {
     if (entry.repo !== repo.name) continue;
     const issue = snapshot.issues.find((each) => each.id === entry.issue_id);
@@ -37,11 +34,11 @@ export async function movedOut(context: MovedOutContext): Promise<void> {
         await drop(state, entry);
         break;
       case "apply_waiting":
-        // Once the move landed, the stage handed off, and the writes after it keep retrying (FLD-100).
-        if (await moveLanded(paths.sessionFolder(context.folders, entry.id))) break;
-        await log("outbox discarded");
-        await workspace.dispose({ session: entry.id, worktree: entry.worktree });
-        await drop(state, entry);
+        // Before the status move landed, the outbox is discarded (ADR 0007). Once it landed, the stage handed off,
+        // and the writes after it keep retrying. A `pause` entry's issue may sit in Paused while the Linear-write
+        // pause's comment waits, and its kept outbox must outlive that, so `ApplyWaiting` settles it (FLD-100).
+        if (entry.apply !== undefined && entry.apply.phase !== "apply") break;
+        await context.discard(entry);
         break;
       case "starting":
       case "shutdown":
@@ -65,11 +62,6 @@ export async function stillWorking(tracker: Tracker, repo: TrackerRepo, entry: S
   }
   const working = WORKING[entry.stage];
   return working !== undefined && issue.role === working && issue.team === repo.team && !issue.archived ? issue : null;
-}
-
-/** Whether the outbox's status move landed, from the writes `applied.json` records. */
-async function moveLanded(sessionFolder: string): Promise<boolean> {
-  return (await readJson<{ writes: string[] }>(join(sessionFolder, "applied.json"), { writes: [] })).writes.includes("move");
 }
 
 async function drop(state: State, entry: SessionEntry): Promise<void> {
