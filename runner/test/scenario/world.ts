@@ -204,6 +204,30 @@ export class World {
     await this.poll.tick(this.now);
   }
 
+  /** `flight-deck hold`, at the clock's time. */
+  async hold(): Promise<void> {
+    await this.poll.hold(this.now);
+  }
+
+  /** `flight-deck start`. */
+  async start(): Promise<void> {
+    await this.poll.start(this.now);
+  }
+
+  /** `flight-deck stop`, at the clock's time. */
+  async stop(): Promise<void> {
+    await this.poll.stop(this.now);
+  }
+
+  /**
+   * `flight-deck hold` or `stop` when the runner doesn't answer: the command writes the hold marker itself, and
+   * the runner reads it at its next start (spec 1, "The runner's socket").
+   */
+  async writeHoldMarker(by: "hold" | "stop"): Promise<void> {
+    await mkdir(join(this.folders.data, "state"), { recursive: true });
+    await writeFile(join(this.folders.data, "state", "hold"), `${JSON.stringify({ by, since: this.now.toISOString() })}\n`);
+  }
+
   /** `status.json`, the state file. */
   async status(): Promise<Status> {
     return JSON.parse(await readFile(join(this.folders.data, "state", "status.json"), "utf8")) as Status;

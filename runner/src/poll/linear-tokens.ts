@@ -74,11 +74,6 @@ export class LinearTokens {
     this.report(now, config, workspace, trouble);
   }
 
-  /** Every workspace a registration names, for the revoke at a clean shutdown. */
-  static workspaces(config: Config): string[] {
-    return [...new Set(config.repos.map((repo) => repo.tracker.workspace))];
-  }
-
   private async mint(now: Date, workspace: string): Promise<TokenState> {
     const failure = this.failures.get(workspace);
     const due = failure === undefined || now.getTime() >= failure.next;

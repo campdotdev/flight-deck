@@ -41,7 +41,13 @@ export const paths = {
   status: (f: Folders) => join(f.data, "state", "status.json"),
   heartbeat: (f: Folders) => join(f.data, "state", "heartbeat"),
   trouble: (f: Folders) => join(f.data, "state", "trouble.json"),
+  /** Present while `hold` or `stop` holds the runner (ADR 0024). */
+  holdMarker: (f: Folders) => join(f.data, "state", "hold"),
   log: (f: Folders) => join(f.data, "state", "runner.log"),
+  /** Each usage hold and the latest `rate_limit_event`, so a hold survives a restart. */
+  holds: (f: Folders) => join(f.data, "state", "holds.json"),
+  /** On an API key, the day's and the month's spending. */
+  spend: (f: Folders) => join(f.data, "state", "spend.json"),
   handRuns: (f: Folders) => join(f.data, "hand-runs"),
 
   repo: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo)),

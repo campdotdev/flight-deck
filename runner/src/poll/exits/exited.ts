@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { sessionParts } from "../../folders/index.ts";
 import type { ApplyResult } from "../../outbox/index.ts";
+import { stillWorking } from "../moved-out.ts";
 import { WORKING } from "../stages.ts";
 import type { ExitContext, ExitHandler } from "./context.ts";
 
@@ -20,8 +21,8 @@ const RESULTS: ResultHandlers = {
 };
 
 export const exited: ExitHandler = async (context) => {
-  const issue = await context.tracker.issue({ id: context.entry.issue_id, repo: context.repo });
-  if (issue.role !== WORKING[context.entry.stage]) {
+  // A deleted, archived, or moved issue counts as moved out too.
+  if ((await stillWorking(context.tracker, context.repo, context.entry)) === null) {
     await context.log(`left ${WORKING[context.entry.stage]}, outbox discarded`);
     return context.finish();
   }

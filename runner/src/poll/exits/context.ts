@@ -1,6 +1,7 @@
 // What an exit handler gets: the session's entry and exit, the ports, and the steps every handler shares
 // (spec 1, "Exits"). The Poll builds one context per exit at the start of the next tick.
 import type { Exit } from "../../harness/index.ts";
+import type { Config } from "../../install/index.ts";
 import type { ApplyResult } from "../../outbox/index.ts";
 import type { FailedExit } from "../../outbox/runner-comments/failed-twice.ts";
 import type { RunnerFacts, RunnerText } from "../../outbox/runner-comments/index.ts";
@@ -12,6 +13,8 @@ export interface ExitContext {
   now: Date;
   entry: SessionEntry;
   exit: Exit;
+  /** `config.toml`, as this tick read it. */
+  config: Config;
   repo: TrackerRepo;
   /** The Tracker adapter, as the Flight Deck app. */
   tracker: Tracker;
