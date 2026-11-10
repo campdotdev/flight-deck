@@ -152,7 +152,7 @@ export interface Restart {
 
 /** One issue's memory, keyed by Linear's UUID. Later tickets add more. */
 export interface IssueMemory {
-  /** The brief the runner last wrote for the issue, or `null`. */
+  /** The brief the runner last wrote for the issue, as the description shows it above the report fold, or `null`. */
   brief: string | null;
   /** The current flag, or `null`. */
   flag: Flag | null;

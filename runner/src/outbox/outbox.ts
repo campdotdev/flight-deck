@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { readJson, writeJson, type Answer, type IssueMemory, type State } from "../state/index.ts";
-import { IssueNotFoundError, isUnavailable, TrackerRefused, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
+import { briefText, IssueNotFoundError, isUnavailable, TrackerRefused, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
 import { duplicateLine, followUpFooter, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope, type Envelope } from "./envelope.ts";
@@ -262,8 +262,10 @@ export class Outbox {
           "writeBrief",
           async (applied) => {
             const memory = await state.issueMemory(session.repo, issue.id);
-            await tracker.writeBrief(ref, embedImages(brief, applied.uploads), { runnerWroteBrief: memory.brief !== null });
-            await this.memory.write(session.repo, issue.id, { brief });
+            const embedded = embedImages(brief, applied.uploads);
+            await tracker.writeBrief(ref, embedded, { runnerWroteBrief: memory.brief !== null });
+            // The brief as the description shows it, so the next re-plan tells the maintainer's edits from plan's text.
+            await this.memory.write(session.repo, issue.id, { brief: briefText(embedded) });
             return null;
           },
         ],
