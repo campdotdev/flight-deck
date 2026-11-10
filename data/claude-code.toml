@@ -1,0 +1,22 @@
+# Facts about Claude Code that each Flight Deck version pins (spec 1, "Install" and "Watchdogs and exits").
+
+# The oldest Claude Code this version runs. Until spec 1's Shaders run sets it, it holds the version on the
+# maintainer's Mac when spec 1's build started (checked 2026-11-10).
+min_version = "2.1.321"
+
+# PLACEHOLDER until the Harness contract suite (FLD-116) records the real text by running a session with a revoked
+# CLAUDE_CODE_OAUTH_TOKEN. Each entry is a JavaScript regular expression. A `result` event with `is_error`, or an
+# `assistant` message with an `error`, that matches one ends the session with `login_expired` (ADR 0005).
+login_expired_patterns = [
+  "Login expired",
+  "OAuth token has expired",
+  "OAuth token has been revoked",
+  "Please run /login",
+]
+
+# PLACEHOLDER until the Harness contract suite (FLD-116) records Claude Code's warning that the login expires soon.
+# Each entry is a JavaScript regular expression, matched against each line of stderr and each `system` event other
+# than `init`. A match reports `login_expiring`, which opens the trouble cause `claude_login_soon` (ADR 0005).
+login_expiring_patterns = [
+  "login expires (soon|in )",
+]

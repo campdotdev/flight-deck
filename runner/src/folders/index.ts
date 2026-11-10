@@ -49,6 +49,8 @@ export const paths = {
   transcripts: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "transcripts"),
   transcript: (f: Folders, repo: string, session: string) => join(f.data, "repos", repoPath(repo), "transcripts", `${session}.jsonl`),
   cursor: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "cursor.json"),
+  /** The last valid record the runner read on the repo's default branch. */
+  lastRecord: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "record.json"),
   issues: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "issues"),
   issueMemory: (f: Folders, repo: string, uuid: string) => join(f.data, "repos", repoPath(repo), "issues", `${uuid}.json`),
 
