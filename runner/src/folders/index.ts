@@ -48,6 +48,11 @@ export const paths = {
   oldLog: (f: Folders) => join(f.data, "state", "runner.log.1"),
   /** When the daily sweep last ran. */
   sweep: (f: Folders) => join(f.data, "state", "sweep.json"),
+  /** The last passing trial run, with the version it ran on (spec 1, "Install"). */
+  trial: (f: Folders) => join(f.data, "state", "trial.json"),
+  /** Trial runs' transcripts, which the daily sweep deletes after 30 days. */
+  trials: (f: Folders) => join(f.data, "state", "trials"),
+  trialTranscript: (f: Folders, session: string) => join(f.data, "state", "trials", `${session}.jsonl`),
   /** Each usage hold and the latest `rate_limit_event`, so a hold survives a restart. */
   holds: (f: Folders) => join(f.data, "state", "holds.json"),
   /** On an API key, the day's and the month's spending. */

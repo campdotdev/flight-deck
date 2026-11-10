@@ -20,6 +20,7 @@ export {
   type Spend,
   type Stage,
   type StopCause,
+  type TrialPass,
   type StoredHold,
 } from "./state.ts";
 export type * from "./status.ts";
