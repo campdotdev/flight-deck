@@ -1,12 +1,9 @@
 // The dependency cache at the seam: a refresh before a repo's first session and after its default branch
 // moves, the sessions a running refresh holds back, and a failed refresh (spec 1, "Workspace" and "Starts").
-import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SHADERS_RECORD, World } from "./world.ts";
-
-// Each of these runs several real refreshes and many polls.
-setDefaultTimeout(30_000);
 
 let world: World;
 

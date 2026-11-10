@@ -29,7 +29,7 @@ test("a rate-limited snapshot skips its repo until the next poll, and the other 
 
   await world.tick();
   expect(world.harness.started.map((each) => each.session.issue)).toEqual([docs.identifier, shaders.identifier]);
-}, 30_000);
+});
 
 test("a take Linear doesn't take holds no place under the cap, and the next poll takes the issue", async () => {
   world.config.concurrency_cap = 1;
@@ -49,4 +49,4 @@ test("a take Linear doesn't take holds no place under the cap, and the next poll
   expect(world.harness.started.map((each) => each.session.issue)).toEqual([first.identifier]);
   expect(world.tracker.stored(first.id).status).toBe("Planning");
   expect((await world.status()).sessions.map(({ issue, state }) => [issue, state])).toEqual([[first.identifier, "running"]]);
-}, 30_000);
+});

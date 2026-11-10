@@ -251,5 +251,5 @@ describe("a retry", () => {
     expect(world.harness.started.map(({ sessionJson }) => sessionJson.attempt)).toEqual([1, 1]);
     await world.tick();
     expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
-  }, 30_000);
+  });
 });

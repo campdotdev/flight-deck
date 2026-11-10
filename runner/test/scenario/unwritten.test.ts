@@ -94,7 +94,7 @@ describe("the backoff", () => {
     expect(afterTake(issue).map((write) => write.kind)).toEqual(["description"]);
     await tickAt([1]);
     expect(afterTake(issue).map((write) => write.kind)).toEqual(["description", "comment", "move"]);
-  }, 30_000);
+  });
 
   test("an apply_waiting entry takes no place under the cap", async () => {
     world.config.concurrency_cap = 1;
@@ -173,7 +173,7 @@ describe("after 3 hours", () => {
     // A later poll leaves it alone while the issue stays paused.
     await world.tick();
     expect(existsSync(join(kept(issue), "outbox", "outcome.json"))).toBe(true);
-  }, 30_000);
+  });
 
   test("its retry makes the next take apply the kept outbox and start no session", async () => {
     const issue = world.issue({ title: "Save button is blue" });
@@ -187,7 +187,7 @@ describe("after 3 hours", () => {
     expect(world.harness.started).toHaveLength(1);
     expect((await world.status()).sessions).toEqual([]);
     expect(existsSync(kept(issue))).toBe(false);
-  }, 30_000);
+  });
 
   test("from an older version, its next take after the retry deletes it and starts a fresh session", async () => {
     const issue = world.issue({ title: "Save button is blue" });
@@ -204,7 +204,7 @@ describe("after 3 hours", () => {
     expect(world.harness.started[1]!.sessionJson).toMatchObject({ version: "0.1.0-dev.20261111T000000Z", attempt: 1 });
     expect(world.tracker.stored(issue.id).status).toBe("Planning");
     expect((await world.status()).sessions.map(({ issue: id, state }) => ({ id, state }))).toEqual([{ id: issue.identifier, state: "running" }]);
-  }, 30_000);
+  });
 
   test("a hand move back to Ready to plan applies the kept outbox too", async () => {
     const issue = world.issue({ title: "Save button is blue" });
@@ -213,7 +213,7 @@ describe("after 3 hours", () => {
     await world.tick();
     expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
     expect(world.harness.started).toHaveLength(1);
-  }, 30_000);
+  });
 
   test("any other move out of Paused deletes the kept folder, so the next take starts a session", async () => {
     const issue = world.issue({ title: "Save button is blue" });
@@ -226,7 +226,7 @@ describe("after 3 hours", () => {
     await world.tick();
     expect(world.harness.started).toHaveLength(2);
     expect(world.tracker.stored(issue.id).status).toBe("Planning");
-  }, 30_000);
+  });
 
   test("a pause Linear won't take either keeps the entry, and the pause is tried on the same backoff", async () => {
     const issue = world.issue({ title: "Save button is blue" });
@@ -240,7 +240,7 @@ describe("after 3 hours", () => {
     expect(world.tracker.stored(issue.id).status).toBe("Paused");
     expect((await world.status()).sessions).toEqual([]);
     expect(existsSync(join(kept(issue), "outbox", "outcome.json"))).toBe(true);
-  }, 30_000);
+  });
 });
 
 const WITH_FOLLOW_UP = { ...BRIEF, "follow-ups/1.md": "# Cancel is blue too\n\nThe Cancel button has the same blue." };
@@ -272,7 +272,7 @@ describe("a write after the move", () => {
     expect(existsSync(kept(issue))).toBe(false);
     await world.tick();
     expect(afterTake(issue).map((write) => write.kind)).toEqual(["description", "comment", "move"]);
-  }, 30_000);
+  });
 });
 
 describe("an issue the maintainer moves while its apply waits", () => {
@@ -321,5 +321,5 @@ describe("an issue the maintainer moves while its apply waits", () => {
     await world.tick();
     expect(world.harness.started).toHaveLength(2);
     expect(world.tracker.stored(issue.id).status).toBe("Planning");
-  }, 30_000);
+  });
 });

@@ -1,13 +1,10 @@
 // The usage holds (spec 1's "Holds" and "Exits", ADRs 0002 and 0007): the runner holds itself short of the
 // plan limits on a subscription, keeps under the spending caps on an API key, and restarts a session that hit a
 // plan limit without using the stage's retry.
-import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { RateLimitEvent } from "../../src/harness/index.ts";
 import type { StoredIssue } from "../../src/tracker/index.ts";
 import { outbox, World } from "./world.ts";
-
-// Each scenario runs many ticks, and each tick fetches with real git.
-setDefaultTimeout(30_000);
 
 let world: World;
 

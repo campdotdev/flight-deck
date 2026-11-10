@@ -1,11 +1,9 @@
 // When the daily sweep runs, and what it leaves alone (spec 1, "Workspace"). Times are in the Mac's time zone.
-import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { World } from "./world.ts";
-
-setDefaultTimeout(30_000);
 
 let world: World;
 

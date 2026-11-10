@@ -1,10 +1,7 @@
 // Claude Code's login (spec 1, "Exits", "Trouble issues", ADR 0005): an expired login holds the runner until a
 // trial run passes, and a warning that it expires soon files a trouble issue and holds nothing.
-import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { outbox, World } from "./world.ts";
-
-// Each scenario runs many ticks, and each tick fetches with real git.
-setDefaultTimeout(30_000);
 
 let world: World;
 
