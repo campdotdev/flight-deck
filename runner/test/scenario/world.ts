@@ -194,6 +194,11 @@ export class World {
     await this.poll.stop(this.now);
   }
 
+  /** SIGTERM from launchd, at logout, shutdown, or `bootout`, at the clock's time. */
+  async shutdown(): Promise<void> {
+    await this.poll.shutdown(this.now);
+  }
+
   /**
    * `flight-deck hold` or `stop` when the runner doesn't answer: the command writes the hold marker itself, and
    * the runner reads it at its next start (spec 1, "The runner's socket").

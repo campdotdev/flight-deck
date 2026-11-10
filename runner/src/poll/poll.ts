@@ -19,7 +19,7 @@ import { stopPause } from "../outbox/runner-comments/stop.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from "../outbox/runner-comments/index.ts";
 import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/record.ts";
 import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
-import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
+import { readJson, State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
 import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
@@ -81,7 +81,7 @@ export class Poll {
   private etcFor: string | null = null;
   /** Whether this runner's first tick ran, which does what the runner does at its start. */
   private started = false;
-  /** `tick`, `hold`, `start`, and `stop` run one at a time, in the order they're called. */
+  /** `tick`, `hold`, `start`, `stop`, and `shutdown` run one at a time, in the order they're called. */
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(options: PollOptions) {
@@ -139,10 +139,35 @@ export class Poll {
         if (entry.state === "running") await this.stopSession(now, entry, "stop");
         if (entry.state === "retry_waiting") await this.pauseStopped(now, config, entry, { session: entry.id, attempt: entry.attempt }, workspace);
       }
-      for (const name of new Set(config.repos.map((registration) => repoOf(config, registration.name)?.workspace))) {
-        if (name !== undefined) await this.tracker.revokeRunnerToken(name);
-      }
+      await this.revokeRunnerTokens(config);
     });
+  }
+
+  /**
+   * SIGTERM from launchd, at logout, shutdown, or `bootout` (spec 1, "Exits", ADR 0002). The runner stops each
+   * running session as `stop` does, but writes no hold marker and posts nothing: it marks each entry `shutdown`,
+   * and the next start puts each issue back in its queue with the attempt kept and no comment. `retry_waiting`
+   * and `apply_waiting` entries have no process, so they stay as they are. Last, it revokes the runner's Linear
+   * token in each workspace it serves.
+   */
+  shutdown(now: Date): Promise<void> {
+    return this.serial(async () => {
+      await this.state.log(now, "shutting down on SIGTERM");
+      const config = await readConfig(this.folders);
+      for (const entry of await this.state.sessions()) {
+        if (entry.state !== "running" || entry.pid === null || entry.pid_started_at === null) continue;
+        await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? { ...each, state: "shutdown" } : each)));
+        await this.harness.stop({ session: entry.id, uuid: entry.claude_uuid ?? "", pid: entry.pid, pidStartedAt: entry.pid_started_at });
+      }
+      await this.revokeRunnerTokens(config);
+    });
+  }
+
+  /** Revokes the runner's Linear token once in each workspace a registration names (ADR 0005). */
+  private async revokeRunnerTokens(config: Config): Promise<void> {
+    for (const name of new Set(config.repos.map((registration) => repoOf(config, registration.name)?.workspace))) {
+      if (name !== undefined) await this.tracker.revokeRunnerToken(name);
+    }
   }
 
   /**
@@ -171,8 +196,9 @@ export class Poll {
     await this.writeEtc(config);
     const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
     if (!this.started) {
-      this.started = true;
+      // A start that a Linear error cut short runs again at the next tick.
       await this.atStart(now, config, workspace);
+      this.started = true;
     }
     await this.handleExits(now, config, workspace);
     const trouble = await Trouble.load(this.state);
@@ -215,20 +241,75 @@ export class Poll {
   // The runner's start.
 
   /**
-   * What the runner does at its start, before its first poll. Under a `stop` marker, written by a `flight-deck
-   * stop` the runner didn't answer, it treats each session in its list as stopped, not failed: it pauses the
-   * issue with the ⚪ stop text and uses no retry (spec 1, "The runner's socket"). An `apply_waiting` entry
-   * keeps retrying, as after a `stop` the runner answered.
+   * What the runner does at its start, before its first poll (spec 1, "Watchdogs and exits" and "Exits", ADR
+   * 0002). It kills each live session in its list first, with its process groups, because its output pipe died
+   * with the old runner. `retry_waiting` and `apply_waiting` entries have no process by design, so they stay as
+   * they are, and a take the list doesn't hold, such as a hand run, is left alone. Then, for each other entry:
+   *
+   * - Under a `stop` marker, written by a `flight-deck stop` the runner didn't answer, each entry but an
+   *   `apply_waiting` one counts as stopped, not failed: the runner pauses the issue with the ⚪ stop text and
+   *   uses no retry (spec 1, "The runner's socket"). Nothing below applies.
+   * - A session whose folder holds `exit.json` ended before the old runner stopped, so its exit is handled as
+   *   usual at this tick: an `exited` exit applies its outbox.
+   * - A `shutdown` entry, which SIGTERM stopped, puts its issue back in its queue at this tick, with the attempt
+   *   kept and no comment, as its `stopped` exit does.
+   * - A `starting` entry whose issue isn't in the working status never took the issue, so it's dropped with no
+   *   retry used. Its Reader token stays live until it expires, because only the old runner held it (ADR 0005).
+   * - Any other session counts as failed: it found no live process, or the runner just killed one.
    */
   private async atStart(now: Date, config: Config, workspace: Workspace): Promise<void> {
-    if ((await this.state.holdMarker())?.by !== "stop") return;
-    // FLD-108 kills any live session first, with its process groups, because its output pipe died with the old runner.
-    for (const entry of await this.state.sessions()) {
-      if (entry.state === "apply_waiting") continue;
-      const facts: RunnerFacts = { session: entry.id, attempt: entry.attempt };
-      if (entry.started_at !== null) facts.transcript = paths.transcript(this.folders, entry.repo, entry.id);
-      await this.pauseStopped(now, config, entry, facts, workspace);
+    const sessions = await this.state.sessions();
+    // A `retry_waiting` or `apply_waiting` entry has no process by design.
+    const listed = sessions.filter((entry) => entry.state !== "retry_waiting" && entry.state !== "apply_waiting");
+    for (const entry of listed) {
+      if (entry.pid === null || entry.pid_started_at === null) continue;
+      const handle = { session: entry.id, uuid: entry.claude_uuid ?? "", pid: entry.pid, pidStartedAt: entry.pid_started_at };
+      const sessionFolder = paths.sessionFolder(this.folders, entry.id);
+      if (await this.harness.killLeftover({ handle, worktree: entry.worktree, sessionFolder })) {
+        await this.state.log(now, `${entry.id} ${entry.issue}: killed, live after a restart`);
+      }
     }
+    if ((await this.state.holdMarker())?.by === "stop") {
+      // A `retry_waiting` entry's issue sits in the working status too, so it pauses as well.
+      for (const entry of sessions) if (entry.state !== "apply_waiting") await this.pauseStopped(now, config, entry, this.restartFacts(entry), workspace);
+      return;
+    }
+    for (const entry of listed) {
+      // An earlier try of this start queued its exit already.
+      if (this.exits.some((queued) => queued.session === entry.id)) continue;
+      const facts = this.restartFacts(entry);
+      const recorded = await readJson<(Exit & { details?: unknown }) | null>(join(paths.sessionFolder(this.folders, entry.id), "exit.json"), null);
+      if (recorded !== null) {
+        // The Claude Code adapter adds `details`, for a person reading the file.
+        const { details: _, ...exit } = recorded;
+        this.exits.push({ session: entry.id, exit });
+        continue;
+      }
+      if (entry.state === "shutdown") {
+        this.exits.push({ session: entry.id, exit: { kind: "stopped", transcript: paths.transcript(this.folders, entry.repo, entry.id), claudeCodeVersion: "" } });
+        continue;
+      }
+      const repo = repoOf(config, entry.repo);
+      if (repo === null) {
+        await this.state.log(now, `${entry.id} ${entry.issue}: no process after a restart, and ${entry.repo} has no Linear sign-in`);
+        await this.finish(entry, workspace);
+        continue;
+      }
+      if (entry.state === "starting" && (await stillWorking(this.tracker, repo, entry)) === null) {
+        await this.state.log(now, `${entry.id} ${entry.issue}: starting before a restart, never taken, dropped`);
+        await this.finish(entry, workspace);
+        continue;
+      }
+      await this.state.log(now, `${entry.id} ${entry.issue}: no process after a restart`);
+      await this.fail(now, repo, entry, { kind: "cut_off", transcript: facts.transcript !== undefined }, facts, workspace);
+    }
+  }
+
+  /** An entry's facts for a runner comment at a restart: the transcript only when its session started. */
+  private restartFacts(entry: SessionEntry): RunnerFacts {
+    const facts: RunnerFacts = { session: entry.id, attempt: entry.attempt };
+    if (entry.started_at !== null) facts.transcript = paths.transcript(this.folders, entry.repo, entry.id);
+    return facts;
   }
 
   /** Ends an entry that has no session to wait for, and pauses its issue with the ⚪ stop text. */
@@ -390,6 +471,7 @@ export class Poll {
       // 6. Flags, and 7. Subscriptions.
       await this.flags(now, tracker, snapshot, handled);
       await this.subscriptions(tracker, snapshot, handled);
+      await this.forgetRestarts(tracker, snapshot);
       // 8. Stale takes.
       stale = await staleTakes({
         now,
@@ -561,6 +643,18 @@ export class Poll {
     }
   }
 
+  /**
+   * The attempt resets to 1 whenever the issue leaves the working status, except when the runner requeues it
+   * (spec 1, "Exits"). So a requeued issue keeps its attempt only while it waits in its queue for the next take.
+   */
+  private async forgetRestarts(repo: TrackerRepo, snapshot: Snapshot): Promise<void> {
+    for (const { uuid, memory } of await this.state.issueMemories(repo.name)) {
+      if (memory.restart === null) continue;
+      if (snapshot.issues.find((issue) => issue.id === uuid)?.role === "ready_to_plan") continue;
+      await this.state.writeIssueMemory(repo.name, uuid, { ...memory, restart: null });
+    }
+  }
+
   // Starts.
 
   private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace, trouble: Trouble): Promise<void> {
@@ -618,6 +712,7 @@ export class Poll {
     const stage: Stage = "plan";
     const id = await workspace.newSessionId();
     const worktree = paths.worktree(this.folders, id);
+    const memory = await this.state.issueMemory(registration.name, issue.id);
     const entry: SessionEntry = {
       id,
       repo: registration.name,
@@ -626,7 +721,8 @@ export class Poll {
       title: issue.title,
       stage,
       mode: "issue",
-      attempt: retry?.attempt ?? 1,
+      // A retry has its attempt. A take after a requeue keeps the attempt the requeue recorded (ADR 0002).
+      attempt: retry?.attempt ?? memory.restart?.attempt ?? 1,
       pid: null,
       pid_started_at: null,
       claude_uuid: null,
@@ -645,6 +741,7 @@ export class Poll {
         await this.dropEntry(id);
         return;
       }
+      if (memory.restart !== null) await this.state.writeIssueMemory(registration.name, issue.id, { ...memory, restart: null });
     } else {
       await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
     }
@@ -661,7 +758,6 @@ export class Poll {
     const deadline = new Date(now.getTime() + durationMs(record.time_limits.plan)).toISOString();
     const linear = config.linear[repo.workspace];
     const full = await this.tracker.issue(issue);
-    const memory = await this.state.issueMemory(registration.name, issue.id);
 
     // 3. Prepare, then the launch. A failure of either is a failed session.
     let prepared;

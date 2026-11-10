@@ -10,6 +10,8 @@ export {
   type PendingComment,
   type Mode,
   type Reply,
+  type Restart,
+  type RestartCause,
   type SessionEntry,
   type SessionState,
   type Stage,
