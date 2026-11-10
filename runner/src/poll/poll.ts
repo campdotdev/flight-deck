@@ -32,6 +32,7 @@ import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
 import { staleTakes } from "./stale-takes.ts";
 import { Trouble } from "./trouble/trouble.ts";
 import { MIN_VERSION, tooOld } from "./trouble/version.ts";
+import { Usage } from "./usage.ts";
 
 export interface PollOptions {
   folders: Folders;
@@ -79,6 +80,7 @@ export class Poll {
   private readonly path: string;
   private readonly lifecycle: Lifecycle;
   private readonly state: State;
+  private readonly usage: Usage;
   /** Exits queue as they happen, and the next tick handles them first. */
   private readonly exits: QueuedExit[] = [];
   /** The `[machine_user]` that `etc/` was last written from, or `null` before this runner's first write. */
@@ -97,6 +99,7 @@ export class Poll {
     this.path = options.path ?? process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
     this.lifecycle = new Lifecycle(options.tracker);
     this.state = new State(options.folders);
+    this.usage = new Usage(this.state);
   }
 
   /** Runs one poll for every registered repo. */
@@ -191,6 +194,8 @@ export class Poll {
     // 10. Trouble.
     const reachable = new Map(repos.flatMap((poll) => (poll.tracker === null ? [] : [[poll.registration.name, poll.tracker] as const])));
     await trouble.settle({ now, tracker: this.tracker, state: this.state, version: this.version, path: this.path, repos: reachable });
+    // 11. Usage.
+    await this.usage.update(now, config);
     await this.publish(now, config, repos, trouble);
   }
 
@@ -270,15 +275,17 @@ export class Poll {
         continue;
       }
       await this.tracker.revoke({ id: entry.id, repo });
+      await this.usage.spent(now, config, exit);
 
       const sessionFolder = paths.sessionFolder(this.folders, entry.id);
-      const { transcript, claudeCodeVersion: _, error, ...kind } = exit;
+      const { transcript, claudeCodeVersion: _, error, costUsd: __, ...kind } = exit;
       const facts: RunnerFacts = { exit: kind as ExitKind, session: entry.id, attempt: entry.attempt, transcript };
       if (error !== undefined) facts.error = error;
       const context: ExitContext = {
         now,
         entry,
         exit,
+        config,
         repo,
         tracker: this.tracker,
         state: this.state,
@@ -394,6 +401,7 @@ export class Poll {
       // 6. Flags, and 7. Subscriptions.
       await this.flags(now, tracker, snapshot, handled);
       await this.subscriptions(tracker, snapshot, handled);
+      await this.forgetRestarts(tracker, snapshot);
       // 8. Stale takes.
       stale = await staleTakes({
         now,
@@ -565,13 +573,31 @@ export class Poll {
     }
   }
 
+  /**
+   * The attempt resets to 1 whenever the issue leaves the working status, except when the runner requeues it
+   * (spec 1, "Exits"). So a requeued issue keeps its attempt only while it waits in its queue for the next take.
+   */
+  private async forgetRestarts(repo: TrackerRepo, snapshot: Snapshot): Promise<void> {
+    for (const { uuid, memory } of await this.state.issueMemories(repo.name)) {
+      if (memory.restart === null) continue;
+      if (snapshot.issues.find((issue) => issue.id === uuid)?.role === "ready_to_plan") continue;
+      await this.state.writeIssueMemory(repo.name, uuid, { ...memory, restart: null });
+    }
+  }
+
   // Starts.
 
   private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace, trouble: Trouble): Promise<void> {
     const sessions = await this.state.sessions();
+    let running = sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
     const busy = new Set(sessions.map((entry) => entry.issue_id));
     for (const poll of repos) await this.blockers(now, poll, busy);
-    let free = config.concurrency_cap - sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
+    let free = config.concurrency_cap - running;
+    /** Whether one more session may start: a free place under the cap, and on an API key, room under each cap. */
+    const room = async () => free > 0 && (await this.usage.fits(now, config, running));
+    // The cap test runs before the holds are read, so a cap that fits again ends its `api_cap` hold, and one that
+    // doesn't holds the runner from this poll.
+    await this.usage.fits(now, config, running);
 
     // Before each start, Claude Code's version (ADR 0015).
     const work = sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
@@ -587,13 +613,14 @@ export class Poll {
 
     // A retry waiting for a free place starts before any new take.
     for (const entry of sessions.filter((each) => each.state === "retry_waiting")) {
-      if (free <= 0) break;
+      if (!(await room())) break;
       const poll = startable.find((each) => each.registration.name === entry.repo);
       if (poll === undefined || !poll.fetch.ok || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
       const issue = poll.snapshot.issues.find((each) => each.id === entry.issue_id);
       // Step 4 dropped the retry of an issue that left its working status.
       if (issue === undefined || issue.role !== WORKING[entry.stage]) continue;
       free--;
+      running++;
       await this.startSession(now, config, poll, issue, workspace, entry);
     }
 
@@ -611,8 +638,9 @@ export class Poll {
       (a, b) => priorityRank(a.issue) - priorityRank(b.issue) || b.issue.unblocks - a.issue.unblocks || a.issue.created_at.localeCompare(b.issue.created_at),
     );
     for (const { poll, issue } of candidates) {
-      if (free <= 0) break;
+      if (!(await room())) break;
       free--;
+      running++;
       await this.startSession(now, config, poll, issue, workspace);
     }
   }
@@ -646,6 +674,7 @@ export class Poll {
     const stage: Stage = "plan";
     const id = await workspace.newSessionId();
     const worktree = paths.worktree(this.folders, id);
+    const memory = await this.state.issueMemory(registration.name, issue.id);
     const entry: SessionEntry = {
       id,
       repo: registration.name,
@@ -654,7 +683,8 @@ export class Poll {
       title: issue.title,
       stage,
       mode: "issue",
-      attempt: retry?.attempt ?? 1,
+      // A retry has its attempt. A take after a requeue keeps the attempt the requeue recorded (ADR 0002).
+      attempt: retry?.attempt ?? memory.restart?.attempt ?? 1,
       pid: null,
       pid_started_at: null,
       claude_uuid: null,
@@ -673,6 +703,7 @@ export class Poll {
         await this.dropEntry(id);
         return;
       }
+      if (memory.restart !== null) await this.state.writeIssueMemory(registration.name, issue.id, { ...memory, restart: null });
     } else {
       await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
     }
@@ -689,7 +720,6 @@ export class Poll {
     const deadline = new Date(now.getTime() + durationMs(record.time_limits.plan)).toISOString();
     const linear = config.linear[repo.workspace];
     const full = await this.tracker.issue(issue);
-    const memory = await this.state.issueMemory(registration.name, issue.id);
 
     // 3. Prepare, then the launch. A failure of either is a failed session.
     let prepared;
@@ -757,8 +787,7 @@ export class Poll {
     };
     const handle = await this.harness.start(session, {
       exit: (exit) => void this.exits.push({ session: id, exit }),
-      // FLD-105 turns each event into the plan-limit hold.
-      rateLimit: () => {},
+      rateLimit: (event) => this.usage.report(event),
     });
     const running: SessionEntry = {
       ...entry,
@@ -817,16 +846,7 @@ export class Poll {
         deadline: entry.deadline,
       })),
       jobs: [],
-      usage:
-        config.auth === "api_key"
-          ? {
-              auth: "api_key",
-              day_usd: 0,
-              month_usd: 0,
-              daily_cap_usd: config.api?.daily_cap_usd ?? 0,
-              monthly_cap_usd: config.api?.monthly_cap_usd ?? 0,
-            }
-          : { auth: "subscription", five_hour: null, weekly: null },
+      usage: await this.usage.status(now, config),
       flags: await this.flagList(repos),
       trouble: trouble.status(),
       stale_takes: repos.flatMap((poll) => poll.staleTakes),
