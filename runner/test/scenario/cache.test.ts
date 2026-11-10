@@ -136,6 +136,42 @@ describe("the dependency cache", () => {
     expect((await world.status()).repos.map((repo) => repo.cache)).toEqual(["ok"]);
   });
 
+  test("a held runner starts no refresh, and starts it once the hold ends", async () => {
+    world = await World.create();
+    await world.hold();
+    await world.push({ "src/a.ts": "export {};\n" }, "Change", { refresh: false });
+    await world.tick();
+    expect((await world.status()).jobs).toEqual([]);
+
+    await world.start();
+    await world.tick();
+    expect((await world.status()).jobs).toEqual([{ kind: "cache_refresh", repo: world.repo, started_at: world.now.toISOString() }]);
+    await world.poll.refreshesEnded();
+  });
+
+  test("stop kills a running refresh, which leaves the last good cache and runs again after start", async () => {
+    world = await World.create();
+    await world.push({ ".flight-deck/record.toml": withInstall("sleep 41") }, "Slow", { refresh: false });
+    await world.tick();
+    expect((await world.status()).jobs).toHaveLength(1);
+
+    await world.stop();
+    await world.poll.refreshesEnded();
+    expect(await gone("sleep 41")).toBe(true);
+    await world.tick();
+    let status = await world.status();
+    expect(status.jobs).toEqual([]);
+    // A stop isn't the install failing, so the cache shows its last good copy.
+    expect(status.repos.map((repo) => repo.cache)).toEqual(["ok"]);
+
+    await world.start();
+    await world.tick();
+    status = await world.status();
+    expect(status.jobs).toEqual([{ kind: "cache_refresh", repo: world.repo, started_at: world.now.toISOString() }]);
+    await world.stop();
+    await world.poll.refreshesEnded();
+  });
+
   test("a repo with no record on its default branch gets no refresh", async () => {
     world = await World.create({ record: null });
     await world.tick();
@@ -144,3 +180,12 @@ describe("the dependency cache", () => {
     expect(status.repos.map((repo) => repo.cache)).toEqual(["missing"]);
   });
 });
+
+/** Whether no process runs the command within 3 seconds: a killed process group takes a moment to exit. */
+async function gone(command: string): Promise<boolean> {
+  for (let i = 0; i < 30; i++) {
+    if (Bun.spawnSync(["pgrep", "-f", command]).stdout.toString().trim() === "") return true;
+    await Bun.sleep(100);
+  }
+  return false;
+}

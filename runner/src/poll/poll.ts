@@ -97,6 +97,8 @@ export class Poll {
   private readonly refreshes = new Map<string, RunningRefresh>();
   /** Whether this runner has polled yet, for the sweep at a start. */
   private polled = false;
+  /** Whether a hold on the whole runner holds this poll, which then starts no refresh (ADR 0021). */
+  private heldRunner = false;
   /** Whether this runner's first tick ran, which does what the runner does at its start. */
   private started = false;
   /** `tick`, `hold`, `start`, and `stop` run one at a time, in the order they're called. */
@@ -152,6 +154,8 @@ export class Poll {
     return this.serial(async () => {
       await this.state.writeHoldMarker({ by: "stop", since: now.toISOString() });
       await this.state.log(now, "stopped by flight-deck stop");
+      // A running refresh's process group dies, and the cache stays at its last good copy (ADR 0021).
+      for (const { job } of this.refreshes.values()) job.kill();
       const config = await readConfig(this.folders);
       const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
       for (const entry of await this.state.sessions()) {
@@ -200,6 +204,7 @@ export class Poll {
     const trouble = await Trouble.load(this.state);
     const credentials = await this.checkCredentials(trouble);
     checkSharedTeams(config, trouble);
+    this.heldRunner = (await currentHolds(this.holdContext(now, config, trouble))).some((hold) => hold.scope === "runner");
 
     const repos: RepoPoll[] = [];
     for (const registration of config.repos) repos.push(await this.pollRepo(now, config, credentials, registration, workspace, trouble));
@@ -522,7 +527,7 @@ export class Poll {
    * branch names the install, so a repo without a valid one gets none.
    */
   private async refreshIfDue(now: Date, registration: Registration, record: RepoRecord, head: string, workspace: Workspace): Promise<void> {
-    if (this.refreshes.has(registration.name)) return;
+    if (this.refreshes.has(registration.name) || this.heldRunner) return;
     const { current, last } = await workspace.cacheState(registration.name);
     const due = last === null || last.commit !== head || (last.ok ? !current : now.getTime() - Date.parse(last.at) >= HOUR);
     if (!due) return;

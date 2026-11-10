@@ -190,9 +190,20 @@ describe("refreshCache", () => {
     });
     await Bun.sleep(500);
     job.kill();
+    const before = await workspace.cacheState(REPO);
     expect(await job.done).toEqual({ ok: false, error: "the dependency install was stopped" });
+    // A stop isn't a failed install, so the last refresh stays the one that passed.
+    expect(await workspace.cacheState(REPO)).toEqual(before);
     expect(await readFile(join(cache(), "current", "deps", "node_modules", "pkg", "index.js"), "utf8")).toBe("installed\n");
-    const sleeping = Bun.spawnSync(["pgrep", "-f", "sleep 37"]).stdout.toString().trim();
-    expect(sleeping).toBe("");
+    expect(await gone("sleep 37")).toBe(true);
   });
 });
+
+/** Whether no process runs the command within 3 seconds: a killed process group takes a moment to exit. */
+async function gone(command: string): Promise<boolean> {
+  for (let i = 0; i < 30; i++) {
+    if (Bun.spawnSync(["pgrep", "-f", command]).stdout.toString().trim() === "") return true;
+    await Bun.sleep(100);
+  }
+  return false;
+}

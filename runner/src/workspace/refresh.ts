@@ -44,7 +44,10 @@ export interface RefreshJob {
   startedAt: string;
   /** Resolves once the refresh has ended and cleaned up. */
   done: Promise<RefreshResult>;
-  /** Kills the install's process group. The cache stays at the last good copy. */
+  /**
+   * Stops the refresh and kills the install's process group, for `flight-deck stop` and a SIGTERM. The cache
+   * stays at the last good copy, and the last refresh stays as it was, because a stop isn't a failed install.
+   */
   kill: () => void;
 }
 
@@ -58,6 +61,8 @@ export async function refreshCache(input: RefreshInput): Promise<RefreshJob> {
   const log = join(sessionFolder, "install.log");
   let pid: number | null = null;
   let stopped: string | null = null;
+  /** Whether the refresh's end counts as its last refresh: every end but a stop's. */
+  let counts = true;
   const kill = (why: string) => {
     if (stopped !== null) return;
     stopped = why;
@@ -112,10 +117,14 @@ export async function refreshCache(input: RefreshInput): Promise<RefreshJob> {
       await rm(next, { recursive: true, force: true });
       await rm(worktree, { recursive: true, force: true });
       await rm(sessionFolder, { recursive: true, force: true });
-      await writeJson(paths.refresh(folders, repo.name), { commit, at: input.now.toISOString(), ok: result.ok });
+      if (counts) await writeJson(paths.refresh(folders, repo.name), { commit, at: input.now.toISOString(), ok: result.ok });
       return result;
     });
-  return { repo: repo.name, session, commit, startedAt: input.now.toISOString(), done, kill: () => kill("the dependency install was stopped") };
+  const stop = () => {
+    if (stopped === null) counts = false;
+    kill("the dependency install was stopped");
+  };
+  return { repo: repo.name, session, commit, startedAt: input.now.toISOString(), done, kill: stop };
 }
 
 /** Runs the install under `sandbox-runtime` in its own process group, and resolves with its exit code. */
