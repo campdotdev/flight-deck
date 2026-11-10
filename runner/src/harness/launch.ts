@@ -49,14 +49,14 @@ export interface LaunchInput {
   folders: Folders;
   id: string;
   stage: Stage;
-  /** `owner/repo`. */
+  /** `owner/repo`, or `""` for a trial. */
   repo: string;
-  /** The issue's identifier, which the flow's prompt names. */
+  /** The issue's identifier, which the flow's prompt names, or `""` for a trial. */
   issue: string;
   worktree: string;
   sessionFolder: string;
-  /** The record at the session's commit. */
-  record: Pick<RepoRecord, "sandbox">;
+  /** The record at the session's commit, or `null` for a trial, which has none. */
+  record: Pick<RepoRecord, "sandbox"> | null;
   /** The `env` block from Workspace's `prepare`. Its `PATH` is the outside `PATH` too. */
   env: Record<string, string>;
   /** The stage's model from `config.toml`, or `""` for Claude Code's default. */
@@ -109,15 +109,17 @@ export async function buildLaunch(input: LaunchInput): Promise<Launch> {
   const { folders, worktree, sessionFolder, versionFolder } = input;
   const parts = sessionParts(sessionFolder);
   const flow = FLOWS[input.stage];
-  // A trial's prompt is its instructions, and its mcp.json holds no server (FLD-112).
-  if (flow === undefined) throw new Error(`the Harness can't start a ${input.stage} session yet`);
+  const trial = input.stage === "trial";
+  if (flow === undefined && !trial) throw new Error(`the Harness can't start a ${input.stage} session yet`);
+  if (trial !== (input.record === null)) throw new Error("a trial, and only a trial, starts with no record");
   const uuid = randomUUID();
   const agentsMd = await agentsMdToAppend(worktree, folders.home);
   const bin = paths.bin(versionFolder);
 
   const args = [
     "-p",
-    `/flight-deck:${flow} ${input.issue}`,
+    // A trial's prompt is its instructions (spec 1, "The command line").
+    trial ? trialPrompt(parts.sessionJson, parts.outbox) : `/flight-deck:${flow} ${input.issue}`,
     "--output-format",
     "stream-json",
     "--verbose",
@@ -161,12 +163,15 @@ export async function buildLaunch(input: LaunchInput): Promise<Launch> {
         readOnly(parts.sessionJson),
         readOnly(join(versionFolder, "plugin", "**")),
         ...LINEAR_READ_TOOLS.map((tool) => `mcp__linear__${tool}`),
-        ...unique([...input.record.sandbox.hosts, ...DOCS_HOSTS]).map((host) => `WebFetch(domain:${host})`),
+        ...unique([...(input.record?.sandbox.hosts ?? []), ...DOCS_HOSTS]).map((host) => `WebFetch(domain:${host})`),
       ],
       // WebFetch runs outside the sandbox, and a deny rule outranks any allow rule (ADR 0007).
       deny: GITHUB_HOSTS.map((host) => `WebFetch(domain:${host})`),
     },
-    sandbox: sandboxPolicy({ kind: "session", folders, repo: input.repo, record: input.record, versionFolder, worktree, sessionFolder }),
+    sandbox:
+      input.record === null
+        ? sandboxPolicy({ kind: "trial", folders, versionFolder, worktree, sessionFolder })
+        : sandboxPolicy({ kind: "session", folders, repo: input.repo, record: input.record, versionFolder, worktree, sessionFolder }),
     disableAllHooks: true,
     autoMemoryEnabled: false,
     disableClaudeAiConnectors: true,
@@ -178,8 +183,9 @@ export async function buildLaunch(input: LaunchInput): Promise<Launch> {
   };
 
   // The session ID is an argument, because the helper may not see the `env` block (spec 1, "Session credentials").
+  // A trial gets no Linear server and no Reader token.
   const mcp: McpConfig = {
-    mcpServers: { linear: { type: "http", url: LINEAR_MCP_URL, headersHelper: `${shellWord(bin)} linear-token ${input.id}` } },
+    mcpServers: trial ? {} : { linear: { type: "http", url: LINEAR_MCP_URL, headersHelper: `${shellWord(bin)} linear-token ${input.id}` } },
   };
 
   const path = input.env.PATH;
@@ -207,6 +213,18 @@ export async function writeLaunch(launch: Launch): Promise<void> {
   await writeFile(launch.mcpPath, `${JSON.stringify(launch.mcp, null, 2)}\n`);
   const json = JSON.parse(await readFile(launch.sessionJson, "utf8")) as SessionJson;
   await writeFile(launch.sessionJson, `${JSON.stringify({ ...json, agents_md: launch.agentsMd }, null, 2)}\n`);
+}
+
+/** A trial's prompt: read `session.json`, run `true` in sandboxed Bash, write `summary.md`, and stop. */
+function trialPrompt(sessionJson: string, outbox: string): string {
+  return [
+    "This is a Flight Deck trial run. It checks that a session starts, reads its files, and runs a command in the sandbox.",
+    "",
+    `1. Read ${sessionJson}.`,
+    "2. Run `true` with the Bash tool, inside the sandbox.",
+    `3. Write one line that says the trial ran to ${join(outbox, "summary.md")}.`,
+    "4. Stop.",
+  ].join("\n");
 }
 
 /** Where the Harness records the UUID Claude Code got: `transcripts/<session-id>.uuid`, beside the transcript. */

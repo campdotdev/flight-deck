@@ -26,6 +26,10 @@ export interface TroubleFacts {
   /** The installed Claude Code version, and the oldest this version runs. */
   version?: string;
   minVersion?: string;
+  /** The session that showed the cause, for `claude_login` and `claude_login_soon`. */
+  session?: string;
+  /** Claude Code's warning that its login expires soon. */
+  warning?: string;
   /** The error the runner saw. */
   error?: string;
   /** `credentials.env`'s mode, such as `0640`. */

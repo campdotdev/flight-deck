@@ -33,6 +33,9 @@ import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
 import { staleTakes } from "./stale-takes.ts";
 import { Trouble } from "./trouble/trouble.ts";
 import { MIN_VERSION, tooOld } from "./trouble/version.ts";
+import { notify } from "./trouble/notify.ts";
+import { Trials, type TrialEvents, type TrialResult } from "./trial.ts";
+import { LoginWatch } from "./login.ts";
 import { Usage } from "./usage.ts";
 
 export interface PollOptions {
@@ -91,6 +94,9 @@ export class Poll {
   private started = false;
   /** `tick`, `hold`, `start`, `stop`, and `shutdown` run one at a time, in the order they're called. */
   private queue: Promise<unknown> = Promise.resolve();
+  private readonly trials: Trials;
+  /** Claude Code's login: `claude_login` after an expired login, and `claude_login_soon` after its warning. */
+  private readonly login = new LoginWatch();
 
   constructor(options: PollOptions) {
     this.folders = options.folders;
@@ -109,6 +115,31 @@ export class Poll {
       state: this.state,
       fail: (now, repo, entry, failure, facts, workspace) => this.fail(now, repo, entry, failure, facts, workspace),
     });
+    this.trials = new Trials({
+      folders: options.folders,
+      state: this.state,
+      harness: options.harness,
+      version: options.version,
+      versionFolder: options.versionFolder,
+      events: (id) => ({
+        exit: (exit) => void this.exits.push({ session: id, exit }),
+        rateLimit: (event) => this.usage.report(event),
+        loginExpiring: (warning) => this.login.expiring(id, warning),
+      }),
+    });
+  }
+
+  /**
+   * Asks for a trial run (spec 1, "Trial run"), as `{ "op": "trial" }` does. It starts at the next poll that a
+   * hold and the cap allow, and the promise resolves once it ends, or at once under a hold a trial doesn't run under.
+   */
+  trial(events: TrialEvents = {}): Promise<TrialResult> {
+    return this.trials.request(events);
+  }
+
+  /** Posts a macOS notification the way trouble does, such as install's "Flight Deck can notify you." */
+  notify(text: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    return notify(text, { path: this.path });
   }
 
   /** Runs one poll for every registered repo. */
@@ -216,10 +247,11 @@ export class Poll {
       await this.atStart(now, config, workspace);
       this.started = true;
     }
-    await this.handleExits(now, config, workspace);
+    const trouble = await Trouble.load(this.state);
+    this.login.poll(trouble);
+    await this.handleExits(now, config, workspace, trouble);
     // Outboxes Linear didn't take, each on its backoff, with no session.
     await this.applyWaiting.retry(now, this.outbox(now, config), (name) => repoNamed(config, name), workspace);
-    const trouble = await Trouble.load(this.state);
     const credentials = await this.checkCredentials(trouble);
     checkSharedTeams(config, trouble);
 
@@ -278,10 +310,9 @@ export class Poll {
    * - Any other session counts as failed: it found no live process, or the runner just killed one.
    */
   private async atStart(now: Date, config: Config, workspace: Workspace): Promise<void> {
-    const sessions = await this.state.sessions();
-    // A `retry_waiting` or `apply_waiting` entry has no process by design.
-    const listed = sessions.filter((entry) => entry.state !== "retry_waiting" && entry.state !== "apply_waiting");
-    for (const entry of listed) {
+    // A `retry_waiting` or `apply_waiting` entry has no process by design. A trial's process is killed too.
+    const live = (await this.state.sessions()).filter((entry) => entry.state !== "retry_waiting" && entry.state !== "apply_waiting");
+    for (const entry of live) {
       if (entry.pid === null || entry.pid_started_at === null) continue;
       const handle = { session: entry.id, uuid: entry.claude_uuid ?? "", pid: entry.pid, pidStartedAt: entry.pid_started_at };
       const sessionFolder = paths.sessionFolder(this.folders, entry.id);
@@ -289,6 +320,10 @@ export class Poll {
         await this.state.log(now, `${entry.id} ${entry.issue}: killed, live after a restart`);
       }
     }
+    // A trial an earlier runner left has no one waiting for it, so it goes before the rules below.
+    await this.trials.atStart(now, workspace);
+    const sessions = await this.state.sessions();
+    const listed = sessions.filter((entry) => entry.state !== "retry_waiting" && entry.state !== "apply_waiting");
     if ((await this.state.holdMarker())?.by === "stop") {
       // A `retry_waiting` entry's issue sits in the working status too, so it pauses as well.
       for (const entry of sessions) if (entry.state !== "apply_waiting") await this.pauseStopped(now, config, entry, this.restartFacts(entry), workspace);
@@ -344,13 +379,22 @@ export class Poll {
 
   // Exits.
 
-  private async handleExits(now: Date, config: Config, workspace: Workspace): Promise<void> {
+  private async handleExits(now: Date, config: Config, workspace: Workspace, trouble: Trouble): Promise<void> {
     const queued = this.exits.splice(0);
     if (queued.length === 0) return;
     const outbox = this.outbox(now, config);
     for (const { session, exit } of queued) {
       const entry = (await this.state.sessions()).find((each) => each.id === session);
       if (entry === undefined) continue;
+      this.login.exited(now, entry, exit, trouble);
+      // A trial has no repo, no issue, and no Reader token.
+      if (entry.stage === "trial") {
+        // Its cost counts toward the caps, and a plan limit holds the runner as after any session.
+        await this.usage.spent(now, config, exit);
+        if (exit.kind === "rate_limited") await this.usage.rateLimited(now, config, exit.resetsAt);
+        await this.trials.exited({ now, entry, exit, workspace, trouble });
+        continue;
+      }
       const registration = config.repos.find((repo) => repo.name === entry.repo);
       const repo = registration === undefined ? null : trackerRepo(config, registration, null);
       if (repo === null) {
@@ -697,7 +741,7 @@ export class Poll {
     await this.usage.fits(now, config, running);
 
     // Before each start, Claude Code's version (ADR 0015).
-    const work = sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
+    const work = this.trials.wanted(now, trouble) || sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
     if (trouble.isOpen("claude_code_version", "runner") || (free > 0 && work)) {
       const version = await this.harness.version();
       if (tooOld(version)) trouble.open("claude_code_version", "runner", { scope: "runner", repos: [], facts: { version, minVersion: MIN_VERSION } });
@@ -707,6 +751,13 @@ export class Poll {
     // holds include each trouble cause open this poll, the version's too.
     const holds = await currentHolds(this.holdContext(now, config, trouble));
     const startable = repos.filter((poll) => poll.tracker !== null && !holdsRepo(holds, poll.tracker));
+
+    // A trial takes the first free place, before any retry or take, and runs under most holds. On an API key it
+    // needs room under each cap too.
+    if (await this.trials.start({ now, config, auth: auth(config), holds, free: (await room()) ? free : 0, workspace, trouble })) {
+      free--;
+      running++;
+    }
 
     // A retry waiting for a free place starts before any new take.
     for (const entry of sessions.filter((each) => each.state === "retry_waiting")) {
@@ -886,6 +937,7 @@ export class Poll {
     const handle = await this.harness.start(session, {
       exit: (exit) => void this.exits.push({ session: id, exit }),
       rateLimit: (event) => this.usage.report(event),
+      loginExpiring: (warning) => this.login.expiring(id, warning),
     });
     const running: SessionEntry = {
       ...entry,
