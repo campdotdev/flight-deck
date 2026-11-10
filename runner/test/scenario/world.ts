@@ -1,16 +1,16 @@
 // The scenario harness: the in-memory world at the one seam (spec 1, "The seam"). A scenario builds the world,
 // scripts each session, runs ticks, and asserts on the in-memory Tracker, the scripted Harness, and
 // `status.json`. It never reads or writes the session list or issue memory.
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Folders } from "../../src/folders/index.ts";
 import { ScriptedHarness } from "../../src/harness/index.ts";
 import type { Config } from "../../src/install/index.ts";
 import { Poll } from "../../src/poll/index.ts";
-import type { Role } from "../../src/record/index.ts";
+import { readRecord, type Role } from "../../src/record/index.ts";
 import type { Status } from "../../src/state/index.ts";
 import { InMemoryTracker, type NewIssue, type StatusType, type StoredIssue } from "../../src/tracker/index.ts";
+import { Workspace } from "../../src/workspace/index.ts";
 import { toToml } from "./toml.ts";
 
 /** Shaders' statuses, with the status type Linear gives each. */
@@ -33,10 +33,24 @@ export const STATUSES: Record<Role, [string, StatusType]> = {
 
 const statusNames = Object.fromEntries(Object.entries(STATUSES).map(([role, [name]]) => [role, name])) as Record<Role, string>;
 
-/** Shaders' schema-1 record, without its `[app]` table, because ports come in a later ticket. */
-export const SHADERS_RECORD = (await Bun.file(new URL("../record/fixtures/shaders.toml", import.meta.url)).text()).replace(
-  /\n\[app\]\n(?:[^\n[]*\n)*/,
-  "\n",
+/**
+ * The test record's dependency install: it writes a package into `node_modules` and a blob into pnpm's store,
+ * with only the commands the registration's `PATH` holds.
+ */
+export const INSTALL = 'mkdir -p node_modules/pkg "$pnpm_config_store_dir" && echo installed > node_modules/pkg/index.js && echo stored > "$pnpm_config_store_dir/blob"';
+
+/**
+ * Shaders' schema-1 record, without its `[app]` table, because ports come in a later ticket, and with
+ * `INSTALL` as its dependency install, because the test Mac has no pnpm on the registration's `PATH`.
+ */
+export const SHADERS_RECORD = (await Bun.file(new URL("../record/fixtures/shaders.toml", import.meta.url)).text())
+  .replace(/\n\[app\]\n(?:[^\n[]*\n)*/, "\n")
+  .replace('command = "pnpm install --frozen-lockfile"', `command = '${INSTALL}'`);
+
+/** Shaders' whole schema-1 record, `[app]` included, with `INSTALL` as its dependency install. */
+export const SHADERS_APP_RECORD = (await Bun.file(new URL("../record/fixtures/shaders.toml", import.meta.url)).text()).replace(
+  'command = "pnpm install --frozen-lockfile"',
+  `command = '${INSTALL}'`,
 );
 
 /** Each outbox a scenario's session can leave, as files. */
@@ -73,6 +87,8 @@ export const outbox = {
 };
 
 const VERSION = "0.1.0";
+/** The repo's `vendor/sandbox-runtime/`, which `bun install` fills. */
+const VENDOR_SANDBOX_RUNTIME = new URL("../../../vendor/sandbox-runtime", import.meta.url).pathname;
 /** `credentials.env` with every campdotdev secret, so the workspace has a Linear login. */
 function credentialsFor(workspace: string): string {
   const key = workspace.toUpperCase().replaceAll("-", "_");
@@ -84,6 +100,8 @@ const START = new Date("2026-11-10T09:00:00Z");
 export interface WorldOptions {
   /** The record on the bare repo's default branch. `null` commits none. */
   record?: string | null;
+  /** Whether the repo starts with a good dependency cache, built from the default branch. Default `true`. */
+  cache?: boolean;
 }
 
 export class World {
@@ -134,8 +152,9 @@ export class World {
   }
 
   static async create(options: WorldOptions = {}): Promise<World> {
-    // realpath, because macOS's temp folder sits behind the /var symlink and git reports the real path.
-    const root = await realpath(await mkdtemp(join(tmpdir(), "flight-deck-")));
+    // Under /tmp, because macOS's own temp folder is so long that a session's temp folder would fail the
+    // socket path limit. realpath, because /tmp sits behind a symlink and git reports the real path.
+    const root = await realpath(await mkdtemp("/tmp/fd-"));
     const folders: Folders = {
       data: join(root, "data"),
       config: join(root, "config"),
@@ -147,6 +166,12 @@ export class World {
       await mkdir(folder, { recursive: true });
     }
     await writeFile(join(folders.config, "gitconfig-runner"), "");
+    // The version folder's binary is Bun itself, which acts as Bun under BUN_BE_BUN as the compiled binary
+    // does, and its vendored sandbox-runtime is the repo's.
+    await mkdir(join(versionFolder, "bin"), { recursive: true });
+    await symlink(process.execPath, join(versionFolder, "bin", "flight-deck"));
+    await mkdir(join(versionFolder, "vendor"), { recursive: true });
+    await symlink(VENDOR_SANDBOX_RUNTIME, join(versionFolder, "vendor", "sandbox-runtime"));
     // The shipped skill Shaders' record names in `plan.reproduce`, so its slot resolves.
     await mkdir(join(versionFolder, "skills", "reproducing-bugs"), { recursive: true });
     await writeFile(join(versionFolder, "skills", "reproducing-bugs", "SKILL.md"), "---\nname: reproducing-bugs\n---\n");
@@ -158,7 +183,28 @@ export class World {
     const commit = await makeRemote(root, remote, options.record === undefined ? SHADERS_RECORD : options.record);
     const world = new World(root, folders, versionFolder, remote, commit);
     await world.writeConfig();
+    if (options.cache !== false) await world.refreshCache();
     return world;
+  }
+
+  /**
+   * Builds a repo's dependency cache from its default branch's tip, as a refresh the runner made earlier
+   * would have, so the next poll finds a good cache for the tip. Does nothing when the fetch fails or the tip
+   * holds no valid record.
+   */
+  async refreshCache(name = this.repo): Promise<void> {
+    const workspace = new Workspace({ folders: this.folders, git: this.config.paths.git });
+    const repo = this.config.repos.find((each) => each.name === name);
+    if (repo === undefined) throw new Error(`no repo ${name}`);
+    const fetched = await workspace.fetch(repo);
+    // A scenario that breaks the remote gets no cache.
+    if (!fetched.ok) return;
+    const text = await workspace.show(repo, fetched.head, ".flight-deck/record.toml");
+    const record = text === null ? null : readRecord(text);
+    if (record?.ok !== true) return;
+    const job = await workspace.refreshCache({ repo, record: record.record, commit: fetched.head, versionFolder: this.versionFolder, now: this.now });
+    const result = await job.done;
+    if (!result.ok) throw new Error(`the world's cache refresh failed: ${result.error}`);
   }
 
   /**
@@ -180,6 +226,7 @@ export class World {
       await this.writeCredentials(credentials + credentialsFor(workspace));
     }
     await this.writeConfig();
+    await this.refreshCache(input.name);
   }
 
   /** Files an issue as the maintainer, in Backlog unless it says otherwise. */
@@ -268,9 +315,14 @@ export class World {
     await writeFile(join(this.folders.config, "config.toml"), toToml(this.config as unknown as Record<string, unknown>));
   }
 
-  /** Commits files on the remote's default branch, and returns the new tip. */
-  async push(files: Record<string, string>, message = "Change"): Promise<string> {
+  /**
+   * Commits files on the remote's default branch, and returns the new tip. Then it rebuilds the cache for the
+   * new tip, so the next poll starts sessions at once, unless `refresh` is `false`, which leaves the cache
+   * for the runner to refresh.
+   */
+  async push(files: Record<string, string>, message = "Change", options: { refresh?: boolean } = {}): Promise<string> {
     this.commit = await commitTo(this.root, this.remote, files, message);
+    if (options.refresh !== false) await this.refreshCache();
     return this.commit;
   }
 

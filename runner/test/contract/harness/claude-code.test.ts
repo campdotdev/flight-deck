@@ -16,6 +16,7 @@ import { macFolders, paths, sessionParts } from "../../../src/folders/index.ts";
 import { ClaudeCodeHarness, LINEAR_READ_TOOLS, Stream, type HarnessSession } from "../../../src/harness/index.ts";
 import { CLAUDE_CODE, exitOf, type ClaudeCodeData } from "../../../src/harness/stream.ts";
 import { sandboxPolicy } from "../../../src/sandbox-policy/index.ts";
+import { SANDBOX_RUNTIME_CLI } from "../../../src/workspace/refresh.ts";
 import { fixture } from "../../harness/fixtures.ts";
 import { runs } from "../support/gate.ts";
 import { openLinear, type RealLinear } from "../support/linear.ts";
@@ -27,7 +28,7 @@ import { harnessContract, startRun } from "./contract.ts";
 const RUNS = runs("harness");
 const SESSION_MS = 10 * 60_000;
 const REPO_ROOT = join(import.meta.dir, "../../../..");
-const SANDBOX_RUNTIME_CLI = join(REPO_ROOT, "vendor/sandbox-runtime/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js");
+const SANDBOX_RUNTIME = join(REPO_ROOT, "vendor", "sandbox-runtime", SANDBOX_RUNTIME_CLI);
 const FILES = { "README.md": "A scratch repo for the Flight Deck Harness contract suite.\n" };
 
 let rig: Rig | null = null;
@@ -171,7 +172,7 @@ describe.skipIf(!RUNS)("what only a real claude -p session shows", () => {
       const claudeCode = [...seen];
       console.log(`Sockets Claude Code's sandbox made under ${tmp}:\n  ${claudeCode.join("\n  ") || "none"}`);
 
-      if (!existsSync(SANDBOX_RUNTIME_CLI)) throw new Error(`${SANDBOX_RUNTIME_CLI} is missing. Run bun install --frozen-lockfile in vendor/sandbox-runtime (FLD-99), then run this suite again.`);
+      if (!existsSync(SANDBOX_RUNTIME)) throw new Error(`${SANDBOX_RUNTIME} is missing. Run bun install --frozen-lockfile in vendor/sandbox-runtime (FLD-99), then run this suite again.`);
       const runtime = await sandboxRuntimeSockets(r, made);
       console.log(`Sockets sandbox-runtime made under ${tmp}:\n  ${runtime.join("\n  ") || "none"}`);
 
@@ -317,7 +318,7 @@ async function sandboxRuntimeSockets(r: Rig, made: { prepared: { tmp: string; wo
   const settings = join(made.prepared.sessionFolder, "sandbox-runtime.json");
   const policy = sandboxPolicy({ kind: "refresh", folders: r.folders, repo: made.registration.name, record: probeRecord(), versionFolder: r.versionFolder, worktree: made.prepared.worktree, sessionFolder: made.prepared.sessionFolder });
   await Bun.write(settings, `${JSON.stringify(policy, null, 2)}\n`);
-  const child = Bun.spawn([process.execPath, SANDBOX_RUNTIME_CLI, "--settings", settings, "-c", "curl -sS -o /dev/null https://registry.npmjs.org/; sleep 5"], {
+  const child = Bun.spawn([process.execPath, SANDBOX_RUNTIME, "--settings", settings, "-c", "curl -sS -o /dev/null https://registry.npmjs.org/; sleep 5"], {
     cwd: made.prepared.worktree,
     env: { HOME: r.folders.home, USER: process.env.USER ?? "", LOGNAME: process.env.LOGNAME ?? process.env.USER ?? "", SHELL: "/bin/bash", ...made.prepared.env },
     stdout: "inherit",

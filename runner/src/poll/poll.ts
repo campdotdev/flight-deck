@@ -7,7 +7,7 @@
 // `stale-takes.ts`, and every hold, the trouble ones too, comes through `holds.ts`. Later tickets add usage and
 // the start order.
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { Folders } from "../folders/index.ts";
 import { paths, sessionParts } from "../folders/index.ts";
 import { buildLaunch, type Auth, type Exit, type ExitKind, type Harness, type HarnessSession, type Launch } from "../harness/index.ts";
@@ -23,7 +23,7 @@ import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/
 import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
 import { ISSUE_MEMORY_FIELDS, readJson, State, type IssueMemory, type OpenPause, type PortPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
 import { FACTORY_ROLES, isUnavailable, MintFailed, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
-import { portInUse, Workspace, type FetchResult } from "../workspace/index.ts";
+import { portInUse, Workspace, type FetchResult, type RefreshJob } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
 import { ApplyWaiting, waitingEntry as applyWaitingEntry } from "./apply-waiting.ts";
 import { blockerTest } from "./blockers.ts";
@@ -55,6 +55,14 @@ export interface PollOptions {
 }
 
 const RECORD_PATH = ".flight-deck/record.toml";
+
+const HOUR = 60 * 60_000;
+
+/** A cache refresh the runner started, and whether it has ended. */
+interface RunningRefresh {
+  job: RefreshJob;
+  ended: boolean;
+}
 
 /** What one tick learned about one repo. */
 interface RepoPoll {
@@ -96,6 +104,12 @@ export class Poll {
   private readonly exits: QueuedExit[] = [];
   /** The `[machine_user]` that `etc/` was last written from, or `null` before this runner's first write. */
   private etcFor: string | null = null;
+  /** Each repo's cache refresh, by repo, from its start until a tick handles its end. */
+  private readonly refreshes = new Map<string, RunningRefresh>();
+  /** Whether this runner has polled yet, for the sweep at a start. */
+  private polled = false;
+  /** Whether a hold on the whole runner holds this poll, which then starts no refresh (ADR 0021). */
+  private heldRunner = false;
   /** Whether this runner's first tick ran, which does what the runner does at its start. */
   private started = false;
   /** `tick`, `hold`, `start`, `stop`, and `shutdown` run one at a time, in the order they're called. */
@@ -273,6 +287,8 @@ export class Poll {
     return this.serial(async () => {
       await this.state.writeHoldMarker({ by: "stop", since: now.toISOString() });
       await this.state.log(now, "stopped by flight-deck stop");
+      // A running refresh's process group dies, and the cache stays at its last good copy (ADR 0021).
+      for (const { job } of this.refreshes.values()) job.kill();
       const config = await readConfig(this.folders);
       const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
       for (const entry of await this.state.sessions()) {
@@ -287,12 +303,15 @@ export class Poll {
    * SIGTERM from launchd, at logout, shutdown, or `bootout` (spec 1, "Exits", ADR 0002). The runner stops each
    * running session as `stop` does, but writes no hold marker and posts nothing: it marks each entry `shutdown`,
    * and the next start puts each issue back in its queue with the attempt kept and no comment. `retry_waiting`
-   * and `apply_waiting` entries have no process, so they stay as they are. Last, it revokes the runner's Linear
+   * and `apply_waiting` entries have no process, so they stay as they are. A running cache refresh's process
+   * group dies, and the cache stays at its last good copy (ADR 0021). Last, it revokes the runner's Linear
    * token in each workspace it serves, so a SIGTERM needs no `revokeRunnerTokens` after it.
    */
   shutdown(now: Date): Promise<void> {
     return this.serial(async () => {
       await this.state.log(now, "shutting down on SIGTERM");
+      for (const { job } of this.refreshes.values()) job.kill();
+      await this.refreshesEnded();
       const config = await readConfig(this.folders);
       for (const entry of await this.state.sessions()) {
         if (entry.state !== "running" || entry.pid === null || entry.pid_started_at === null) continue;
@@ -364,8 +383,12 @@ export class Poll {
       return repo !== null && usable.has(repo.workspace) ? repo : null;
     };
     await this.applyWaiting.retry(now, this.outbox(now, config), ready, workspace);
+    await this.endRefreshes(now);
+    await this.sweep(now, workspace);
+    await this.state.rotateLog();
     const credentials = await this.checkCredentials(trouble);
     checkSharedTeams(config, trouble);
+    this.heldRunner = (await currentHolds(this.holdContext(now, config, trouble))).some((hold) => hold.scope === "runner");
 
     const repos: RepoPoll[] = [];
     for (const registration of config.repos) repos.push(await this.pollRepo(now, config, credentials, registration, workspace, trouble));
@@ -377,7 +400,15 @@ export class Poll {
     await trouble.settle({ now, tracker: this.tracker, state: this.state, version: this.version, path: this.path, repos: reachable });
     // 11. Usage.
     await this.usage.update(now, config);
-    await this.publish(now, config, repos, trouble);
+    await this.publish(now, config, repos, trouble, workspace);
+  }
+
+  /**
+   * Resolves once every cache refresh that's running has ended. The runner's shutdown waits on it after it
+   * kills them, and a scenario uses it to let a refresh land before its next tick.
+   */
+  async refreshesEnded(): Promise<void> {
+    await Promise.all([...this.refreshes.values()].map((refresh) => refresh.job.done));
   }
 
   /**
@@ -643,6 +674,8 @@ export class Poll {
         await this.state.writeLastRecord(registration.name, { commit: fetch.head, read_at: now.toISOString(), record: record.record });
       }
     }
+    // The cache refresh needs no Linear call, so it starts even when Linear doesn't take the poll.
+    if (fetch.ok && record?.ok === true) await this.refreshIfDue(now, registration, record.record, fetch.head, workspace);
     // A Linear call this repo's poll needs that Linear didn't take, such as `RATELIMITED`, skips the repo until
     // the next poll, and the other repos poll as usual (ADR 0002).
     try {
@@ -786,6 +819,58 @@ export class Poll {
     return pending;
   }
 
+  // The dependency cache.
+
+  /**
+   * Starts a cache refresh when the default branch's tip moved since the last one, before the repo's first
+   * session, when the cache has gone, and an hour after a failed one (ADR 0018). The record on the default
+   * branch names the install, so a repo without a valid one gets none.
+   */
+  private async refreshIfDue(now: Date, registration: Registration, record: RepoRecord, head: string, workspace: Workspace): Promise<void> {
+    if (this.refreshes.has(registration.name) || this.heldRunner) return;
+    const { current, last } = await workspace.cacheState(registration.name);
+    const due = last === null || last.commit !== head || (last.ok ? !current : now.getTime() - Date.parse(last.at) >= HOUR);
+    if (!due) return;
+    const job = await workspace.refreshCache({ repo: registration, record, commit: head, versionFolder: this.versionFolder, now });
+    const refresh: RunningRefresh = { job, ended: false };
+    void job.done.then(() => {
+      refresh.ended = true;
+    });
+    this.refreshes.set(registration.name, refresh);
+    await this.state.log(now, `${registration.name}: cache refresh ${job.session} started at ${head}`);
+  }
+
+  /** Logs each refresh that ended since the last tick, and forgets it. */
+  private async endRefreshes(now: Date): Promise<void> {
+    for (const [repo, refresh] of this.refreshes) {
+      if (!refresh.ended) continue;
+      this.refreshes.delete(repo);
+      const result = await refresh.job.done;
+      await this.state.log(now, `${repo}: cache refresh ${refresh.job.session} ${result.ok ? "passed" : `failed, kept the last good cache: ${result.error}`}`);
+    }
+  }
+
+  // The daily sweep.
+
+  /**
+   * Runs the sweep at the first poll after 03:00 in the Mac's time zone, and at a start when the last sweep
+   * was more than 24 hours ago. A running refresh keeps its worktree and session folder.
+   */
+  private async sweep(now: Date, workspace: Workspace): Promise<void> {
+    const first = !this.polled;
+    this.polled = true;
+    const last = await this.state.lastSweep();
+    const threeAm = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 3);
+    if (threeAm > now) threeAm.setDate(threeAm.getDate() - 1);
+    const due = last === null || last < threeAm || (first && now.getTime() - last.getTime() > 24 * HOUR);
+    if (!due) return;
+    const keep = new Set((await this.state.sessions()).map((entry) => entry.id));
+    for (const { job } of this.refreshes.values()) keep.add(job.session).add(basename(paths.cacheWorktree(this.folders, job.repo)));
+    const swept = await workspace.sweep({ now, keep });
+    await this.state.writeSweep(now);
+    if (swept.length > 0) await this.state.log(now, `sweep removed ${swept.join(", ")}`);
+  }
+
   // 5. Answers.
 
   /**
@@ -920,6 +1005,8 @@ export class Poll {
       if (!(await room())) break;
       const poll = startable.find((each) => each.registration.name === entry.repo);
       if (poll === undefined || !poll.fetch.ok || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
+      // Nothing starts for a repo while its cache refresh runs, a retry included.
+      if (this.refreshes.has(entry.repo)) continue;
       if (poll.tracker === null || !(await this.tokens.canStart(poll.tracker.workspace))) continue;
       const issue = poll.snapshot.issues.find((each) => each.id === entry.issue_id);
       // Step 4 dropped the retry of an issue that left its working status.
@@ -944,6 +1031,8 @@ export class Poll {
       for (const issue of queued(poll, busy)) {
         // A kept outbox is applied instead of a session, and takes no place under the cap.
         if (poll.tracker !== null && (await this.applyWaiting.applyKept(now, this.outbox(now, config), poll.tracker, issue, workspace))) continue;
+        // Nothing starts for a repo while its cache refresh runs.
+        if (this.refreshes.has(poll.registration.name)) continue;
         candidates.push({ poll, issue });
       }
     }
@@ -1229,7 +1318,15 @@ export class Poll {
     return flags;
   }
 
-  private async publish(now: Date, config: Config, repos: RepoPoll[], trouble: Trouble): Promise<void> {
+  /** The repo's cache in `status.json`: a running refresh, then a failed last one, then whether a good copy exists. */
+  private async cache(repo: string, workspace: Workspace): Promise<StatusRepo["cache"]> {
+    if (this.refreshes.has(repo)) return "refreshing";
+    const { current, last } = await workspace.cacheState(repo);
+    if (last?.ok === false) return "failed";
+    return current ? "ok" : "missing";
+  }
+
+  private async publish(now: Date, config: Config, repos: RepoPoll[], trouble: Trouble, workspace: Workspace): Promise<void> {
     const at = now.toISOString();
     await this.state.writeHeartbeat(now);
     const sessions = await this.state.sessions();
@@ -1249,12 +1346,12 @@ export class Poll {
         started_at: entry.started_at,
         deadline: entry.deadline,
       })),
-      jobs: [],
+      jobs: [...this.refreshes.values()].map(({ job }) => ({ kind: "cache_refresh" as const, repo: job.repo, started_at: job.startedAt })),
       usage: await this.usage.status(now, config),
       flags: await this.flagList(repos),
       trouble: trouble.status(),
       stale_takes: repos.flatMap((poll) => poll.staleTakes),
-      repos: repos.map(statusRepo),
+      repos: await Promise.all(repos.map(async (poll) => statusRepo(poll, await this.cache(poll.registration.name, workspace)))),
     };
     await this.state.publish(status);
   }
@@ -1352,13 +1449,12 @@ function priorityRank(issue: SnapshotIssue): number {
   return issue.priority === 0 ? 5 : issue.priority;
 }
 
-function statusRepo(poll: RepoPoll): StatusRepo {
+function statusRepo(poll: RepoPoll, cache: StatusRepo["cache"]): StatusRepo {
   const record = poll.record === null ? "waiting" : poll.record.ok ? "ok" : poll.record.reason === "newer" ? "newer" : "invalid";
   return {
     name: poll.registration.name,
     record,
-    // FLD-99 adds the dependency cache.
-    cache: "missing",
+    cache,
     waiting_for_specs: poll.waitingForSpecs.map((issue) => ({ issue: issue.identifier, title: issue.title })),
     waiting_for_blockers: poll.waitingForBlockers.map(({ issue, open }) => ({
       issue: issue.identifier,

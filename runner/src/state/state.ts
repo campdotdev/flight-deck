@@ -2,7 +2,7 @@
 // JSON, and every write is one atomic rename (spec 1, "State").
 import { paths, type Folders } from "../folders/index.ts";
 import type { RepoRecord, Role } from "../record/index.ts";
-import { readdir, rm } from "node:fs/promises";
+import { readdir, rename, rm, stat } from "node:fs/promises";
 import { appendLine, readJson, writeJson } from "./files.ts";
 import type { RateLimitEvent } from "../harness/index.ts";
 import type { HoldCause, Status } from "./status.ts";
@@ -180,6 +180,9 @@ export interface HoldMarker {
   /** ISO time. */
   since: string;
 }
+
+/** The size past which the runner starts a new log. */
+const LOG_BYTES = 10 * 1024 * 1024;
 
 /** A kept outbox, in `repos/<owner>/<repo>/kept/<issue UUID>/` (spec 1, "Not yet written"). */
 export interface KeptOutbox {
@@ -365,6 +368,25 @@ export class State {
   /** Writes `status.json`. */
   async publish(status: Status): Promise<void> {
     await writeJson(paths.status(this.folders), status);
+  }
+
+  /** When the daily sweep last ran, or `null` before the first. */
+  async lastSweep(): Promise<Date | null> {
+    const at = (await readJson<{ at: string | null }>(paths.sweep(this.folders), { at: null })).at;
+    return at === null ? null : new Date(at);
+  }
+
+  async writeSweep(at: Date): Promise<void> {
+    await writeJson(paths.sweep(this.folders), { at: at.toISOString() });
+  }
+
+  /** Starts a new log once the current one passes 10 MB, keeping one old log (spec 1, "Workspace"). */
+  async rotateLog(): Promise<void> {
+    const size = await stat(paths.log(this.folders)).then(
+      (info) => info.size,
+      () => 0,
+    );
+    if (size > LOG_BYTES) await rename(paths.log(this.folders), paths.oldLog(this.folders));
   }
 
   /** One line in the runner's log. */

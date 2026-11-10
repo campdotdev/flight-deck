@@ -44,6 +44,10 @@ export const paths = {
   /** Present while `hold` or `stop` holds the runner (ADR 0024). */
   holdMarker: (f: Folders) => join(f.data, "state", "hold"),
   log: (f: Folders) => join(f.data, "state", "runner.log"),
+  /** The log before the current one, which a new log replaces. */
+  oldLog: (f: Folders) => join(f.data, "state", "runner.log.1"),
+  /** When the daily sweep last ran. */
+  sweep: (f: Folders) => join(f.data, "state", "sweep.json"),
   /** The runner's Unix socket, mode `0600` (spec 1, "The runner's socket"). */
   socket: (f: Folders) => join(f.data, "state", "runner.sock"),
   /** The last passing trial run, with the version it ran on (spec 1, "Install"). */
@@ -62,6 +66,10 @@ export const paths = {
   transcripts: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "transcripts"),
   transcript: (f: Folders, repo: string, session: string) => join(f.data, "repos", repoPath(repo), "transcripts", `${session}.jsonl`),
   cursor: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "cursor.json"),
+  /** The copies of the record's `copy_files` that `register` makes (ADR 0007). */
+  files: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "files"),
+  /** The repo's last cache refresh: its commit, when it started, and whether it passed. */
+  refresh: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "refresh.json"),
   /** The last valid record the runner read on the default branch, for stale-take limits (spec 1, poll step 8). */
   lastRecord: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "record.json"),
   /** The open pause for a single-instance app's port in use, while the repo's other queued issues wait. */
@@ -75,6 +83,8 @@ export const paths = {
   worktree: (f: Folders, session: string) => join(f.sessionRoot, "worktrees", session),
   sessions: (f: Folders) => join(f.sessionRoot, "sessions"),
   sessionFolder: (f: Folders, session: string) => join(f.sessionRoot, "sessions", session),
+  /** A cache refresh's scratch worktree, `worktrees/cache-<owner>-<repo>`. */
+  cacheWorktree: (f: Folders, repo: string) => join(f.sessionRoot, "worktrees", `cache-${repo.replace("/", "-")}`),
   /** The dependency cache, `cache/<owner>/<repo>/`. */
   cache: (f: Folders, repo: string) => join(f.sessionRoot, "cache", repoPath(repo)),
   /** The files every session's sandbox reads, outside `~` (spec 1, "Folders and files"). */

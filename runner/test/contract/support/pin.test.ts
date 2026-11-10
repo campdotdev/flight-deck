@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fixture } from "../../harness/fixtures.ts";
-import { fits, loginExpiredPatterns, pinToml, recordFixture, socketNameBytes, tomlValue } from "./pin.ts";
+import { CLAUDE_CODE_TOML, fits, LIMITS_TOML, loginExpiredPatterns, pinToml, recordFixture, socketNameBytes, tomlValue } from "./pin.ts";
 import { contractParts } from "./gate.ts";
 
 describe("pinToml", () => {
@@ -54,6 +54,19 @@ login_expiring_patterns = [
   test("appends a key the file doesn't hold yet", () => {
     expect(Bun.TOML.parse(pinToml("a = 1\n", "socket_name_bytes", 31, ["Measured."]))).toEqual({ a: 1, socket_name_bytes: 31 });
     expect(Bun.TOML.parse(pinToml("", "socket_name_bytes", 31, ["Measured."]))).toEqual({ socket_name_bytes: 31 });
+  });
+
+  test("pins the version's own data files, keeping every other key and the file's opening comment", async () => {
+    for (const [path, key, value] of [
+      [LIMITS_TOML, "socket_name_bytes", 31],
+      [CLAUDE_CODE_TOML, "login_expired_patterns", ["OAuth token has been revoked"]],
+      [CLAUDE_CODE_TOML, "login_expiring_patterns", ["Your login expires in"]],
+    ] as const) {
+      const text = await readFile(path, "utf8");
+      const pinned = pinToml(text, key, typeof value === "number" ? value : [...value], ["Measured."]);
+      expect(Bun.TOML.parse(pinned)).toEqual({ ...Bun.TOML.parse(text), [key]: value });
+      expect(pinned.split("\n")[0]).toBe(text.split("\n")[0]);
+    }
   });
 
   test("writes a regular expression with a quote or a backslash so TOML reads it back unchanged", () => {

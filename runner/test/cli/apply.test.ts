@@ -124,6 +124,9 @@ describe("a hand run's apply", () => {
   });
 
   test("refuses with exit 2 before the runner has fetched the repo", async () => {
+    // A World with a cache has fetched the clone already.
+    await world.cleanup();
+    world = await World.create({ cache: false });
     const issue = world.issue({ title: "Save button is blue" });
     const folder = await handRun(issue, BRIEF);
     const command = cli(world);

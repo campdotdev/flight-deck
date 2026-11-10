@@ -5,13 +5,36 @@ import { randomInt } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import limits from "../../../data/limits.toml";
 import { paths, sessionParts, type Folders } from "../folders/index.ts";
 import type { Registration } from "../install/index.ts";
 import type { RepoRecord } from "../record/index.ts";
 import type { Mode, Stage } from "../state/index.ts";
+import { cloneFolder, copyFiles, fillDeps, linkDeps } from "./deps.ts";
 import { emptyConfigFolders, sessionEnv } from "./env.ts";
+import { refreshCache, type RefreshInput, type RefreshJob } from "./refresh.ts";
 import { appUrl, sessionPort } from "./ports.ts";
 import type { SessionJson } from "./session.ts";
+import { sweep } from "./sweep.ts";
+
+/** The longest socket file name a sandbox makes in a temp folder, from `data/limits.toml` (spec 1, "Session IDs"). */
+export const SOCKET_NAME_BYTES: number = (limits as { socket_name_bytes: number }).socket_name_bytes;
+
+/** macOS caps a Unix socket path at 104 bytes, and that includes the terminating NUL. */
+const SOCKET_PATH_BYTES = 103;
+
+/** The repo's dependency cache: whether it has a good copy, and how its last refresh went. */
+export interface CacheState {
+  current: boolean;
+  last: LastRefresh | null;
+}
+
+/** The repo's last cache refresh: the commit it installed, when it started (ISO), and whether it passed. */
+export interface LastRefresh {
+  commit: string;
+  at: string;
+  ok: boolean;
+}
 
 export interface PreparePlan {
   session: string;
@@ -145,15 +168,27 @@ export class Workspace {
     }
   }
 
-  /** Makes one session's folder and worktree. */
+  /**
+   * Makes one session's folder and worktree: the dependency folders, cloned from the cache's good copy or
+   * empty, the cache's `home/`, and the copied files. Fails before it makes anything when the session's temp
+   * folder is too long for the sandboxes' sockets.
+   */
   async prepare(plan: PreparePlan): Promise<PreparedWorkspace> {
     const sessionFolder = paths.sessionFolder(this.folders, plan.session);
     const parts = sessionParts(sessionFolder);
     const worktree = paths.worktree(this.folders, plan.session);
-    // FLD-99 clones the cache's `home/` here. The `env` block's empty config folders exist either way.
-    for (const folder of [parts.inbox, join(parts.outbox, "media"), parts.tmp, parts.deps, ...emptyConfigFolders(sessionFolder)]) {
+    checkTempFolder(parts.tmp);
+    // A session that starts between the refresh's two renames finds no `current/`, and gets empty folders.
+    const current = join(paths.cache(this.folders, plan.repo.name), "current");
+    const cached = existsSync(current) ? current : null;
+    for (const folder of [parts.inbox, join(parts.outbox, "media"), parts.tmp, parts.deps]) await mkdir(folder, { recursive: true });
+    if (cached !== null && existsSync(join(cached, "home"))) await cloneFolder(join(cached, "home"), parts.home);
+    // The `env` block's config folders for turbo and Vercel stay empty, whatever the cache's `home/` holds.
+    for (const folder of emptyConfigFolders(sessionFolder)) {
+      await rm(folder, { recursive: true, force: true });
       await mkdir(folder, { recursive: true });
     }
+    await fillDeps(parts.deps, plan.record.dependencies.folders, cached === null ? null : join(cached, "deps"));
     if (plan.inbox.previousBrief !== null) await writeFile(join(parts.inbox, "previous-brief.md"), plan.inbox.previousBrief);
     await writeFile(join(parts.inbox, "synced-comments.json"), JSON.stringify(plan.inbox.syncedComments));
 
@@ -161,6 +196,8 @@ export class Workspace {
     await mkdir(paths.worktrees(this.folders), { recursive: true });
     await this.must(null, "clone", "--quiet", "--shared", "--no-checkout", paths.clone(this.folders, plan.repo.name), worktree);
     await this.must(worktree, "checkout", "--quiet", "--detach", plan.commit);
+    await linkDeps(worktree, parts.deps, plan.record.dependencies.folders);
+    await copyFiles(plan.repo.name, paths.files(this.folders, plan.repo.name), worktree, plan.record.copy_files);
 
     // The runner prepares one session at a time, so two sessions never pick the same port.
     const app = plan.record.app;
@@ -201,12 +238,14 @@ export class Workspace {
 
   /**
    * Makes a trial run's session folder, and a throwaway git repo at `worktrees/<session-id>` with one empty
-   * commit on `main`. The repo isn't a clone of anything, so `dispose` deletes it outright.
+   * commit on `main`. The repo isn't a clone of anything, so `dispose` deletes it outright. Fails, as `prepare`
+   * does, when the temp folder is too long for the sandboxes' sockets.
    */
   async prepareTrial(plan: TrialPlan): Promise<PreparedWorkspace> {
     const sessionFolder = paths.sessionFolder(this.folders, plan.session);
     const parts = sessionParts(sessionFolder);
     const worktree = paths.worktree(this.folders, plan.session);
+    checkTempFolder(parts.tmp);
     for (const folder of [parts.inbox, join(parts.outbox, "media"), parts.tmp, parts.deps, ...emptyConfigFolders(sessionFolder)]) {
       await mkdir(folder, { recursive: true });
     }
@@ -256,6 +295,44 @@ export class Workspace {
     if (options.keepFolder !== true) await rm(paths.sessionFolder(this.folders, workspace.session), { recursive: true, force: true });
   }
 
+  /**
+   * Starts a cache refresh: the record's dependency install in a scratch worktree of `commit`, under the
+   * pinned `sandbox-runtime` (ADR 0018). `done` resolves when it ends, and `kill` stops its process group.
+   * Only a refresh writes the cache.
+   */
+  async refreshCache(input: Omit<RefreshInput, "folders" | "session" | "clone">): Promise<RefreshJob> {
+    const session = await this.newSessionId();
+    checkTempFolder(sessionParts(paths.sessionFolder(this.folders, session)).tmp);
+    return refreshCache({
+      ...input,
+      folders: this.folders,
+      session,
+      clone: async (worktree, commit) => {
+        await this.must(null, "clone", "--quiet", "--shared", "--no-checkout", paths.clone(this.folders, input.repo.name), worktree);
+        await this.must(worktree, "checkout", "--quiet", "--detach", commit);
+      },
+    });
+  }
+
+  /**
+   * The daily sweep: removes every worktree and session folder whose name `keep` doesn't hold, with Claude
+   * Code's folder for each removed worktree, and transcripts and hand-run folders older than 30 days.
+   */
+  async sweep(input: { now: Date; keep: Set<string> }): Promise<string[]> {
+    return sweep({ folders: this.folders, ...input });
+  }
+
+  /** Whether the repo's cache has a good copy, and how its last refresh went. */
+  async cacheState(repo: string): Promise<CacheState> {
+    let last: LastRefresh | null = null;
+    try {
+      last = JSON.parse(await readFile(paths.refresh(this.folders, repo), "utf8")) as LastRefresh;
+    } catch {
+      // No refresh has ended yet.
+    }
+    return { current: existsSync(join(paths.cache(this.folders, repo), "current")), last };
+  }
+
   private async takenIds(): Promise<Set<string>> {
     const taken = new Set<string>([...(await list(paths.sessions(this.folders))), ...(await list(paths.worktrees(this.folders)))]);
     for (const file of await list(paths.trials(this.folders))) taken.add(file.replace(/\.jsonl$/, ""));
@@ -299,6 +376,15 @@ export class Workspace {
     if (!result.ok) throw new Error(result.error);
     return result.out.trim();
   }
+}
+
+/** Throws, naming the temp folder, when its path plus `/` plus the longest socket name passes the limit. */
+function checkTempFolder(tmp: string): void {
+  const bytes = Buffer.byteLength(tmp) + 1 + SOCKET_NAME_BYTES;
+  if (bytes <= SOCKET_PATH_BYTES) return;
+  throw new Error(
+    `The temp folder ${tmp} is too long: with a ${SOCKET_NAME_BYTES}-byte socket name, a socket path in it takes ${bytes} bytes, and macOS allows ${SOCKET_PATH_BYTES}.`,
+  );
 }
 
 /** Each of the stage's slots, by name, as the absolute paths of its skills' `SKILL.md` files (ADR 0014). */
