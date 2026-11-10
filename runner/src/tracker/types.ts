@@ -218,8 +218,30 @@ export interface Tracker {
   /** Uploads a file with `fileUpload` and returns its asset URL without any `?signature=` (ADR 0019). */
   upload(file: UploadFile): Promise<string>;
 
-  /** Mints the session's Flight Deck Reader token. */
+  // Tokens (spec 1, "Tokens" and "Session credentials", ADR 0005). Each mint throws `MintFailed` when Linear
+  // refuses it.
+
+  /**
+   * Mints the runner's Flight Deck app token for the workspace, with scopes `read write`, when the adapter holds
+   * none: at the runner's start, after a revoke, and after a 401. The token lives only in the adapter's memory.
+   */
+  runnerToken(workspace: string): Promise<void>;
+  /**
+   * Revokes the runner's own Flight Deck app token for the workspace, on a clean shutdown such as
+   * `flight-deck stop` (ADR 0005). The next Linear call mints a new one.
+   */
+  revokeRunnerToken(workspace: string): Promise<void>;
+  /**
+   * The session's Flight Deck Reader token, scope `read`. The first call mints it. A later call tests the token
+   * with a `viewer` query and returns it, or, when Linear rejects it, mints a replacement, revokes the old one,
+   * and returns the new one.
+   */
   sessionToken(session: TokenSession): Promise<string>;
   /** Revokes the session's Reader token. */
   revoke(session: TokenSession): Promise<void>;
+  /**
+   * Mints a Reader token for no session and revokes it at once: the runner's retry after a Reader mint failed,
+   * so the retry takes no issue.
+   */
+  tryReaderMint(workspace: string): Promise<void>;
 }

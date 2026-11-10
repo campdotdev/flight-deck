@@ -4,6 +4,7 @@
 import { ROLES, type Role } from "../record/index.ts";
 import { briefDescription, plusFolds, unsigned } from "./folds.ts";
 import { FACTORY_ROLES, roleOf } from "./roles.ts";
+import { MintFailed, type LinearApp } from "./mint.ts";
 import { TrackerUnavailable, type UnavailableReason } from "./unavailable.ts";
 import {
   IssueNotFoundError,
@@ -45,10 +46,26 @@ export type TrackerWrite =
   | { kind: "file"; issue: string; title: string; description: string; status: string }
   | { kind: "relate"; issue: string; other: string; relation: RelationKind };
 
+/** A session's Reader token. */
 export interface TokenRecord {
   session: string;
   token: string;
   revoked: boolean;
+}
+
+/** The runner's own Flight Deck app token for a workspace. */
+export interface RunnerTokenRecord {
+  workspace: string;
+  token: string;
+  revoked: boolean;
+}
+
+/** One mint, landed or refused. `session` is `null` for the runner's token and for a Reader retry. */
+export interface MintRecord {
+  app: LinearApp;
+  workspace: string;
+  session: string | null;
+  ok: boolean;
 }
 
 /** An issue as the in-memory workspace stores it. */
@@ -117,8 +134,14 @@ const SNAPSHOT_ROLES = new Set<Role>(["intake", ...FACTORY_ROLES]);
 export class InMemoryTracker implements Tracker {
   /** Every write, in order. */
   readonly writes: TrackerWrite[] = [];
-  /** Every Reader token minted, in order. */
+  /** Every Reader token minted for a session, in order. */
   readonly tokens: TokenRecord[] = [];
+  /** Every Flight Deck app token minted for the runner, in order. */
+  readonly runnerTokens: RunnerTokenRecord[] = [];
+  /** The workspace of each revoke of the runner's own token, in order. */
+  readonly runnerRevokes: string[] = [];
+  /** Every mint of either app, in order, with whether it landed. */
+  readonly mints: MintRecord[] = [];
   /** Each uploaded file's bytes, by the URL `upload` returned. */
   readonly uploads = new Map<string, Uint8Array>();
 
@@ -131,6 +154,10 @@ export class InMemoryTracker implements Tracker {
   /** For each write, the refusals still to come, in order. */
   private readonly refusals = new Map<RefusableWrite, UnavailableReason[]>();
   private ids = 0;
+  /** `<app> <workspace>` for each app whose mints Linear refuses. */
+  private readonly failing = new Set<string>();
+  /** The tokens Linear rejects, as after an expiry or a revoke by hand. */
+  private readonly rejected = new Set<string>();
 
   constructor(options: { clock: () => Date; appUser: string }) {
     this.clock = options.clock;
@@ -378,8 +405,39 @@ export class InMemoryTracker implements Tracker {
     return url;
   }
 
+  /**
+   * Linear refuses every mint from the workspace's app until called again with `false`, as for a full token
+   * pool, a rotated client secret, a deleted app, or an outage.
+   */
+  failMints(app: LinearApp, workspace: string, failing = true): void {
+    if (failing) this.failing.add(`${app} ${workspace}`);
+    else this.failing.delete(`${app} ${workspace}`);
+  }
+
+  /** Linear rejects the token from now on, so the next `viewer` test fails. */
+  rejectToken(token: string): void {
+    this.rejected.add(token);
+  }
+
+  async runnerToken(workspace: string): Promise<void> {
+    // A token Linear rejects answers 401, and the adapter mints a new one.
+    if (this.runnerTokens.some((record) => record.workspace === workspace && !record.revoked && !this.rejected.has(record.token))) return;
+    this.mint("flight_deck", workspace, null);
+    this.runnerTokens.push({ workspace, token: `app-${workspace}-${this.runnerTokens.length + 1}`, revoked: false });
+  }
+
+  async revokeRunnerToken(workspace: string): Promise<void> {
+    this.runnerRevokes.push(workspace);
+    for (const record of this.runnerTokens) if (record.workspace === workspace) record.revoked = true;
+  }
+
   async sessionToken(session: TokenSession): Promise<string> {
+    const held = this.tokens.find((record) => record.session === session.id && !record.revoked);
+    // The `viewer` test: a token Linear still takes is returned as it is.
+    if (held !== undefined && !this.rejected.has(held.token)) return held.token;
+    this.mint("reader", session.repo.workspace, session.id);
     const token = `reader-${session.id}-${this.tokens.length + 1}`;
+    if (held !== undefined) held.revoked = true;
     this.tokens.push({ session: session.id, token, revoked: false });
     return token;
   }
@@ -388,7 +446,18 @@ export class InMemoryTracker implements Tracker {
     for (const record of this.tokens) if (record.session === session.id) record.revoked = true;
   }
 
+  async tryReaderMint(workspace: string): Promise<void> {
+    this.mint("reader", workspace, null);
+  }
+
   // Helpers.
+
+  /** Records one mint, and throws `MintFailed` when the app's mints fail. */
+  private mint(app: LinearApp, workspace: string, session: string | null): void {
+    const ok = !this.failing.has(`${app} ${workspace}`);
+    this.mints.push({ app, workspace, session, ok });
+    if (!ok) throw new MintFailed(app, workspace);
+  }
 
   private refused(write: RefusableWrite): void {
     const reason = this.refusals.get(write)?.shift();
