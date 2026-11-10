@@ -141,6 +141,9 @@ export class World {
       await mkdir(folder, { recursive: true });
     }
     await writeFile(join(folders.config, "gitconfig-runner"), "");
+    // The shipped skill Shaders' record names in `plan.reproduce`, so its slot resolves.
+    await mkdir(join(versionFolder, "skills", "reproducing-bugs"), { recursive: true });
+    await writeFile(join(versionFolder, "skills", "reproducing-bugs", "SKILL.md"), "---\nname: reproducing-bugs\n---\n");
     const remote = join(root, "remote.git");
     const commit = await makeRemote(root, remote, options.record === undefined ? SHADERS_RECORD : options.record);
     const world = new World(root, folders, versionFolder, remote, commit);

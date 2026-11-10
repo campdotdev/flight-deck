@@ -1,9 +1,9 @@
 // The Claude Code version check before each start (spec 1's "Starts", ADR 0015). Below `data/claude-code.toml`'s
 // `min_version`, the runner starts nothing. FLD-106 opens the trouble cause `claude_code_version` for it.
-import claudeCode from "../../../data/claude-code.toml";
+import { CLAUDE_CODE } from "../harness/index.ts";
 
 /** The oldest Claude Code this version runs. */
-export const MIN_VERSION: string = (claudeCode as { min_version: string }).min_version;
+export const MIN_VERSION = CLAUDE_CODE.minVersion;
 
 /** Whether `version` is at least `MIN_VERSION`, comparing each dotted part as a number. An unreadable version isn't. */
 export function supported(version: string, min: string = MIN_VERSION): boolean {
