@@ -77,6 +77,20 @@ describe("session ports", () => {
     expect(second!.port).not.toBe(first!.port);
   });
 
+  test("a session skips a port in the range that another process listens on at 0.0.0.0", async () => {
+    world = await World.create({ record: SHADERS_APP_RECORD });
+    // On macOS a test bind on 127.0.0.1 succeeds beside a listener on 0.0.0.0, as a dev server's often is.
+    let held: Server | null = null;
+    let heldPort = 4400;
+    for (; heldPort <= 4999 && held === null; heldPort++) held = await listen("0.0.0.0", heldPort);
+    heldPort--;
+    expect(held).not.toBeNull();
+    sent({ title: "Save button is blue" });
+    await world.tick();
+
+    expect(world.harness.started[0]!.sessionJson.port).toBeGreaterThan(heldPort);
+  });
+
   test("a repo with no app gets a null port and app_url", async () => {
     world = await World.create();
     sent({ title: "Save button is blue" });
