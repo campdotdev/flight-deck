@@ -1,8 +1,10 @@
-// `config.toml`: facts about one Mac, never about a repo (ADR 0003). The runner reads it at every poll.
-// FLD-113 adds the checks and the writes `install`, `login`, and `register` make.
+// `config.toml`: facts about one Mac, never about a repo (ADR 0003). The runner reads it at every poll, and
+// `install`, `login`, and `register` merge their keys into it.
 import { readFile } from "node:fs/promises";
 import { paths, type Folders } from "../folders/index.ts";
 import type { RepoRecord } from "../record/index.ts";
+import { writeAtomic } from "../state/files.ts";
+import { toToml } from "./toml.ts";
 
 /** One registered repo. */
 export interface Registration {
@@ -42,4 +44,20 @@ export interface Config {
 export async function readConfig(folders: Folders): Promise<Config> {
   const config = Bun.TOML.parse(await readFile(paths.configToml(folders), "utf8")) as unknown as Config;
   return { ...config, repos: config.repos ?? [], linear: config.linear ?? {} };
+}
+
+/**
+ * Merges keys into `config.toml`: `update` changes the file's tables in place, and every key it leaves alone
+ * stays. A missing file starts empty. The new file is written beside the old one and renamed into place, so
+ * the runner never reads half of it. Comments don't survive the write.
+ */
+export async function updateConfig(folders: Folders, update: (config: Record<string, unknown>) => void): Promise<void> {
+  const path = paths.configToml(folders);
+  const text = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  });
+  const config = Bun.TOML.parse(text) as Record<string, unknown>;
+  update(config);
+  await writeAtomic(path, toToml(config));
 }

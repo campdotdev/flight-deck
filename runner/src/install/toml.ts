@@ -1,5 +1,5 @@
-// A small TOML writer for the scenario's `config.toml`. It writes strings, numbers, booleans, arrays of those,
-// tables, and arrays of tables, which is all `config.toml` holds.
+// A small TOML writer for `config.toml`. It writes strings, numbers, booleans, arrays of those, tables, and
+// arrays of tables, which is all `config.toml` holds.
 
 type Value = string | number | boolean | Value[] | { [key: string]: Value };
 
@@ -12,7 +12,8 @@ function isTableArray(value: unknown): value is Record<string, Value>[] {
 }
 
 function scalar(value: Value): string {
-  if (typeof value === "string") return JSON.stringify(value);
+  // JSON's escapes are TOML's, except that TOML also escapes DEL.
+  if (typeof value === "string") return JSON.stringify(value).replaceAll("\x7f", "\\u007F");
   if (Array.isArray(value)) return `[${value.map(scalar).join(", ")}]`;
   if (isTable(value)) return `{ ${Object.entries(value).map(([key, each]) => `${quoteKey(key)} = ${scalar(each)}`).join(", ")} }`;
   return String(value);
