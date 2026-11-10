@@ -1,5 +1,5 @@
 // What the runner does after each kind of exit (spec 1, "Exits"). Each kind's handler sits in its own file,
-// so a ticket that changes one exit edits only that file.
+// so a change to one exit edits only that file.
 import type { ExitKind } from "../../harness/index.ts";
 import type { ExitHandler } from "./context.ts";
 import { exited } from "./exited.ts";

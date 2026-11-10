@@ -140,7 +140,7 @@ export interface PendingComment {
 
 /**
  * Why the runner put an issue back in its queue without using the stage's retry: a plan limit, an expired
- * login, a failed Reader mint, or a shutdown (spec 1, "Exits"). Each ticket that requeues adds its exit here.
+ * login, a failed Reader mint, or a shutdown (spec 1, "Exits").
  */
 export type RestartCause = "rate_limited" | "login_expired" | "linear_token" | "shutdown";
 
@@ -150,7 +150,7 @@ export interface Restart {
   after: RestartCause;
 }
 
-/** One issue's memory, keyed by Linear's UUID. Later tickets add more. */
+/** One issue's memory, keyed by Linear's UUID. */
 export interface IssueMemory {
   /** The brief the runner last wrote for the issue, as the description shows it above the report fold, or `null`. */
   brief: string | null;

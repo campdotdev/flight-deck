@@ -4,8 +4,7 @@
 //
 // Each kind of exit has its handler in `exits/`, and each comment the runner writes on its own has its text in
 // `../outbox/runner-comments/`. Step 4, moved out, is in `moved-out.ts`, trouble causes in `trouble/`, step 8 in
-// `stale-takes.ts`, and every hold, the trouble ones too, comes through `holds.ts`. Later tickets add usage and
-// the start order.
+// `stale-takes.ts`, and every hold, the trouble ones too, comes through `holds.ts`.
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { Folders } from "../folders/index.ts";

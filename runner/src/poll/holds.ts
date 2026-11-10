@@ -2,8 +2,8 @@
 // still polls, applies outboxes, and flags. The runner is held while any hold with the `runner` scope holds,
 // and a hold scoped to a workspace or a repo stops only that one's starts.
 //
-// Each cause comes from one source in `HOLD_SOURCES`. A ticket that adds a cause writes its source in its own
-// file and adds one line to the list.
+// Each cause comes from one source in `HOLD_SOURCES`. A new cause writes its source in its own file and adds one
+// line to the list.
 import type { Config } from "../install/index.ts";
 import type { State, Status, StatusHold } from "../state/index.ts";
 import type { Trouble } from "./trouble/trouble.ts";

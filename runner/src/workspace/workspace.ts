@@ -1,6 +1,5 @@
 // Workspace: Flight Deck's clone of each repo, the worktrees and session folders under the session root
 // (spec 1, "Workspace"). It's local and has no port, so its tests use real git in a temporary root.
-// Later tickets add the dependency cache, copied files, ports, the temp-folder check, and the sweep.
 import { randomInt } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";

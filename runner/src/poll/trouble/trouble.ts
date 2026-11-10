@@ -35,7 +35,7 @@ export interface SettleContext {
 /** An issue counts as open in a backlog, unstarted, started, or triage status (spec 1, "Trouble issues"). */
 const OPEN_TYPES: ReadonlySet<StatusType> = new Set(["triage", "backlog", "unstarted", "started"]);
 
-/** The causes that file a trouble issue. The others only notify. FLD-109 adds its own. */
+/** The causes that file a trouble issue when they open. `linear_token` files later (`FILE_AFTER_MS`), and the others only notify. */
 const FILES: ReadonlySet<TroubleCause> = new Set(["missing_status", "claude_code_version", "github_token", "claude_login", "claude_login_soon"]);
 
 /** `linear_token` files its issue only once a mint works, after a failure this long or longer (ADR 0005). */
