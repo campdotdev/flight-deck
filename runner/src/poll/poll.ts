@@ -30,6 +30,8 @@ import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
 import { staleTakes } from "./stale-takes.ts";
 import { Trouble } from "./trouble/trouble.ts";
 import { MIN_VERSION, tooOld } from "./trouble/version.ts";
+import { notify } from "./trouble/notify.ts";
+import { Trials, type TrialEvents, type TrialResult } from "./trial.ts";
 
 export interface PollOptions {
   folders: Folders;
@@ -83,6 +85,7 @@ export class Poll {
   private started = false;
   /** `tick`, `hold`, `start`, and `stop` run one at a time, in the order they're called. */
   private queue: Promise<unknown> = Promise.resolve();
+  private readonly trials: Trials;
 
   constructor(options: PollOptions) {
     this.folders = options.folders;
@@ -93,6 +96,30 @@ export class Poll {
     this.path = options.path ?? process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
     this.lifecycle = new Lifecycle(options.tracker);
     this.state = new State(options.folders);
+    this.trials = new Trials({
+      folders: options.folders,
+      state: this.state,
+      harness: options.harness,
+      version: options.version,
+      versionFolder: options.versionFolder,
+      events: (id) => ({
+        exit: (exit) => void this.exits.push({ session: id, exit }),
+        rateLimit: () => {},
+      }),
+    });
+  }
+
+  /**
+   * Asks for a trial run (spec 1, "Trial run"), as `{ "op": "trial" }` does. It starts at the next poll that a
+   * hold and the cap allow, and the promise resolves once it ends, or at once under a hold a trial doesn't run under.
+   */
+  trial(events: TrialEvents = {}): Promise<TrialResult> {
+    return this.trials.request(events);
+  }
+
+  /** Posts a macOS notification the way trouble does, such as install's "Flight Deck can notify you." */
+  notify(text: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    return notify(text, { path: this.path });
   }
 
   /** Runs one poll for every registered repo. */
@@ -174,8 +201,8 @@ export class Poll {
       this.started = true;
       await this.atStart(now, config, workspace);
     }
-    await this.handleExits(now, config, workspace);
     const trouble = await Trouble.load(this.state);
+    await this.handleExits(now, config, workspace, trouble);
     const credentials = await this.checkCredentials(trouble);
     checkSharedTeams(config, trouble);
 
@@ -221,6 +248,7 @@ export class Poll {
    * keeps retrying, as after a `stop` the runner answered.
    */
   private async atStart(now: Date, config: Config, workspace: Workspace): Promise<void> {
+    await this.trials.atStart(now, workspace);
     if ((await this.state.holdMarker())?.by !== "stop") return;
     // FLD-108 kills any live session first, with its process groups, because its output pipe died with the old runner.
     for (const entry of await this.state.sessions()) {
@@ -243,7 +271,7 @@ export class Poll {
 
   // Exits.
 
-  private async handleExits(now: Date, config: Config, workspace: Workspace): Promise<void> {
+  private async handleExits(now: Date, config: Config, workspace: Workspace, trouble: Trouble): Promise<void> {
     const queued = this.exits.splice(0);
     if (queued.length === 0) return;
     const outbox = new Outbox({
@@ -258,6 +286,11 @@ export class Poll {
     for (const { session, exit } of queued) {
       const entry = (await this.state.sessions()).find((each) => each.id === session);
       if (entry === undefined) continue;
+      // A trial has no repo, no issue, and no Reader token.
+      if (entry.stage === "trial") {
+        await this.trials.exited({ now, entry, exit, workspace, trouble });
+        continue;
+      }
       const registration = config.repos.find((repo) => repo.name === entry.repo);
       const repo = registration === undefined ? null : trackerRepo(config, registration, null);
       if (repo === null) {
@@ -569,7 +602,7 @@ export class Poll {
     let free = config.concurrency_cap - sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
 
     // Before each start, Claude Code's version (ADR 0015).
-    const work = sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
+    const work = this.trials.wanted(now, trouble) || sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
     if (trouble.isOpen("claude_code_version", "runner") || (free > 0 && work)) {
       const version = await this.harness.version();
       if (tooOld(version)) trouble.open("claude_code_version", "runner", { scope: "runner", repos: [], facts: { version, minVersion: MIN_VERSION } });
@@ -579,6 +612,9 @@ export class Poll {
     // holds include each trouble cause open this poll, the version's too.
     const holds = await currentHolds(this.holdContext(now, config, trouble));
     const startable = repos.filter((poll) => poll.tracker !== null && !holdsRepo(holds, poll.tracker));
+
+    // A trial takes the first free place, before any retry or take, and runs under most holds.
+    if (await this.trials.start({ now, config, auth: auth(config), holds, free, workspace, trouble })) free--;
 
     // A retry waiting for a free place starts before any new take.
     for (const entry of sessions.filter((each) => each.state === "retry_waiting")) {

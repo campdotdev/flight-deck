@@ -2,6 +2,9 @@
 // what broke (spec 1, "Trouble issues", ADR 0011). It's titled "Flight Deck". The in-memory suites put a stub
 // `osascript` first on the runner's `PATH`, so a scenario reads each notification without posting one.
 
+/** The notification `flight-deck install` asks the runner for, after its trial run (spec 1, "Install"). */
+export const TEST_NOTIFICATION = "Flight Deck can notify you.";
+
 /** Posts one notification. It never throws: a notification that fails is only logged. */
 export async function notify(text: string, options: { path: string }): Promise<{ ok: true } | { ok: false; error: string }> {
   const osascript = Bun.which("osascript", { PATH: options.path });

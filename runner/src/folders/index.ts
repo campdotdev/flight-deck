@@ -44,6 +44,11 @@ export const paths = {
   /** Present while `hold` or `stop` holds the runner (ADR 0024). */
   holdMarker: (f: Folders) => join(f.data, "state", "hold"),
   log: (f: Folders) => join(f.data, "state", "runner.log"),
+  /** The last passing trial run, with the version it ran on (spec 1, "Install"). */
+  trial: (f: Folders) => join(f.data, "state", "trial.json"),
+  /** Trial runs' transcripts, which the daily sweep deletes after 30 days. */
+  trials: (f: Folders) => join(f.data, "state", "trials"),
+  trialTranscript: (f: Folders, session: string) => join(f.data, "state", "trials", `${session}.jsonl`),
   handRuns: (f: Folders) => join(f.data, "hand-runs"),
 
   repo: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo)),

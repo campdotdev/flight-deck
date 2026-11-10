@@ -14,6 +14,7 @@ export {
   type SessionState,
   type Stage,
   type StopCause,
+  type TrialPass,
 } from "./state.ts";
 export type * from "./status.ts";
 export type * from "./trouble.ts";

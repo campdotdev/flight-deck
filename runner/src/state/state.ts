@@ -150,6 +150,18 @@ export interface LastRecord {
   record: RepoRecord;
 }
 
+/**
+ * `state/trial.json`: the last trial run that passed, with the Flight Deck version it ran on. Install's trial
+ * step is done when it names the running version (spec 1, "Install").
+ */
+export interface TrialPass {
+  version: string;
+  claude_code_version: string;
+  session: string;
+  /** ISO time. */
+  passed_at: string;
+}
+
 const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, stale_take: null };
 
 export class State {
@@ -208,6 +220,15 @@ export class State {
 
   async writeLastRecord(repo: string, last: LastRecord): Promise<void> {
     await writeJson(paths.lastRecord(this.folders, repo), last);
+  }
+
+  /** The last trial run that passed, or `null` before one did. */
+  async trial(): Promise<TrialPass | null> {
+    return readJson<TrialPass | null>(paths.trial(this.folders), null);
+  }
+
+  async writeTrial(pass: TrialPass): Promise<void> {
+    await writeJson(paths.trial(this.folders), pass);
   }
 
   /** `state/trouble.json`: each trouble cause the runner knows, open or cleared with its issue still open. */
