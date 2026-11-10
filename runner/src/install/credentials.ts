@@ -37,6 +37,23 @@ export function hasWorkspace(credentials: Credentials | null, workspace: string)
   return Boolean(credentials?.values[`LINEAR_APP_ID_${key}`]) && Boolean(credentials?.values[`LINEAR_APP_SECRET_${key}`]);
 }
 
+/**
+ * The workspace's two Linear apps, in the shape the Linear adapter reads at each mint. An app whose ID or
+ * secret is missing or empty is `null`, so its mint fails with `MintFailed`.
+ */
+export function linearApps(
+  credentials: Credentials | null,
+  workspace: string,
+): { flight_deck: { id: string; secret: string } | null; reader: { id: string; secret: string } | null } | null {
+  if (credentials === null) return null;
+  const key = workspaceKey(workspace);
+  const app = (id: string | undefined, secret: string | undefined) => (id && secret ? { id, secret } : null);
+  return {
+    flight_deck: app(credentials.values[`LINEAR_APP_ID_${key}`], credentials.values[`LINEAR_APP_SECRET_${key}`]),
+    reader: app(credentials.values[`LINEAR_READER_ID_${key}`], credentials.values[`LINEAR_READER_SECRET_${key}`]),
+  };
+}
+
 /** `KEY=value` lines. Blank lines and `#` lines are skipped, and one pair of surrounding quotes comes off a value. */
 function parseEnv(text: string): Record<string, string> {
   const values: Record<string, string> = {};

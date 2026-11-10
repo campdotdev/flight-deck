@@ -172,8 +172,9 @@ export interface FiledIssue extends IssueRef {
 /** The relations `relate` makes. Spec 4 adds blocking. */
 export type RelationKind = "related";
 
-/** A file `upload` uploads. */
+/** A file `upload` uploads, to the repo's workspace. */
 export interface UploadFile {
+  repo: TrackerRepo;
   /** The file name, such as `before.png`. */
   name: string;
   contentType: string;

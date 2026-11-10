@@ -319,7 +319,7 @@ describe("detach", () => {
 
 describe("upload", () => {
   test("returns the asset URL without its ?signature= query", async () => {
-    const url = await tracker.upload({ name: "before.png", contentType: "image/png", data: new Uint8Array([1, 2, 3]) });
+    const url = await tracker.upload({ repo, name: "before.png", contentType: "image/png", data: new Uint8Array([1, 2, 3]) });
     expect(url).toMatch(/^https:\/\/uploads\.linear\.app\/[^?]+\/before\.png$/);
     expect(tracker.writes).toEqual([{ kind: "upload", name: "before.png", url }]);
     expect(tracker.uploads.get(url)).toEqual(new Uint8Array([1, 2, 3]));

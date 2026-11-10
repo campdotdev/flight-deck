@@ -139,7 +139,7 @@ export class Outbox {
       `upload ${name}`,
       async (applied) => {
         const data = new Uint8Array(await readFile(join(sessionParts(sessionFolder).outbox, "media", name)));
-        applied.uploads[name] = await tracker.upload({ name, contentType: contentType(name), data });
+        applied.uploads[name] = await tracker.upload({ repo, name, contentType: contentType(name), data });
         return null;
       },
     ]);
