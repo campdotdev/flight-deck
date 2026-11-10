@@ -18,6 +18,7 @@ import {
   type SyncedIssueRef,
   type TeamCheck,
   type UploadFile,
+  type Viewer,
 } from "./types.ts";
 import type {
   PostedComment,
@@ -68,6 +69,14 @@ export interface MintRecord {
   workspace: string;
   session: string | null;
   ok: boolean;
+}
+
+/** A token minted for a check, such as `login linear`'s, and revoked as soon as the check read its viewer. */
+export interface CheckTokenRecord {
+  app: LinearApp;
+  workspace: string;
+  token: string;
+  revoked: boolean;
 }
 
 /** An issue as the in-memory workspace stores it. */
@@ -150,12 +159,16 @@ export class InMemoryTracker implements Tracker {
   readonly runnerRevokes: string[] = [];
   /** Every mint of either app, in order, with whether it landed. */
   readonly mints: MintRecord[] = [];
+  /** Every token minted for a check, in order. */
+  readonly checkTokens: CheckTokenRecord[] = [];
   /** Each uploaded file's bytes, by the URL `upload` returned. */
   readonly uploads = new Map<string, Uint8Array>();
 
   private readonly clock: () => Date;
   /** The user every write acts as: the Flight Deck app user, or the maintainer for a hand run. */
   private readonly actor: string;
+  /** Each app's own user, whom its token's `viewer` names. */
+  private readonly appUsers: Record<LinearApp, string>;
   private readonly teams = new Map<string, Team>();
   private readonly users = new Map<string, string>();
   private readonly issues = new Map<string, StoredIssue>();
@@ -168,9 +181,10 @@ export class InMemoryTracker implements Tracker {
   /** The tokens Linear rejects, as after an expiry or a revoke by hand. */
   private readonly rejected = new Set<string>();
 
-  constructor(options: { clock: () => Date; appUser: string }) {
+  constructor(options: { clock: () => Date; appUser: string; readerUser?: string }) {
     this.clock = options.clock;
     this.actor = options.appUser;
+    this.appUsers = { flight_deck: options.appUser, reader: options.readerUser ?? "flight-deck-reader" };
   }
 
   /**
@@ -508,6 +522,19 @@ export class InMemoryTracker implements Tracker {
 
   async tryReaderMint(workspace: string): Promise<void> {
     this.mint("reader", workspace, null);
+  }
+
+  // Who the adapter acts as. Every token reaches the workspace it was asked for.
+
+  async viewer(workspace: string): Promise<Viewer> {
+    return { id: this.actor, name: this.users.get(this.actor) ?? this.actor, workspace };
+  }
+
+  async appViewer(workspace: string, app: LinearApp): Promise<Viewer> {
+    this.mint(app, workspace, null);
+    this.checkTokens.push({ app, workspace, token: `check-${app}-${workspace}-${this.checkTokens.length + 1}`, revoked: true });
+    const id = this.appUsers[app];
+    return { id, name: this.users.get(id) ?? id, workspace };
   }
 
   // Helpers.

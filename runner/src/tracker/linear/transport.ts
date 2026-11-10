@@ -94,6 +94,13 @@ export class Transport {
     return this.checked(answer, options);
   }
 
+  /** A GraphQL call with one token, such as one just minted for a check. A token Linear rejects is refused. */
+  async withToken<T>(token: string, query: string, variables: Record<string, unknown>): Promise<GraphqlAnswer<T>> {
+    const answer = await this.post<T>(`Bearer ${token}`, query, variables);
+    if (answer === "unauthorized") throw new TrackerRefused("Linear rejected a token it had just minted");
+    return this.checked(answer, {});
+  }
+
   /** Whether Linear takes the token, by a `viewer` query (spec 1, "Session credentials"). */
   async accepts(token: string): Promise<boolean> {
     const answer = await this.post<{ viewer: { id: string } | null }>(`Bearer ${token}`, "query FlightDeckViewer { viewer { id } }", {});

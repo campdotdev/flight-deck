@@ -35,6 +35,11 @@ export const TEAM = `query FlightDeckTeam($key: String!) {
   }
 }`;
 
+/** Whom the token or key acts as, and the workspace it reaches. */
+export const VIEWER = `query FlightDeckIdentity {
+  viewer { id name organization { urlKey } }
+}`;
+
 export const SNAPSHOT_ISSUES = `query FlightDeckSnapshot($filter: IssueFilter!, $after: String) {
   issues(first: ${ISSUE_PAGE}, after: $after, filter: $filter) {
     pageInfo { hasNextPage endCursor }

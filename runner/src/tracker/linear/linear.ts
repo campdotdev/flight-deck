@@ -26,8 +26,10 @@ import {
   type TrackerIssue,
   type TrackerRepo,
   type UploadFile,
+  type Viewer,
   type WriteBriefOptions,
 } from "../types.ts";
+import type { LinearApp } from "../mint.ts";
 import * as Q from "./queries.ts";
 import { blocking, comment, issueFields, snapshot, type CommentNode, type IssueNode, type Page, type Read } from "./snapshot.ts";
 import { Transport, type LinearApps, type LinearIdentity } from "./transport.ts";
@@ -264,6 +266,21 @@ export class LinearTracker implements Tracker {
     await this.transport.revoke(await this.transport.mint("reader", workspace));
   }
 
+  // Who the adapter acts as.
+
+  async viewer(workspace: string): Promise<Viewer> {
+    return viewerOf(await this.query<{ viewer: ViewerNode }>(workspace, Q.VIEWER, {}));
+  }
+
+  async appViewer(workspace: string, app: LinearApp): Promise<Viewer> {
+    const token = await this.transport.mint(app, workspace);
+    try {
+      return viewerOf((await this.transport.withToken<{ viewer: ViewerNode }>(token, Q.VIEWER, {})).data!);
+    } finally {
+      await this.transport.revoke(token);
+    }
+  }
+
   // Helpers.
 
   private reader(workspace: string): Read {
@@ -343,6 +360,16 @@ export class LinearTracker implements Tracker {
 function syncAttachment(attachments: { id: string; url: string; sourceType: string | null }[]): string | null {
   const github = attachments.filter((each) => each.sourceType === "github" || /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/\d+/.test(each.url));
   return (github.find((each) => /\/issues\/\d+/.test(each.url)) ?? github[0])?.id ?? null;
+}
+
+interface ViewerNode {
+  id: string;
+  name: string;
+  organization: { urlKey: string };
+}
+
+function viewerOf(data: { viewer: ViewerNode }): Viewer {
+  return { id: data.viewer.id, name: data.viewer.name, workspace: data.viewer.organization.urlKey };
 }
 
 function byCreated(a: TrackerComment, b: TrackerComment): number {
