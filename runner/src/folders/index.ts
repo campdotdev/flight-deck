@@ -34,11 +34,13 @@ function repoPath(repo: string): string {
 export const paths = {
   configToml: (f: Folders) => join(f.config, "config.toml"),
   runnerGitconfig: (f: Folders) => join(f.config, "gitconfig-runner"),
+  credentials: (f: Folders) => join(f.config, "credentials.env"),
 
   state: (f: Folders) => join(f.data, "state"),
   sessionList: (f: Folders) => join(f.data, "state", "sessions.json"),
   status: (f: Folders) => join(f.data, "state", "status.json"),
   heartbeat: (f: Folders) => join(f.data, "state", "heartbeat"),
+  trouble: (f: Folders) => join(f.data, "state", "trouble.json"),
   log: (f: Folders) => join(f.data, "state", "runner.log"),
   /** Each usage hold and the latest `rate_limit_event`, so a hold survives a restart. */
   holds: (f: Folders) => join(f.data, "state", "holds.json"),
@@ -51,7 +53,7 @@ export const paths = {
   transcripts: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "transcripts"),
   transcript: (f: Folders, repo: string, session: string) => join(f.data, "repos", repoPath(repo), "transcripts", `${session}.jsonl`),
   cursor: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "cursor.json"),
-  /** The last valid record the runner read on the repo's default branch. */
+  /** The last valid record the runner read on the default branch, for stale-take limits (spec 1, poll step 8). */
   lastRecord: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "record.json"),
   issues: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "issues"),
   issueMemory: (f: Folders, repo: string, uuid: string) => join(f.data, "repos", repoPath(repo), "issues", `${uuid}.json`),

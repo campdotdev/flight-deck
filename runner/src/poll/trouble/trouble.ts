@@ -1,0 +1,269 @@
+// Trouble issues (spec 1, "Trouble issues", ADR 0011). A trouble cause stops the runner, or one repo's factory,
+// from starting sessions. Each poll learns which causes are open: steps 1 and 2 and the start check call `open`
+// for a cause they find and `clear` for one they checked and found fine. A cause nothing checked this poll keeps
+// its state. Step 10, `settle`, then files, flags, and notifies for each cause that opened, comments on each
+// issue whose cause cleared, and writes `state/trouble.json`.
+import { runnerComment } from "../../outbox/runner-comments/frame.ts";
+import type { State, StatusHold, TroubleCause, TroubleEntry, TroubleFacts, TroubleIssue } from "../../state/index.ts";
+import { isUnavailable, IssueNotFoundError, type StatusType, type Tracker, type TrackerRepo } from "../../tracker/index.ts";
+import { notify } from "./notify.ts";
+import { clearedText, troubleText } from "./texts.ts";
+
+/** What a step found when it opened a cause. */
+export interface TroubleFinding {
+  scope: TroubleEntry["scope"];
+  /** The repos it affects. Empty for a cause scoped to the runner, which affects every repo. */
+  repos: string[];
+  facts: TroubleFacts;
+}
+
+export interface SettleContext {
+  now: Date;
+  tracker: Tracker;
+  state: State;
+  /** The running version, for the footer. */
+  version: string;
+  /** The runner's `PATH`, where it finds `osascript`. */
+  path: string;
+  /** Each registered repo the Tracker can reach this poll, by name. */
+  repos: Map<string, TrackerRepo>;
+}
+
+/** An issue counts as open in a backlog, unstarted, started, or triage status (spec 1, "Trouble issues"). */
+const OPEN_TYPES: ReadonlySet<StatusType> = new Set(["triage", "backlog", "unstarted", "started"]);
+
+/** The causes that file a trouble issue. The others only notify. FLD-109 and FLD-112 add theirs. */
+const FILES: ReadonlySet<TroubleCause> = new Set(["missing_status", "claude_code_version", "github_token"]);
+
+/** `claude_login_soon` stops nothing. Every other cause holds sessions. */
+const HOLDS_NOTHING: ReadonlySet<TroubleCause> = new Set(["claude_login_soon"]);
+
+function key(cause: TroubleCause, id: string): string {
+  return `${cause} ${id}`;
+}
+
+/** One poll's view of the trouble causes. */
+export class Trouble {
+  private readonly opened = new Map<string, { cause: TroubleCause; id: string; finding: TroubleFinding }>();
+  private readonly cleared = new Map<string, TroubleFacts>();
+  /** The repos a trouble issue can be filed in this poll: the team reads and has its `intake` status. */
+  private readonly fileable = new Set<string>();
+
+  private constructor(private entries: TroubleEntry[]) {}
+
+  static async load(state: State): Promise<Trouble> {
+    return new Trouble(await state.trouble());
+  }
+
+  /** The cause is open this poll. */
+  open(cause: TroubleCause, id: string, finding: TroubleFinding): void {
+    this.opened.set(key(cause, id), { cause, id, finding });
+    this.cleared.delete(key(cause, id));
+  }
+
+  /** The step checked the cause and found it fine. `facts` holds what it saw, for the cleared comment. */
+  clear(cause: TroubleCause, id: string, facts: TroubleFacts = {}): void {
+    if (!this.opened.has(key(cause, id))) this.cleared.set(key(cause, id), facts);
+  }
+
+  /** Every known occurrence of the cause that didn't open this poll is fine, for a check that covers them all. */
+  clearOthers(cause: TroubleCause): void {
+    for (const entry of this.entries) if (entry.cause === cause) this.clear(cause, entry.id);
+  }
+
+  /** A trouble issue can be filed in this repo this poll. */
+  canFile(repo: string): void {
+    this.fileable.add(repo);
+  }
+
+  /** Whether the cause is open: it opened this poll, or it was open before and nothing checked it since. */
+  isOpen(cause: TroubleCause, id: string): boolean {
+    const k = key(cause, id);
+    if (this.opened.has(k)) return true;
+    if (this.cleared.has(k)) return false;
+    return this.entries.some((entry) => entry.cause === cause && entry.id === id && entry.open);
+  }
+
+  /** Whether an open cause stops every session on the Mac. */
+  stopsRunner(): boolean {
+    return this.current().some((each) => each.scope === "runner" && !HOLDS_NOTHING.has(each.cause));
+  }
+
+  /** Each open cause that stops sessions, as `status.json`'s holds: one per repo for a repo's cause. */
+  holds(): StatusHold[] {
+    return this.entries
+      .filter((entry) => entry.open && !HOLDS_NOTHING.has(entry.cause))
+      .flatMap((entry): StatusHold[] => {
+        const cause = entry.cause as StatusHold["cause"];
+        if (entry.scope === "runner") return [{ cause, scope: "runner", name: null, since: entry.since, until: null }];
+        return entry.repos.map((repo) => ({ cause, scope: entry.scope, name: repo, since: entry.since, until: null }));
+      });
+  }
+
+  /** `status.json`'s `trouble`: each open cause. */
+  status(): { cause: string; repos: string[]; issue_url: string | null; since: string }[] {
+    return this.entries
+      .filter((entry) => entry.open)
+      .map((entry) => ({ cause: entry.cause, repos: entry.repos, issue_url: entry.issues[0]?.url ?? null, since: entry.since }));
+  }
+
+  /** Step 10: file, flag, and notify for each cause that opened, and comment on each issue whose cause cleared. */
+  async settle(context: SettleContext): Promise<void> {
+    const at = context.now.toISOString();
+    const log = (message: string) => context.state.log(context.now, message);
+    const save = () => context.state.writeTrouble(this.entries);
+
+    for (const { cause, id, finding } of this.opened.values()) {
+      if (!this.entries.some((entry) => entry.cause === cause && entry.id === id)) {
+        this.entries.push({ cause, id, scope: finding.scope, repos: finding.repos, open: false, since: at, facts: finding.facts, issues: [] });
+      }
+    }
+
+    for (const entry of this.entries) {
+      const k = key(entry.cause, entry.id);
+      const assigned = await this.sync(context, entry);
+      const opening = this.opened.get(k);
+      if (opening !== undefined) {
+        const reopened = !entry.open;
+        if (reopened) {
+          entry.open = true;
+          entry.since = at;
+          entry.facts = opening.finding.facts;
+        }
+        entry.repos = opening.finding.repos;
+        const text = troubleText(entry, context.version);
+        if (reopened) {
+          await log(`trouble ${entry.cause} opened${entry.repos.length > 0 ? ` for ${entry.repos.join(", ")}` : ""}: ${text.title}${entry.facts.mode === undefined ? "" : ` (mode ${entry.facts.mode})`}`);
+          const posted = await notify(text.notification, { path: context.path });
+          if (!posted.ok) await log(`notification failed: ${posted.error}`);
+        }
+        if (text.body !== null) await this.file(context, entry, text.title, text.body, reopened ? assigned : null, save);
+      } else if (this.cleared.has(k) && entry.open) {
+        entry.open = false;
+        await log(`trouble ${entry.cause} cleared${entry.repos.length > 0 ? ` for ${entry.repos.join(", ")}` : ""}`);
+        const cleared = clearedText(entry, this.cleared.get(k) ?? {});
+        for (const issue of cleared === null ? [] : entry.issues) {
+          const repo = context.repos.get(issue.repo);
+          if (repo === undefined) continue;
+          const comment = runnerComment({ statusLine: cleared!.statusLine, sentences: cleared!.sentence, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses });
+          await this.attempt(log, `${issue.identifier}: cleared comment`, () => context.tracker.post({ id: issue.id, repo }, comment.body, { flag: false }));
+        }
+      }
+      await save();
+    }
+    this.entries = this.entries.filter((entry) => entry.open || entry.issues.length > 0);
+    await save();
+  }
+
+  /**
+   * Reads each of the entry's trouble issues. A closed or deleted one is forgotten, with its flag. An issue whose
+   * assignee the maintainer cleared loses its flag. Returns whether each issue still open is assigned.
+   */
+  private async sync(context: SettleContext, entry: TroubleEntry): Promise<Map<string, boolean>> {
+    const assigned = new Map<string, boolean>();
+    const kept: TroubleIssue[] = [];
+    for (const issue of entry.issues) {
+      const repo = context.repos.get(issue.repo);
+      if (repo === undefined) {
+        kept.push(issue);
+        continue;
+      }
+      let read;
+      try {
+        read = await context.tracker.issue({ id: issue.id, repo });
+      } catch (error) {
+        if (!(error instanceof IssueNotFoundError)) {
+          if (!isUnavailable(error)) throw error;
+          kept.push(issue);
+          continue;
+        }
+      }
+      if (read === undefined || !OPEN_TYPES.has(read.status_type)) {
+        await this.forgetFlag(context.state, issue);
+        continue;
+      }
+      if (read.assignee === null && issue.flagged) await this.forgetFlag(context.state, issue);
+      assigned.set(issue.id, read.assignee !== null);
+      kept.push(issue);
+    }
+    entry.issues = kept;
+    return assigned;
+  }
+
+  /**
+   * Makes sure each repo the entry affects has an open, flagged trouble issue. With `reopened`, the cause opened
+   * again: an issue the maintainer hasn't closed gets "🟡 Needs your help: " and the title, flagged again when
+   * it's no longer assigned, and no second issue is filed.
+   */
+  private async file(
+    context: SettleContext,
+    entry: TroubleEntry,
+    title: string,
+    body: string,
+    reopened: Map<string, boolean> | null,
+    save: () => Promise<void>,
+  ): Promise<void> {
+    const log = (message: string) => context.state.log(context.now, message);
+    const targets = entry.scope === "runner" ? [...this.fileable] : entry.repos.filter((repo) => this.fileable.has(repo));
+    for (const name of targets) {
+      const repo = context.repos.get(name);
+      if (repo === undefined) continue;
+      let issue = entry.issues.find((each) => each.repo === name);
+      if (issue !== undefined && reopened !== null) {
+        const unassigned = reopened.get(issue.id) === false;
+        if (unassigned) await this.rememberFlag(context, issue);
+        const comment = runnerComment({ statusLine: `🟡 Needs your help: ${issue.title}`, sentences: null, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses });
+        const target = issue;
+        const posted = await this.attempt(log, `${issue.identifier}: reopened comment`, () => context.tracker.post({ id: target.id, repo }, comment.body, { flag: unassigned }));
+        if (posted !== null && unassigned) issue.flagged = true;
+        await save();
+        continue;
+      }
+      if (issue === undefined) {
+        const filed = await this.attempt(log, `${name}: trouble issue ${entry.cause}`, () => context.tracker.file({ repo, title, description: body }, "intake"));
+        if (filed === null) continue;
+        issue = { repo: name, id: filed.value.id, identifier: filed.value.identifier, url: filed.value.url, title, flagged: false };
+        entry.issues.push(issue);
+        await save();
+        await log(`${issue.identifier}: filed for trouble ${entry.cause}`);
+      }
+      if (!issue.flagged) {
+        await this.rememberFlag(context, issue);
+        const target = issue;
+        const flagged = await this.attempt(log, `${issue.identifier}: flag`, () => context.tracker.flag({ id: target.id, repo }));
+        if (flagged !== null) issue.flagged = true;
+        await save();
+      }
+    }
+  }
+
+  /** The flag goes into issue memory before the write, as every runner flag does. Its status line is the title. */
+  private async rememberFlag(context: SettleContext, issue: TroubleIssue): Promise<void> {
+    const memory = await context.state.issueMemory(issue.repo, issue.id);
+    const flag = { cause: "trouble" as const, status_line: issue.title, since: context.now.toISOString(), issue: issue.identifier, title: issue.title, url: issue.url };
+    await context.state.writeIssueMemory(issue.repo, issue.id, { ...memory, flag });
+  }
+
+  private async forgetFlag(state: State, issue: TroubleIssue): Promise<void> {
+    const memory = await state.issueMemory(issue.repo, issue.id);
+    if (memory.flag !== null) await state.writeIssueMemory(issue.repo, issue.id, { ...memory, flag: null });
+  }
+
+  /** Runs one Tracker write. When Linear doesn't take it, logs that and returns `null`, and the next poll tries again. */
+  private async attempt<T>(log: (message: string) => Promise<void>, what: string, write: () => Promise<T>): Promise<{ value: T } | null> {
+    try {
+      return { value: await write() };
+    } catch (error) {
+      if (!isUnavailable(error)) throw error;
+      await log(`${what} not written: ${error.message}`);
+      return null;
+    }
+  }
+
+  /** The causes open now: those that opened this poll, and those still open from before that nothing checked. */
+  private current(): { cause: TroubleCause; scope: TroubleEntry["scope"] }[] {
+    const now = [...this.opened.values()].map(({ cause, finding }) => ({ cause, scope: finding.scope }));
+    const before = this.entries.filter((entry) => entry.open && this.isOpen(entry.cause, entry.id));
+    return [...now, ...before];
+  }
+}

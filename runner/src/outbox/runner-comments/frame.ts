@@ -87,7 +87,7 @@ function exitText(exit: ExitKind): string {
 }
 
 /** A fenced block longer than any run of backticks in the text. */
-function codeBlock(text: string): string {
+export function codeBlock(text: string): string {
   const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((run) => run[0].length));
   const fence = "`".repeat(Math.max(3, longest + 1));
   return `${fence}text\n${text.trim()}\n${fence}`;

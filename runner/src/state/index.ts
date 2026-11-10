@@ -19,4 +19,5 @@ export {
   type StoredHold,
 } from "./state.ts";
 export type * from "./status.ts";
+export type * from "./trouble.ts";
 export { readJson, writeAtomic, writeJson } from "./files.ts";

@@ -155,6 +155,36 @@ describe("clearFlag", () => {
   });
 });
 
+describe("flag", () => {
+  test("assigns the maintainer, which subscribes them, and posts nothing", async () => {
+    const { id, identifier } = tracker.addIssue({ team: "SHA", title: "Trouble", status: "Triage", creator: "app" });
+    await tracker.flag({ id, repo });
+    expect(tracker.writes).toEqual([{ kind: "assign", issue: identifier, user: "maintainer" }]);
+    const read = await tracker.issue({ id, repo });
+    expect(read.assignee).toBe("maintainer");
+    expect(read.subscribers).toContain("maintainer");
+    expect(read.comments).toEqual([]);
+  });
+});
+
+describe("checkTeam", () => {
+  test("passes when the team has every status the role map names", async () => {
+    expect(await tracker.checkTeam(repo)).toEqual({ ok: true });
+  });
+
+  test("names each missing status's role, in role order", async () => {
+    tracker.renameStatus("SHA", "Paused", "On hold");
+    tracker.renameStatus("SHA", "Triage", "Inbox");
+    expect(await tracker.checkTeam(repo)).toEqual({ ok: false, reason: "missing", roles: ["intake", "paused"] });
+  });
+
+  test("a team that doesn't exist or that the app can't read is unreadable", async () => {
+    expect(await tracker.checkTeam({ ...repo, team: "NOPE" })).toEqual({ ok: false, reason: "unreadable" });
+    tracker.setReadable("SHA", false);
+    expect(await tracker.checkTeam(repo)).toEqual({ ok: false, reason: "unreadable" });
+  });
+});
+
 describe("snapshot comments", () => {
   test("holds every comment created at or after `since`, replies included, with the issue each sits on", async () => {
     const one = issue("x", "Paused");
