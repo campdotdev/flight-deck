@@ -1,0 +1,18 @@
+# Documentation hosts every session's WebFetch may reach, beside the record's own hosts (spec 1, "`settings.json`").
+# WebFetch runs outside the sandbox, and permissions.deny keeps it off GitHub's hosts whatever this list holds (ADR 0007).
+hosts = [
+  "developer.mozilla.org",
+  "docs.github.com",
+  "nodejs.org",
+  "www.typescriptlang.org",
+  "react.dev",
+  "nextjs.org",
+  "vitest.dev",
+  "pnpm.io",
+  "docs.npmjs.com",
+  "git-scm.com",
+  "docs.python.org",
+  "doc.rust-lang.org",
+  "pkg.go.dev",
+  "code.claude.com",
+]

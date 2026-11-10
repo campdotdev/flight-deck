@@ -56,6 +56,12 @@ export const paths = {
   cache: (f: Folders, repo: string) => join(f.sessionRoot, "cache", repoPath(repo)),
   /** The files every session's sandbox reads, outside `~` (spec 1, "Folders and files"). */
   etc: (f: Folders) => join(f.sessionRoot, "etc"),
+  etcGitconfig: (f: Folders) => join(f.sessionRoot, "etc", "gitconfig"),
+  etcNpmrc: (f: Folders) => join(f.sessionRoot, "etc", "npmrc"),
+  etcRetryReset: (f: Folders) => join(f.sessionRoot, "etc", "retry-reset.cjs"),
+
+  /** The binary in a version folder, which a session's helpers run. */
+  bin: (versionFolder: string) => join(versionFolder, "bin", "flight-deck"),
 
   /** The folder Claude Code makes for a worktree: its path with every character but a letter or digit as `-`. */
   claudeProject: (f: Folders, worktree: string) => join(f.home, ".claude", "projects", worktree.replace(/[^A-Za-z0-9]/g, "-")),
@@ -65,6 +71,8 @@ export const paths = {
 export function sessionParts(folder: string) {
   return {
     sessionJson: join(folder, "session.json"),
+    settingsJson: join(folder, "settings.json"),
+    mcpJson: join(folder, "mcp.json"),
     inbox: join(folder, "inbox"),
     outbox: join(folder, "outbox"),
     tmp: join(folder, "tmp"),

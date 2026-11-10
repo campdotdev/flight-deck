@@ -6,7 +6,7 @@
 // issues, answers, flags, subscriptions, stale takes, trouble, usage, holds, retries, and the start order.
 import type { Folders } from "../folders/index.ts";
 import { paths, sessionParts } from "../folders/index.ts";
-import type { Exit, Harness, HarnessSession } from "../harness/index.ts";
+import { buildLaunch, type Auth, type Exit, type Harness, type HarnessSession, type Launch } from "../harness/index.ts";
 import { readConfig, type Config, type Registration } from "../install/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
@@ -204,8 +204,9 @@ export class Poll {
     const full = await this.tracker.issue(issue);
     const memory = await this.state.issueMemory(registration.name, issue.id);
 
-    // 3. Prepare. FLD-98 counts a failed prepare as a failed session.
+    // 3. Prepare, then the launch. FLD-98 counts a failure of either as a failed session.
     let prepared;
+    let launch: Launch;
     try {
       prepared = await workspace.prepare({
         session: id,
@@ -229,6 +230,20 @@ export class Poll {
           syncedComments: full.comments.filter((comment) => comment.synced).map((comment) => comment.id),
         },
       });
+      launch = await buildLaunch({
+        folders: this.folders,
+        id,
+        stage,
+        repo: registration.name,
+        issue: issue.identifier,
+        worktree: prepared.worktree,
+        sessionFolder: prepared.sessionFolder,
+        record,
+        env: prepared.env,
+        model: config.models.plan,
+        auth: auth(config),
+        versionFolder: this.versionFolder,
+      });
     } catch (error) {
       await this.state.log(now, `${id} ${issue.identifier}: prepare failed: ${(error as Error).message}`);
       await workspace.dispose({ session: id, worktree });
@@ -251,6 +266,7 @@ export class Poll {
       deadline,
       model: config.models.plan,
       versionFolder: this.versionFolder,
+      launch,
     };
     const handle = await this.harness.start(session, {
       exit: (exit) => void this.exits.push({ session: id, exit }),
@@ -321,6 +337,13 @@ function trackerRepo(config: Config, registration: Registration, record: RepoRec
   // FLD-98's trouble causes open `linear_login` for a workspace `login linear` hasn't signed in.
   if (linear === undefined) return null;
   return { name: registration.name, workspace: tracker.workspace, team: tracker.team, statuses: tracker.statuses, maintainer: linear.maintainer_id };
+}
+
+/** How sessions pay, from `config.toml` (ADR 0005). Install always writes `[api]` on an API key. */
+function auth(config: Config): Auth {
+  if (config.auth === "subscription") return { kind: "subscription" };
+  if (config.api === undefined) throw new Error("config.toml has auth = \"api_key\" and no [api] table");
+  return { kind: "api_key", sessionBudgetUsd: config.api.session_budget_usd };
 }
 
 /** Spec 1 takes only standalone issues: one with a parent or sub-issues waits for spec 4 (ADR 0004). */
