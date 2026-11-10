@@ -1,9 +1,11 @@
 export {
   State,
   type Answer,
+  type ApplyWait,
   type Flag,
   type FlagCause,
   type IssueMemory,
+  type KeptOutbox,
   type OpenPause,
   type PendingComment,
   type Mode,

@@ -34,6 +34,25 @@ export interface SessionEntry {
   started_at: string | null;
   deadline: string | null;
   state: SessionState;
+  /** An `apply_waiting` entry's tries. Absent on every other entry. */
+  apply?: ApplyWait;
+}
+
+/**
+ * The tries of an outbox Linear didn't take (spec 1, "Not yet written"). The runner applies it again at the
+ * next poll, then after 1, 2, 4, and 8 minutes, then every 15 minutes, with no session.
+ */
+export interface ApplyWait {
+  /** The folder whose outbox the runner applies: the session folder, or the kept folder for a kept outbox's take. */
+  folder: string;
+  /** `apply`: the status move hasn't landed. `after_move`: it has, and the stage handed off. `pause`: the outbox is kept, and the Linear-write pause hasn't landed. */
+  phase: "apply" | "after_move" | "pause";
+  /** ISO time of the first try. Three hours from here, the runner keeps the outbox, or drops the writes after the move. */
+  since: string;
+  /** ISO time of the last try. */
+  tried_at: string;
+  /** The tries so far in this phase. */
+  tries: number;
 }
 
 /** One answer a pause offers (ADR 0019). */
@@ -100,6 +119,8 @@ export interface PendingComment {
   comment_at: string | null;
   /** ISO time of the last try. */
   tried_at: string;
+  /** No try before this ISO time, for a comment that keeps its own backoff, such as the Linear-write pause. */
+  not_before?: string;
   /** The issue's identifier, title, and URL, for the flag. */
   issue: string;
   title: string;
@@ -116,9 +137,19 @@ export interface IssueMemory {
   pause: OpenPause | null;
   /** A runner comment Linear didn't take yet, or `null`. */
   pending: PendingComment | null;
+  /** The outbox the runner kept after Linear didn't take it for 3 hours, which the next take applies, or `null`. */
+  kept: KeptOutbox | null;
 }
 
-const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null };
+/** A kept outbox, in `repos/<owner>/<repo>/kept/<issue UUID>/` (spec 1, "Not yet written"). */
+export interface KeptOutbox {
+  /** The session that wrote it. */
+  session: string;
+  /** ISO time it was kept. */
+  at: string;
+}
+
+const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null, kept: null };
 
 export class State {
   constructor(private readonly folders: Folders) {}

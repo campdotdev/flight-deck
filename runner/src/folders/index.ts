@@ -49,6 +49,8 @@ export const paths = {
   cursor: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "cursor.json"),
   issues: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "issues"),
   issueMemory: (f: Folders, repo: string, uuid: string) => join(f.data, "repos", repoPath(repo), "issues", `${uuid}.json`),
+  /** An outbox Linear didn't take for 3 hours, outside the session root, so dispose and the sweep never touch it. */
+  kept: (f: Folders, repo: string, uuid: string) => join(f.data, "repos", repoPath(repo), "kept", uuid),
 
   worktrees: (f: Folders) => join(f.sessionRoot, "worktrees"),
   worktree: (f: Folders, session: string) => join(f.sessionRoot, "worktrees", session),

@@ -6,7 +6,7 @@
 import { Lifecycle } from "../../lifecycle/index.ts";
 import type { Role } from "../../record/index.ts";
 import type { PendingComment, State } from "../../state/index.ts";
-import { isUnavailable, type SnapshotIssue, type Tracker, type TrackerRepo } from "../../tracker/index.ts";
+import { isUnavailable, type Tracker, type TrackerRepo } from "../../tracker/index.ts";
 import type { RunnerComment } from "./frame.ts";
 
 /** The issue a runner comment goes on, as it stands when the runner writes it. */
@@ -64,14 +64,16 @@ export class RunnerComments {
   }
 
   /**
-   * Tries the issue's pending comment again, unless the last try was at this poll. `issue` is the issue as this
-   * poll's snapshot read it, or `null` when the snapshot no longer holds it. When the issue moved before the
-   * pause's move landed, the comment is dropped, because the maintainer moved it.
+   * Tries the issue's pending comment again, unless the last try was at this poll or its `not_before` hasn't
+   * come. `issue` is the issue as this poll read it, or `null` when the snapshot no longer holds it. When the
+   * issue moved before the pause's move landed, the comment is dropped, because the maintainer moved it.
    */
-  async retry(repo: TrackerRepo, uuid: string, issue: SnapshotIssue | null): Promise<RunnerWriteResult | null> {
+  async retry(repo: TrackerRepo, uuid: string, issue: { role: Role | null } | null): Promise<RunnerWriteResult | null> {
     const memory = await this.state.issueMemory(repo.name, uuid);
     const pending = memory.pending;
-    if (pending === null || pending.tried_at >= this.clock().toISOString()) return pending === null ? null : "pending";
+    const now = this.clock().toISOString();
+    if (pending === null) return null;
+    if (pending.tried_at >= now || (pending.not_before !== undefined && now < pending.not_before)) return "pending";
     const moved = pending.pause !== null && !pending.landed.includes("move") && issue?.role !== pending.pause.from;
     if (issue === null || moved) {
       const flag = pending.landed.includes("post") ? memory.flag : null;
