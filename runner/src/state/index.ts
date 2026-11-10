@@ -6,6 +6,7 @@ export {
   type FlagCause,
   type IssueMemory,
   type KeptOutbox,
+  type LastRecord,
   type OpenPause,
   type PendingComment,
   type Mode,
