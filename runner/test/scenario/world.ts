@@ -165,23 +165,23 @@ export class World {
       sessionRoot: join(root, "session-root"),
       home: join(root, "home"),
     };
-    const versionFolder = join(folders.data, "versions", VERSION);
+    const versionFolder = paths.version(folders, VERSION);
     for (const folder of [folders.config, folders.sessionRoot, folders.home, join(versionFolder, "skills"), join(versionFolder, "plugin")]) {
       await mkdir(folder, { recursive: true });
     }
-    await writeFile(join(folders.config, "gitconfig-runner"), "");
+    await writeFile(paths.runnerGitconfig(folders), "");
     // The version folder's binary is Bun itself, which acts as Bun under BUN_BE_BUN as the compiled binary
     // does, and its vendored sandbox-runtime and Betterleaks are the repo's.
     await mkdir(join(versionFolder, "bin"), { recursive: true });
-    await symlink(process.execPath, join(versionFolder, "bin", "flight-deck"));
+    await symlink(process.execPath, paths.bin(versionFolder));
     await mkdir(join(versionFolder, "vendor"), { recursive: true });
     await symlink(VENDOR_SANDBOX_RUNTIME, join(versionFolder, "vendor", "sandbox-runtime"));
     if (!existsSync(VENDOR_BETTERLEAKS)) throw new Error("vendor/betterleaks is missing. Run scripts/fetch-betterleaks.sh.");
-    await symlink(VENDOR_BETTERLEAKS, join(versionFolder, "vendor", "betterleaks"));
+    await symlink(VENDOR_BETTERLEAKS, paths.betterleaks(versionFolder));
     // The shipped skill Shaders' record names in `plan.reproduce`, so its slot resolves.
     await mkdir(join(versionFolder, "skills", "reproducing-bugs"), { recursive: true });
     await writeFile(join(versionFolder, "skills", "reproducing-bugs", "SKILL.md"), "---\nname: reproducing-bugs\n---\n");
-    await writeFile(join(folders.config, "credentials.env"), CREDENTIALS, { mode: 0o600 });
+    await writeFile(paths.credentials(folders), CREDENTIALS, { mode: 0o600 });
     // A stub `osascript` first on the runner's PATH, which records each notification instead of posting it.
     await mkdir(join(root, "bin"));
     await writeFile(join(root, "bin", "osascript"), `#!/bin/sh\nfor arg in "$@"; do last="$arg"; done\nprintf '%s\\n' "$last" >> '${join(root, "notifications.log")}'\n`, { mode: 0o755 });
@@ -228,7 +228,7 @@ export class World {
     this.config.repos.push({ ...first, name: input.name, remote, checkout: join(this.root, `checkout-${slug}`), tracker: { ...first.tracker, workspace, team: input.team } });
     if (this.config.linear[workspace] === undefined) {
       this.config.linear[workspace] = { ...this.config.linear.campdotdev! };
-      const credentials = await readFile(join(this.folders.config, "credentials.env"), "utf8");
+      const credentials = await readFile(paths.credentials(this.folders), "utf8");
       await this.writeCredentials(credentials + credentialsFor(workspace));
     }
     await this.writeConfig();
@@ -289,13 +289,13 @@ export class World {
    * the runner reads it at its next start (spec 1, "The runner's socket").
    */
   async writeHoldMarker(by: "hold" | "stop"): Promise<void> {
-    await mkdir(join(this.folders.data, "state"), { recursive: true });
-    await writeFile(join(this.folders.data, "state", "hold"), `${JSON.stringify({ by, since: this.now.toISOString() })}\n`);
+    await mkdir(paths.state(this.folders), { recursive: true });
+    await writeFile(paths.holdMarker(this.folders), `${JSON.stringify({ by, since: this.now.toISOString() })}\n`);
   }
 
   /** `status.json`, the state file. */
   async status(): Promise<Status> {
-    return JSON.parse(await readFile(join(this.folders.data, "state", "status.json"), "utf8")) as Status;
+    return JSON.parse(await readFile(paths.status(this.folders), "utf8")) as Status;
   }
 
   /** The text of each macOS notification the runner posted, in order. */
@@ -306,12 +306,12 @@ export class World {
 
   /** Replaces `credentials.env`, keeping its mode. */
   async writeCredentials(text: string): Promise<void> {
-    await writeFile(join(this.folders.config, "credentials.env"), text);
+    await writeFile(paths.credentials(this.folders), text);
   }
 
   /** Sets `credentials.env`'s mode. */
   async credentialsMode(mode: number): Promise<void> {
-    await chmod(join(this.folders.config, "credentials.env"), mode);
+    await chmod(paths.credentials(this.folders), mode);
   }
 
   /** A new runner over the same data folder, as after a restart, or after `flight-deck update` with `version`. */
@@ -321,7 +321,7 @@ export class World {
   }
 
   async writeConfig(): Promise<void> {
-    await writeFile(join(this.folders.config, "config.toml"), toToml(this.config as unknown as Record<string, unknown>));
+    await writeFile(paths.configToml(this.folders), toToml(this.config as unknown as Record<string, unknown>));
   }
 
   /**
