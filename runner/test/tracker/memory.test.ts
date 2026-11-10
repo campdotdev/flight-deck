@@ -125,6 +125,74 @@ describe("post", () => {
   });
 });
 
+describe("clearFlag", () => {
+  test("clears the assignee, then unsubscribes the maintainer, because Linear keeps an assignee subscribed", async () => {
+    const one = issue();
+    await tracker.post(one, "🟡 Needs your answer: which one?", { flag: true });
+    tracker.writes.length = 0;
+    await tracker.clearFlag(one);
+    expect(tracker.writes).toEqual([
+      { kind: "unassign", issue: one.identifier },
+      { kind: "unsubscribe", issue: one.identifier, user: "maintainer" },
+    ]);
+    const read = await tracker.issue(one);
+    expect(read.assignee).toBeNull();
+    expect(read.subscribers).not.toContain("maintainer");
+  });
+
+  test("on an issue with no assignee, it only unsubscribes, and only a subscribed maintainer", async () => {
+    const one = issue();
+    await tracker.clearFlag(one);
+    await tracker.clearFlag(one);
+    expect(tracker.writes).toEqual([{ kind: "unsubscribe", issue: one.identifier, user: "maintainer" }]);
+  });
+
+  test("clears an assignee who isn't the maintainer", async () => {
+    const { id, identifier } = tracker.addIssue({ team: "SHA", title: "x", status: "Planning", creator: "maintainer", assignee: "stranger" });
+    await tracker.clearFlag({ id, repo });
+    expect(tracker.writes[0]).toEqual({ kind: "unassign", issue: identifier });
+    expect((await tracker.issue({ id, repo })).assignee).toBeNull();
+  });
+});
+
+describe("snapshot comments", () => {
+  test("holds every comment created at or after `since`, replies included, with the issue each sits on", async () => {
+    const one = issue("x", "Paused");
+    const early = tracker.addComment(one.id, { author: "maintainer", body: "early" });
+    now = new Date("2026-11-10T09:05:00Z");
+    const top = tracker.addComment(one.id, { author: "maintainer", body: "top" });
+    const reply = tracker.addComment(one.id, { author: "stranger", body: "reply", parent: top.id });
+    expect((await tracker.snapshot(repo)).comments.map((comment) => comment.id)).toEqual([early.id, top.id, reply.id]);
+    const since = await tracker.snapshot(repo, { since: "2026-11-10T09:05:00.000Z" });
+    expect(since.comments).toEqual([
+      { ...top, issue: one.id },
+      { ...reply, issue: one.id },
+    ]);
+  });
+
+  test("returns a comment's body as it stands, so an edit shows", async () => {
+    const one = issue("x", "Paused");
+    const comment = tracker.addComment(one.id, { author: "maintainer", body: "Which red?" });
+    tracker.editComment(comment.id, "retry");
+    expect((await tracker.snapshot(repo)).comments[0]?.body).toBe("retry");
+  });
+
+  test("leaves out comments on issues the snapshot doesn't hold", async () => {
+    const one = issue("x", "Backlog");
+    tracker.addComment(one.id, { author: "maintainer", body: "x" });
+    expect((await tracker.snapshot(repo)).comments).toEqual([]);
+  });
+});
+
+describe("post's result", () => {
+  test("is the comment's ID and creation time", async () => {
+    const one = issue();
+    const posted = await tracker.post(one, "text", { flag: true });
+    const stored = (await tracker.issue(one)).comments.at(-1)!;
+    expect(posted).toEqual({ id: stored.id, created_at: "2026-11-10T09:00:00.000Z" });
+  });
+});
+
 describe("writeBrief", () => {
   const brief = "## Summary\n\nMake the button red.\n\n## Context\n\n- Slots: reproduce: not a bug";
 

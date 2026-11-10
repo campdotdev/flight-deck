@@ -46,6 +46,8 @@ export const paths = {
   clone: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "clone"),
   transcripts: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "transcripts"),
   transcript: (f: Folders, repo: string, session: string) => join(f.data, "repos", repoPath(repo), "transcripts", `${session}.jsonl`),
+  cursor: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "cursor.json"),
+  issues: (f: Folders, repo: string) => join(f.data, "repos", repoPath(repo), "issues"),
   issueMemory: (f: Folders, repo: string, uuid: string) => join(f.data, "repos", repoPath(repo), "issues", `${uuid}.json`),
 
   worktrees: (f: Folders) => join(f.sessionRoot, "worktrees"),
