@@ -1,10 +1,13 @@
 // The hidden prompt (spec 1, "Install"): every command that reads a secret reads it here, with echo off, so no
-// terminal transcript holds one. At a terminal it reads in raw mode and echoes nothing but the line break that
-// ends the answer. From a pipe it reads one line per prompt, so a script can feed it.
+// terminal transcript holds one. At a terminal it reads a secret in raw mode and echoes nothing but the line break
+// that ends the answer. Install's other questions, such as the choice of billing, read in the terminal's own line
+// mode, which echoes them. From a pipe it reads one line per prompt, so a script can feed it.
 
 export interface Prompt {
   /** Asks the question and reads one answer that nobody sees as it's typed. Throws "Canceled." at Ctrl-C or end of input. */
   secret(question: string): Promise<string>;
+  /** Asks a question whose answer isn't secret, such as install's choice of billing. The terminal echoes it. */
+  ask(question: string): Promise<string>;
 }
 
 /** What the prompt reads: stdin, or a stand-in stream in tests. */
@@ -53,39 +56,44 @@ export function hiddenPrompt(input: PromptInput, output: { write(text: string): 
     });
   };
 
-  return {
-    async secret(question) {
-      output.write(`${question}: `);
-      const raw = input.isTTY === true && typeof input.setRawMode === "function";
-      listen();
-      if (raw) input.setRawMode!(true);
-      input.resume();
-      let answer = "";
-      try {
-        for (;;) {
-          while (pending !== "") {
-            const char = pending[0]!;
-            pending = pending.slice(1);
-            if (ENTER.has(char)) {
-              // A Windows line ending from a pipe: the `\n` after the `\r` belongs to this line.
-              if (char === "\r" && pending[0] === "\n") pending = pending.slice(1);
-              return answer;
-            }
-            if (raw && CANCEL.has(char)) throw new Canceled();
-            if (raw && ERASE.has(char)) answer = answer.slice(0, -1);
-            else answer += char;
+  const read = async (question: string, hidden: boolean): Promise<string> => {
+    output.write(`${question}: `);
+    const terminal = input.isTTY === true && typeof input.setRawMode === "function";
+    // A visible answer reads in the terminal's own line mode, which echoes it and its line break.
+    const raw = hidden && terminal;
+    listen();
+    if (raw) input.setRawMode!(true);
+    input.resume();
+    let answer = "";
+    try {
+      for (;;) {
+        while (pending !== "") {
+          const char = pending[0]!;
+          pending = pending.slice(1);
+          if (ENTER.has(char)) {
+            // A Windows line ending from a pipe: the `\n` after the `\r` belongs to this line.
+            if (char === "\r" && pending[0] === "\n") pending = pending.slice(1);
+            return answer;
           }
-          if (ended) {
-            if (answer !== "") return answer;
-            throw new Canceled();
-          }
-          await new Promise<void>((resolve) => (waiting = resolve));
+          if (raw && CANCEL.has(char)) throw new Canceled();
+          if (raw && ERASE.has(char)) answer = answer.slice(0, -1);
+          else answer += char;
         }
-      } finally {
-        if (raw) input.setRawMode!(false);
-        input.pause();
-        output.write("\n");
+        if (ended) {
+          if (answer !== "") return answer;
+          throw new Canceled();
+        }
+        await new Promise<void>((resolve) => (waiting = resolve));
       }
-    },
+    } finally {
+      if (raw) input.setRawMode!(false);
+      input.pause();
+      if (hidden || !terminal) output.write("\n");
+    }
+  };
+
+  return {
+    secret: (question) => read(question, true),
+    ask: (question) => read(question, false),
   };
 }

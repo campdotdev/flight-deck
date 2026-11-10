@@ -108,7 +108,8 @@ export interface WorldOptions {
 }
 
 export class World {
-  readonly version = VERSION;
+  /** The running version, which `restart({ version })` changes as `flight-deck update` does. */
+  version = VERSION;
   readonly maintainer = { id: "maintainer", name: "Hunter" };
   readonly appUser = "flight-deck-app";
   readonly repo = "campdotdev/shaders";
@@ -318,8 +319,9 @@ export class World {
     await chmod(join(this.folders.config, "credentials.env"), mode);
   }
 
-  /** A new runner over the same data folder, as after a restart. */
-  restart(): void {
+  /** A new runner over the same data folder, as after a restart, or after `flight-deck update` with `version`. */
+  restart(options: { version?: string } = {}): void {
+    if (options.version !== undefined) this.version = options.version;
     this.poll = this.newPoll();
   }
 

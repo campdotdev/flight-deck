@@ -23,6 +23,9 @@ const context: CommandContext = {
     secret: () => {
       throw new Error("the contract rig's flight-deck runs only linear-token");
     },
+    ask: () => {
+      throw new Error("the contract rig's flight-deck runs only linear-token");
+    },
   },
   cwd: process.cwd(),
   env: process.env,
@@ -33,6 +36,16 @@ const context: CommandContext = {
     appTracker: () => {
       throw new Error("the contract rig's flight-deck runs only linear-token");
     },
+  },
+  shell: {
+    run: () => {
+      throw new Error("the contract rig's flight-deck runs only linear-token");
+    },
+    open: () => {
+      throw new Error("the contract rig's flight-deck runs only linear-token");
+    },
+    sleep: (ms) => Bun.sleep(ms),
+    uid: 0,
   },
 };
 process.exit(await linearTokenCommand(argv, context));

@@ -35,6 +35,22 @@ export const paths = {
   configToml: (f: Folders) => join(f.config, "config.toml"),
   runnerGitconfig: (f: Folders) => join(f.config, "gitconfig-runner"),
   credentials: (f: Folders) => join(f.config, "credentials.env"),
+  /** The machine user's `gh` config, `GH_CONFIG_DIR` for every `gh` the runner runs (ADR 0005). */
+  ghConfig: (f: Folders) => join(f.config, "gh"),
+
+  /** Every installed version folder (ADR 0015). */
+  versions: (f: Folders) => join(f.data, "versions"),
+  version: (f: Folders, version: string) => join(f.data, "versions", version),
+  /** The link to the version in use. */
+  current: (f: Folders) => join(f.data, "current"),
+  /** The runner's launcher, which install writes once and never changes (ADR 0024). */
+  launcher: (f: Folders) => join(f.data, "launch", "flight-deck"),
+  /** The LaunchAgent's stdout and stderr, which catch a crash before the runner opens its log. */
+  launchdLog: (f: Folders) => join(f.data, "state", "launchd.log"),
+  /** `~/.local/bin/flight-deck`, the maintainer's link to `current/bin/flight-deck`. */
+  binLink: (f: Folders) => join(f.home, ".local", "bin", "flight-deck"),
+  /** The runner's LaunchAgent (ADRs 0002 and 0024). */
+  launchAgent: (f: Folders) => join(f.home, "Library", "LaunchAgents", "dev.campdotdev.flight-deck.plist"),
 
   state: (f: Folders) => join(f.data, "state"),
   sessionList: (f: Folders) => join(f.data, "state", "sessions.json"),
