@@ -133,8 +133,8 @@ interface Team {
 /** The status types of an issue that's still open: not done, canceled, or a duplicate. */
 const CLOSED_TYPES = new Set<StatusType>(["completed", "canceled", "duplicate"]);
 
-/** The writes a scenario can make Linear refuse. */
-export type RefusableWrite = "move" | "post" | "flag" | "clearFlag" | "unsubscribe" | "writeBrief" | "markDuplicate" | "file" | "relate" | "detach" | "upload";
+/** The writes a scenario can make Linear refuse, and `snapshot`, the poll's read. */
+export type RefusableWrite = "snapshot" | "move" | "post" | "flag" | "clearFlag" | "unsubscribe" | "writeBrief" | "markDuplicate" | "file" | "relate" | "detach" | "upload";
 
 /** Roles whose issues a snapshot returns: the factory statuses and `intake`. */
 const SNAPSHOT_ROLES = new Set<Role>(["intake", ...FACTORY_ROLES]);
@@ -316,6 +316,7 @@ export class InMemoryTracker implements Tracker {
   // Reads.
 
   async snapshot(repo: TrackerRepo, options: SnapshotOptions = {}): Promise<Snapshot> {
+    this.refused("snapshot");
     const issues = [...this.issues.values()]
       .filter((issue) => issue.team === repo.team && !issue.archived)
       .map((issue) => this.snapshotIssue(issue, repo))

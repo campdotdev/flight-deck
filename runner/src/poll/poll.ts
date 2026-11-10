@@ -22,7 +22,7 @@ import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from
 import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/record.ts";
 import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
 import { State, type OpenPause, type PortPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
-import { FACTORY_ROLES, MintFailed, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
+import { FACTORY_ROLES, isUnavailable, MintFailed, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { portInUse, Workspace, type FetchResult } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
 import { ApplyWaiting, waitingEntry as applyWaitingEntry } from "./apply-waiting.ts";
@@ -479,6 +479,28 @@ export class Poll {
         await this.state.writeLastRecord(registration.name, { commit: fetch.head, read_at: now.toISOString(), record: record.record });
       }
     }
+    // A Linear call this repo's poll needs that Linear didn't take, such as `RATELIMITED`, skips the repo until
+    // the next poll, and the other repos poll as usual (ADR 0002).
+    try {
+      return await this.pollTracker(now, config, credentials, registration, workspace, trouble, fetch, record);
+    } catch (error) {
+      if (!isUnavailable(error)) throw error;
+      await this.state.log(now, `${registration.name}: Linear didn't take the poll (${error.reason}), so the repo waits for the next poll: ${error.message}`);
+      return { registration, tracker: null, fetch, record, snapshot: null, waitingForSpecs: [], waitingForBlockers: [], waitingForPort: null, blocked: new Set(), staleTakes: [] };
+    }
+  }
+
+  /** Steps 2 to 8 of a repo's poll: every step that reads or writes Linear. */
+  private async pollTracker(
+    now: Date,
+    config: Config,
+    credentials: Credentials | null,
+    registration: Registration,
+    workspace: Workspace,
+    trouble: Trouble,
+    fetch: FetchResult,
+    record: RecordResult | null,
+  ): Promise<RepoPoll> {
     const repo = await this.checkTeam(now, config, credentials, registration, record?.ok === true ? record.record : null, trouble);
 
     // 3. Snapshot, with the comments since the repo's cursor.
