@@ -35,11 +35,12 @@ function scan(text: string): { lines: Map<string, number>; first: Path | undefin
   let pos = 0;
   let line = 1;
 
-  const mark = (path: Path) => {
+  const mark = (path: Path, header = false) => {
     first ??= path;
     for (let k = 1; k <= path.length; k++) {
       const id = JSON.stringify(path.slice(0, k));
-      if (!lines.has(id)) lines.set(id, line);
+      // A table's own header replaces the line that an earlier child header implied for it.
+      if (!lines.has(id) || (header && k === path.length)) lines.set(id, line);
     }
   };
 
@@ -143,7 +144,7 @@ function scan(text: string): { lines: Map<string, number>; first: Path | undefin
       } else {
         table = resolve(keys);
       }
-      mark(table);
+      mark(table, true);
     } else {
       const keys = readKey();
       pos++; // "="

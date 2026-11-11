@@ -104,6 +104,12 @@ describe("schema errors", () => {
     ]);
   });
 
+  test("a missing key sorts by its table's own header, even when a child table's header comes first", () => {
+    let text = edit('[tracker]\nkind = "linear"\nworkspace = "campdotdev"\nteam = "SHA"\n\n', "");
+    text = edit('folders = ["node_modules"]\n', 'folders = "node_modules"\n\n[tracker]\nkind = "linear"\nworkspace = "campdotdev"\n', text);
+    expect(errorsOf(text)).toEqual(["dependencies.folders: must be a list", "tracker.team: is missing"]);
+  });
+
   test("a CI-only extra may leave out run", () => {
     expect(readRecord(shaders).ok).toBe(true);
     expect(shaders).toContain('[[extras]]\nname = "Fallow audit"\nwhere = "ci"\n');
