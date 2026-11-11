@@ -56,19 +56,27 @@ function parse(text: string): { ok: true; data: unknown } | { ok: false; error: 
 }
 
 /**
- * Bun's TOML parser reports no line, so find the first line where a parse of the text up to it
- * fails with the same message. A prefix that stops inside a multi-line value fails differently.
+ * Bun's TOML parser reports no line, so find the first line from which every longer prefix of the
+ * text fails with the same message. A shorter prefix can fail with it too: one that stops at a
+ * complete multi-line string's opening `"""` is an unterminated string.
  */
 function parseErrorLine(text: string, message: string): number | undefined {
   const lines = text.split("\n");
-  for (let n = 1; n <= lines.length; n++) {
-    try {
-      Bun.TOML.parse(`${lines.slice(0, n).join("\n")}\n`);
-    } catch (error) {
-      if (errorMessage(error).replace(PARSE_PREFIX, "") === message) return n;
-    }
+  let line: number | undefined;
+  for (let n = lines.length; n >= 1; n--) {
+    if (prefixError(lines, n) !== message) break;
+    line = n;
   }
-  return undefined;
+  return line;
+}
+
+function prefixError(lines: string[], n: number): string | undefined {
+  try {
+    Bun.TOML.parse(`${lines.slice(0, n).join("\n")}\n`);
+    return undefined;
+  } catch (error) {
+    return errorMessage(error).replace(PARSE_PREFIX, "");
+  }
 }
 
 function errorMessage(error: unknown): string {

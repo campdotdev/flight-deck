@@ -22,6 +22,7 @@ describe("parse errors", () => {
     ["a key defined twice", edit('team = "SHA"', 'team = "SHA"\nteam = "SHA"'), ["line 12: Cannot redefine key 'team'"]],
     ["after a multi-line value", edit('folders = ["node_modules"]', 'folders = [\n  "node_modules",\n]\nfolders = []'), ["line 35: Cannot redefine key 'folders'"]],
     ["an unterminated string", edit('team = "SHA"', 'team = "SHA'), ["line 11: Unterminated string; newlines must be escaped in basic strings"]],
+    ["an unterminated string after a multi-line one", edit('team = "SHA"', 'team = """\nSHA"""\nnote = """\nSHA'), ["line 13: Unterminated string"]],
   ])("%s names its line", (_, text, expected) => {
     expect(errorsOf(text)).toEqual(expected);
   });
