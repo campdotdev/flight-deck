@@ -12,10 +12,13 @@ type App = NonNullable<RepoRecord["app"]>;
 /**
  * The session's port: `default_port` for a single-instance app, which "Starts" has already tested. Otherwise the
  * lowest port in 4400 to 4999 that no listed session holds and that `portInUse` finds free. Throws when none is
- * free, which fails `prepare`.
+ * free, or when a listed session holds the single-instance app's port, which fails `prepare`.
  */
 export async function sessionPort(app: App, held: ReadonlySet<number>): Promise<number> {
-  if (app.single_instance) return app.default_port;
+  if (app.single_instance) {
+    if (held.has(app.default_port)) throw new Error(`another session holds the app's port ${app.default_port}`);
+    return app.default_port;
+  }
   for (let port = SESSION_PORTS.from; port <= SESSION_PORTS.to; port++) {
     if (!held.has(port) && !(await portInUse(port))) return port;
   }

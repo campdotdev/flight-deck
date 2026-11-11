@@ -165,6 +165,27 @@ describe("a single-instance app", () => {
   });
 });
 
+describe("two single-instance apps on one port", () => {
+  test("the second repo's take waits while the first repo's session holds the port, with no pause", async () => {
+    const port = await freePort();
+    world = await World.create({ record: singleInstance(port) });
+    await world.addRepo({ name: "campdotdev/docs", team: "DOC", record: singleInstance(port) });
+    const shaders = sent({ title: "Save button is blue", priority: 1 });
+    world.now = new Date(world.now.getTime() + 60_000);
+    const docs = world.issue({ team: "DOC", title: "Docs typo", priority: 2 });
+    world.send(docs);
+    await world.tick();
+
+    // The first session doesn't listen on the port yet, so only the session list keeps the second repo off it.
+    expect(world.harness.started.map((each) => each.session.issue)).toEqual([shaders.identifier]);
+    expect(world.harness.started[0]!.sessionJson.port).toBe(port);
+    expect(world.tracker.stored(docs.id).status).toBe("Ready to plan");
+    expect(world.tracker.writes.filter((write) => write.kind === "comment")).toEqual([]);
+    const status = await world.status();
+    expect(status.repos.find((repo) => repo.name === "campdotdev/docs")!.waiting_for_port).toEqual({ port, issues: [docs.identifier] });
+  });
+});
+
 describe("the port test", () => {
   test.each(["0.0.0.0", "::", "::1"])("counts a listener on %s as in use", async (host) => {
     const port = await freePort();

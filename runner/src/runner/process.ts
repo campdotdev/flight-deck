@@ -6,7 +6,7 @@ import type { Folders } from "../folders/index.ts";
 import { paths } from "../folders/index.ts";
 import type { Harness } from "../harness/index.ts";
 import { Poll } from "../poll/index.ts";
-import { ask } from "../socket/index.ts";
+import { listening } from "../socket/index.ts";
 import { State } from "../state/index.ts";
 import type { Tracker } from "../tracker/index.ts";
 import { listenRunnerSocket } from "./socket.ts";
@@ -38,13 +38,16 @@ export interface Runner {
   terminate(): Promise<void>;
 }
 
-/** Starts the runner. It refuses while another runner answers on the socket. */
+/**
+ * Starts the runner. It refuses while another runner listens on the socket, even one too busy to answer, because
+ * `listen` replaces the socket file and restart recovery would treat the other runner's sessions as its own.
+ */
 export async function startRunner(options: RunnerOptions): Promise<Runner> {
   const { folders, version } = options;
   const clock = options.clock ?? (() => new Date());
   const intervalMs = options.intervalMs ?? INTERVAL_MS;
   const socketPath = paths.socket(folders);
-  if ((await ask(socketPath, { op: "sessions" }, 2_000)) !== null) throw new Error(`another runner is answering on ${socketPath}`);
+  if (await listening(socketPath)) throw new Error(`another runner is listening on ${socketPath}`);
 
   const path = options.path ?? process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
   const state = new State(folders);

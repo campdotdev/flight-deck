@@ -1071,6 +1071,8 @@ export class Poll {
     candidates.sort((a, b) => startOrder(a.issue, b.issue));
     /** The single-instance repos that start nothing more this poll: their one session runs, or their port is in use. */
     const full = new Set(repos.filter((poll) => runsOne(sessions, poll.registration.name)).map((poll) => poll.registration.name));
+    /** The single-instance repos whose `default_port` another repo's session holds, with that port. */
+    const portHeld = new Map<string, number>();
     for (const { poll, issue } of candidates) {
       if (!(await room())) break;
       // A Reader mint that failed at an earlier start this poll holds the rest of its workspace.
@@ -1079,6 +1081,12 @@ export class Poll {
       if (app !== null) {
         if (full.has(poll.registration.name)) continue;
         full.add(poll.registration.name);
+        // Another session holds the port before its app listens on it, so the port test would pass: the take waits,
+        // with no pause, because Flight Deck's own session holds the port, not the maintainer's process.
+        if ((await this.heldPorts()).includes(app.default_port)) {
+          portHeld.set(poll.registration.name, app.default_port);
+          continue;
+        }
         if (await this.portTaken(now, poll, issue, app.default_port, portPauses)) continue;
       }
       free--;
@@ -1088,7 +1096,9 @@ export class Poll {
 
     for (const poll of repos) {
       const pause = portPauses.get(poll.registration.name) ?? null;
+      const held = portHeld.get(poll.registration.name);
       if (pause !== null) poll.waitingForPort = { port: pause.port, issues: queued(poll, busy).filter((issue) => issue.id !== pause.issue) };
+      else if (held !== undefined) poll.waitingForPort = { port: held, issues: queued(poll, busy) };
     }
   }
 

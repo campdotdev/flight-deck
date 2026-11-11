@@ -197,13 +197,13 @@ export class World {
   /**
    * Registers a second repo on its own team, with Shaders' statuses and record, on its own bare remote. Issues on
    * it are filed with `world.issue({ team, ... })`. With `workspace`, the repo's team sits in another Linear
-   * workspace, with its own login.
+   * workspace, with its own login. With `record`, the repo's record is that text, on its own team and workspace.
    */
-  async addRepo(input: { name: string; team: string; workspace?: string }): Promise<void> {
+  async addRepo(input: { name: string; team: string; workspace?: string; record?: string }): Promise<void> {
     const slug = input.name.replace("/", "-");
     const remote = join(this.root, `${slug}.git`);
     const workspace = input.workspace ?? "campdotdev";
-    await makeRemote(this.root, remote, SHADERS_RECORD.replace('team = "SHA"', `team = "${input.team}"`).replace('workspace = "campdotdev"', `workspace = "${workspace}"`));
+    await makeRemote(this.root, remote, (input.record ?? SHADERS_RECORD).replace('team = "SHA"', `team = "${input.team}"`).replace('workspace = "campdotdev"', `workspace = "${workspace}"`));
     this.tracker.addTeam({ key: input.team, name: input.name, statuses: Object.values(STATUSES).map(([name, type]) => ({ name, type })) });
     const first = this.config.repos[0]!;
     this.config.repos.push({ ...first, name: input.name, remote, checkout: join(this.root, `checkout-${slug}`), tracker: { ...first.tracker, workspace, team: input.team } });

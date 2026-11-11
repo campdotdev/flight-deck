@@ -3,10 +3,10 @@
 // `shutdown`, revokes its Linear token, and exits.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { startRunner, type Runner } from "../../src/runner/index.ts";
-import { ask } from "../../src/socket/index.ts";
+import { ask, listen } from "../../src/socket/index.ts";
 import { World } from "../scenario/world.ts";
 
 let world: World;
@@ -91,7 +91,26 @@ test("on SIGTERM, stops each running session as shutdown, revokes its token, and
   ]);
 });
 
-test("refuses to start while another runner answers on the socket", async () => {
+test("refuses to start while another runner listens on the socket", async () => {
   runner = await start();
-  await expect(start()).rejects.toThrow("another runner is answering on");
+  await expect(start()).rejects.toThrow("another runner is listening on");
+});
+
+test("refuses to start while another runner listens but is too busy to answer", async () => {
+  const busy = await listen(socketPath(), () => new Promise<never>(() => {}));
+  try {
+    await expect(start()).rejects.toThrow("another runner is listening on");
+  } finally {
+    await busy.close();
+  }
+});
+
+test("starts over a socket file a dead runner left", async () => {
+  // A process that binds the socket and exits without removing it, as a runner that crashed does.
+  await mkdir(dirname(socketPath()), { recursive: true });
+  const bind = "import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])";
+  expect(Bun.spawnSync(["python3", "-c", bind, socketPath()]).exitCode).toBe(0);
+  expect(existsSync(socketPath())).toBe(true);
+  runner = await start();
+  expect(await ask(socketPath(), { op: "sessions" }, 5_000)).toEqual({ ok: true, sessions: [] });
 });

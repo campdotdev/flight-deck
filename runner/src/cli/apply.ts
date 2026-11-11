@@ -12,8 +12,8 @@ import { trackerRepo } from "../poll/index.ts";
 import { readRecord, resolveSlots, type RepoRecord } from "../record/index.ts";
 import { State } from "../state/index.ts";
 import { Workspace } from "../workspace/index.ts";
-import { ANSWER_MS, type CommandContext } from "./context.ts";
-import { handRunMemory } from "./issue-memory.ts";
+import type { CommandContext } from "./context.ts";
+import { handRunMemory, MEMORY_ANSWER_MS } from "./issue-memory.ts";
 
 const RECORD_PATH = ".flight-deck/record.toml";
 
@@ -67,7 +67,7 @@ async function apply(folder: string, dryRun: boolean, context: CommandContext): 
     state: new State(context.folders),
     clock: context.clock,
     repo: (name) => (name === registration.name ? repo : null),
-    memory: handRunMemory(context.folders, context.answerMs ?? ANSWER_MS),
+    memory: handRunMemory(context.folders, context.answerMs ?? MEMORY_ANSWER_MS),
     secrets: new SecretScan({ folders: context.folders, versionFolder: context.versionFolder }),
   });
   const result = await outbox.apply(folder, {

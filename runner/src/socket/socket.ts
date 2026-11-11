@@ -113,3 +113,22 @@ export function ask(path: string, request: Request, timeoutMs: number): Promise<
     });
   });
 }
+
+/**
+ * Whether a process listens on `path`: a connect succeeds or is still pending after `timeoutMs`. Only a refused
+ * connect or a missing socket file means no one listens, because a busy runner still accepts connections while
+ * its Poll's queue holds the reply.
+ */
+export function listening(path: string, timeoutMs = 1_000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection(path);
+    const done = (result: boolean) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(result);
+    };
+    const timer = setTimeout(() => done(true), timeoutMs);
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}

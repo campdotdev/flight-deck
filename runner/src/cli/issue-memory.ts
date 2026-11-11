@@ -1,33 +1,42 @@
 // A hand run's writes to issue memory (spec 1, "The runner's socket"). They go through the runner with the
-// `issue_memory` op, so the runner never writes the same file at the same time. When the runner doesn't answer,
-// `flight-deck apply` writes the file itself, under a lock file beside it.
+// `issue_memory` op, so the runner never writes the same file at the same time. When no runner listens on the
+// socket, `flight-deck apply` writes the file itself, under a lock file beside it. A runner that listens but is
+// slow to answer still owns the file, because it never takes the lock and its queued write still lands.
 import { mkdir, open, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { paths, type Folders } from "../folders/index.ts";
 import type { IssueMemoryWrites } from "../outbox/index.ts";
-import { ask } from "../socket/index.ts";
+import { ask, listening } from "../socket/index.ts";
 import { State } from "../state/index.ts";
 
 /** How long a lock may stand before the command takes it for one a crashed `apply` left. */
 const STALE_LOCK_MS = 30_000;
 /** How long the command waits for another `apply` to let go of the lock. */
 const LOCK_WAIT_MS = 10_000;
+/** How long `apply` waits for a listening runner's answer: its write waits in the Poll's queue behind a tick. */
+export const MEMORY_ANSWER_MS = 5 * 60_000;
 
 /**
- * Issue memory's writes for `flight-deck apply`: over the socket while the runner answers, and under the lock
- * file from the first write it doesn't answer, so a hung runner costs one wait, not one per write.
+ * Issue memory's writes for `flight-deck apply`: over the socket while a runner listens, and under the lock file
+ * from the first write no runner listens for. A listening runner that doesn't answer within `answerMs` fails the
+ * write rather than racing it.
  */
 export function handRunMemory(folders: Folders, answerMs: number): IssueMemoryWrites {
-  let runnerAnswers = true;
+  let runnerListens = true;
   const state = new State(folders);
   return {
     write: async (repo, uuid, fields) => {
-      if (runnerAnswers) {
+      if (runnerListens && (await listening(paths.socket(folders)))) {
         const reply = await ask(paths.socket(folders), { op: "issue_memory", repo, issue: uuid, write: fields }, answerMs);
         if (reply?.ok === true) return;
-        if (reply !== null) throw new Error(`the runner refused the write to issue memory: ${reply.ok ? "no reason given" : reply.error}`);
-        runnerAnswers = false;
+        if (reply === null) {
+          throw new Error(
+            `the runner is running but didn't answer the write to issue memory within ${answerMs / 1000} seconds, so apply didn't write it itself; run apply again`,
+          );
+        }
+        throw new Error(`the runner refused the write to issue memory: ${reply.ok ? "no reason given" : reply.error}`);
       }
+      runnerListens = false;
       const file = paths.issueMemory(folders, repo, uuid);
       await locked(`${file}.lock`, async () => state.mergeIssueMemory(repo, uuid, fields));
     },

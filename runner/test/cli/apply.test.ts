@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import type { RunnerSocket } from "../../src/runner/index.ts";
 import { TrackerRefused, type StoredIssue, type TrackerWrite } from "../../src/tracker/index.ts";
 import { outbox, World } from "../scenario/world.ts";
+import { listen as listenSocket } from "../../src/socket/index.ts";
+import { State } from "../../src/state/index.ts";
 import { cli, listen } from "./cli.ts";
 import { STATUSES } from "../statuses.ts";
 
@@ -196,6 +198,19 @@ describe("a hand run's pause", () => {
       expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
     });
   }
+});
+
+describe("a hand run's issue memory while the runner listens but doesn't answer", () => {
+  test("fails the write instead of writing the file beside the runner", async () => {
+    await world.tick();
+    // A runner busy in a tick: it accepts the connection, and its reply waits in the Poll's queue.
+    socket = await listenSocket(join(world.folders.data, "state", "runner.sock"), () => new Promise<never>(() => {}));
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    const folder = await handRun(issue, PAUSE);
+    const command = cli(world, {}, { answerMs: 200 });
+    await expect(command.run("apply", folder)).rejects.toThrow("the runner is running but didn't answer the write to issue memory");
+    expect((await new State(world.folders).issueMemory(world.repo, issue.id)).pause ?? null).toBeNull();
+  });
 });
 
 /** A brief with a Key interfaces section, for the rules that read it. */

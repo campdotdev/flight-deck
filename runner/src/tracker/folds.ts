@@ -2,6 +2,8 @@
 // `+++ <title>` and closes with a `+++` line. `>>>` is the older spelling of the same lines.
 
 const FOLD_LINE = /^(?:\+\+\+|>>>)(?:[ \t]+(.*?))?[ \t]*$/;
+/** A Markdown code fence: up to three spaces, then three or more backticks or tildes. */
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
 /** The fold's title for an opening line, `""` for a closing line, or `null` for any other line. */
 function foldTitle(line: string): string | null {
@@ -10,12 +12,35 @@ function foldTitle(line: string): string | null {
   return match[1] ?? "";
 }
 
+/**
+ * Each line's fold title, as `foldTitle` reads it, or `null` inside a fenced code block, so a `>>>` prompt in a
+ * pasted reproduction stays code.
+ */
+function foldTitles(lines: readonly string[]): (string | null)[] {
+  let fence: string | null = null;
+  return lines.map((line) => {
+    const match = FENCE_LINE.exec(line);
+    if (fence === null) {
+      // A backtick fence's info string has no backtick.
+      if (match !== null && !(match[1]!.startsWith("`") && match[2]!.includes("`"))) {
+        fence = match[1]!;
+        return null;
+      }
+      return foldTitle(line);
+    }
+    // The closing fence is the same character, at least as long, with nothing after it.
+    if (match !== null && match[1]![0] === fence[0] && match[1]!.length >= fence.length && match[2]!.trim() === "") fence = null;
+    return null;
+  });
+}
+
 /** Writes every `>>>` fold line as `+++`. */
 export function plusFolds(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => {
-      const title = foldTitle(line);
+  const lines = text.split("\n");
+  const titles = foldTitles(lines);
+  return lines
+    .map((line, index) => {
+      const title = titles[index] ?? null;
       if (title === null) return line;
       return title === "" ? "+++" : `+++ ${title}`;
     })
@@ -29,8 +54,10 @@ export function plusFolds(text: string): string {
 export function flattenFolds(text: string): string {
   const out: string[] = [];
   let dropped = false;
-  for (const line of text.split("\n")) {
-    const title = foldTitle(line);
+  const lines = text.split("\n");
+  const titles = foldTitles(lines);
+  for (const [index, line] of lines.entries()) {
+    const title = titles[index] ?? null;
     if (title === "") {
       dropped = true;
       continue;
@@ -51,10 +78,11 @@ export function fold(title: string, body: string): string {
 /** The text inside the description's last fold when that fold is `+++ Report` and ends the description, else `null`. */
 function trailingReport(description: string): string | null {
   const lines = description.trimEnd().split("\n");
+  const titles = foldTitles(lines);
   const close = lines.length - 1;
-  if (foldTitle(lines[close] ?? "") !== "") return null;
+  if (titles[close] !== "") return null;
   for (let open = close - 1; open >= 0; open--) {
-    const title = foldTitle(lines[open] ?? "");
+    const title = titles[open] ?? null;
     if (title === null) continue;
     if (title !== "Report") return null;
     return lines.slice(open + 1, close).join("\n").trim();
