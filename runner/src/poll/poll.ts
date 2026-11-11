@@ -86,6 +86,8 @@ interface RepoPoll {
 interface QueuedExit {
   session: string;
   exit: Exit;
+  /** Set once the exit's cost counted and its Reader token was revoked, so a handler that threw doesn't do them twice. */
+  counted?: true;
 }
 
 export class Poll {
@@ -540,69 +542,85 @@ export class Poll {
     if (queued.length === 0) return;
     const outbox = this.outbox(now, config);
     const waiting: QueuedExit[] = [];
-    for (const { session, exit } of queued) {
+    for (const queuedExit of queued) {
+      const { session, exit } = queuedExit;
       const entry = (await this.state.sessions()).find((each) => each.id === session);
       if (entry === undefined) continue;
-      this.login.exited(now, entry, exit, trouble);
-      // A trial has no repo, no issue, and no Reader token.
-      if (entry.stage === "trial") {
-        // Its cost counts toward the caps, and a plan limit holds the runner as after any session.
-        await this.usage.spent(now, config, exit.costUsd);
-        if (exit.kind === "rate_limited") await this.usage.rateLimited(now, config, exit.resetsAt);
-        await this.trials.exited({ now, entry, exit, workspace, trouble });
-        continue;
+      // A handler that throws, such as on a Linear read that failed, keeps its exit queued for the next poll, and
+      // the exits after it still run. Each handler reads Linear before it drops the session's entry.
+      try {
+        if (await this.handleExit(now, config, workspace, trouble, outbox, entry, queuedExit)) waiting.push(queuedExit);
+      } catch (error) {
+        await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind} failed, tried again next poll: ${error instanceof Error ? error.message : String(error)}`);
+        waiting.push(queuedExit);
       }
-      const registration = config.repos.find((repo) => repo.name === entry.repo);
-      const repo = registration === undefined ? null : trackerRepo(config, registration, null);
-      if (repo === null) {
-        await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind}, and ${entry.repo} has no Linear sign-in`);
-        await this.finish(entry, workspace);
-        continue;
-      }
-      await this.tracker.revoke({ id: entry.id, repo });
-      const usable = await this.tokens.usable(now, config, repo.workspace, trouble);
-      if (!usable && exit.kind !== "exited") {
-        // The Flight Deck app can't mint, and this exit's handling reads or writes Linear, so the exit waits in the
-        // queue for the first poll whose mint works.
-        await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind} waits for a Linear token for ${repo.workspace}`);
-        waiting.push({ session, exit });
-        continue;
-      }
-      await this.usage.spent(now, config, exit.costUsd);
-      if (!usable) {
-        // A handoff the runner can't apply yet waits as `apply_waiting`, with its outbox kept (ADR 0005).
-        await workspace.dispose({ session: entry.id, worktree: entry.worktree }, { keepFolder: true });
-        const sessionFolder = paths.sessionFolder(this.folders, entry.id);
-        const kept = applyWaitingEntry(entry, { folder: sessionFolder, phase: "apply", now });
-        await this.state.updateSession(entry.id, () => kept);
-        await this.state.log(now, `${entry.id} ${entry.issue}: no Linear token for ${repo.workspace}, the outbox waits to apply`);
-        continue;
-      }
-
-      const sessionFolder = paths.sessionFolder(this.folders, entry.id);
-      const { transcript, claudeCodeVersion: _, error, costUsd: __, ...kind } = exit;
-      const facts: RunnerFacts = { exit: kind as ExitKind, session: entry.id, attempt: entry.attempt, transcript };
-      if (error !== undefined) facts.error = error;
-      const context: ExitContext = {
-        now,
-        entry,
-        exit,
-        config,
-        repo,
-        tracker: this.tracker,
-        state: this.state,
-        workspace,
-        sessionFolder,
-        facts,
-        apply: () => outbox.apply(sessionFolder, { identity: this.tracker, facts }),
-        finish: () => this.finish(entry, workspace),
-        fail: (failure) => this.fail(now, repo, entry, failure, facts, workspace),
-        pause: (text) => this.runnerPause(now, repo, entry, text, facts, workspace),
-        log: (message) => this.state.log(now, `${entry.id} ${entry.issue}: ${message}`),
-      };
-      await EXITS[exit.kind](context);
     }
     this.exits.unshift(...waiting);
+  }
+
+  /** Handles one exit. Returns `true` when the exit waits in the queue for a later poll. */
+  private async handleExit(now: Date, config: Config, workspace: Workspace, trouble: Trouble, outbox: Outbox, entry: SessionEntry, queued: QueuedExit): Promise<boolean> {
+    const { exit } = queued;
+    if (queued.counted !== true) this.login.exited(now, entry, exit, trouble);
+    // A trial has no repo, no issue, and no Reader token.
+    if (entry.stage === "trial") {
+      // Its cost counts toward the caps, and a plan limit holds the runner as after any session.
+      if (queued.counted !== true) await this.usage.spent(now, config, exit.costUsd);
+      queued.counted = true;
+      if (exit.kind === "rate_limited") await this.usage.rateLimited(now, config, exit.resetsAt);
+      await this.trials.exited({ now, entry, exit, workspace, trouble });
+      return false;
+    }
+    const registration = config.repos.find((repo) => repo.name === entry.repo);
+    const repo = registration === undefined ? null : trackerRepo(config, registration, null);
+    if (repo === null) {
+      await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind}, and ${entry.repo} has no Linear sign-in`);
+      await this.finish(entry, workspace);
+      return false;
+    }
+    if (queued.counted !== true) await this.tracker.revoke({ id: entry.id, repo });
+    const usable = await this.tokens.usable(now, config, repo.workspace, trouble);
+    if (!usable && exit.kind !== "exited") {
+      // The Flight Deck app can't mint, and this exit's handling reads or writes Linear, so the exit waits in the
+      // queue for the first poll whose mint works.
+      await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind} waits for a Linear token for ${repo.workspace}`);
+      return true;
+    }
+    if (queued.counted !== true) await this.usage.spent(now, config, exit.costUsd);
+    queued.counted = true;
+    if (!usable) {
+      // A handoff the runner can't apply yet waits as `apply_waiting`, with its outbox kept (ADR 0005).
+      await workspace.dispose({ session: entry.id, worktree: entry.worktree }, { keepFolder: true });
+      const sessionFolder = paths.sessionFolder(this.folders, entry.id);
+      const kept = applyWaitingEntry(entry, { folder: sessionFolder, phase: "apply", now });
+      await this.state.updateSession(entry.id, () => kept);
+      await this.state.log(now, `${entry.id} ${entry.issue}: no Linear token for ${repo.workspace}, the outbox waits to apply`);
+      return false;
+    }
+
+    const sessionFolder = paths.sessionFolder(this.folders, entry.id);
+    const { transcript, claudeCodeVersion: _, error, costUsd: __, ...kind } = exit;
+    const facts: RunnerFacts = { exit: kind as ExitKind, session: entry.id, attempt: entry.attempt, transcript };
+    if (error !== undefined) facts.error = error;
+    const context: ExitContext = {
+      now,
+      entry,
+      exit,
+      config,
+      repo,
+      tracker: this.tracker,
+      state: this.state,
+      workspace,
+      sessionFolder,
+      facts,
+      apply: () => outbox.apply(sessionFolder, { identity: this.tracker, facts }),
+      finish: () => this.finish(entry, workspace),
+      fail: (failure) => this.fail(now, repo, entry, failure, facts, workspace),
+      pause: (text) => this.runnerPause(now, repo, entry, text, facts, workspace),
+      log: (message) => this.state.log(now, `${entry.id} ${entry.issue}: ${message}`),
+    };
+    await EXITS[exit.kind](context);
+    return false;
   }
 
   private outbox(now: Date, config: Config): Outbox {
@@ -663,8 +681,9 @@ export class Poll {
    * working status, the maintainer moved it, and nothing is posted.
    */
   private async runnerPause(now: Date, repo: TrackerRepo, entry: SessionEntry, text: RunnerText, facts: RunnerFacts, workspace: Workspace): Promise<void> {
-    await this.finish(entry, workspace);
+    // Linear first: a read that fails leaves the entry, so the exit runs again at the next poll.
     const issue = await stillWorking(this.tracker, repo, entry);
+    await this.finish(entry, workspace);
     if (issue === null || issue.role === null) {
       await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, no pause posted`);
       return;

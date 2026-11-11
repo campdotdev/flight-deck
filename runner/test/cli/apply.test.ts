@@ -1,7 +1,7 @@
 // `flight-deck apply [--dry-run] <folder>` (spec 1, "Hand runs"): a hand run's outbox, applied with the
 // maintainer's setup key, makes the writes the runner would make, and the exit code says what happened.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { RunnerSocket } from "../../src/runner/index.ts";
 import { TrackerRefused, type StoredIssue, type TrackerWrite } from "../../src/tracker/index.ts";
@@ -256,6 +256,38 @@ describe("a hand run's refused outbox names the rule, and writes nothing", () =>
     await world.tick();
     const issue = world.issue({ title: "Save button is blue", description: REPORT });
     const folder = await handRun(issue, files());
+    const before = world.tracker.writes.length;
+    const command = cli(world);
+    expect(await command.run("apply", folder)).toBe(1);
+    expect(command.err).toEqual([`Refused: ${rule}`]);
+    expect(world.tracker.writes.length).toBe(before);
+  });
+
+  test.each<[string, (outbox: string) => Promise<void>, string]>([
+    [
+      "a brief.md that links to a file outside the outbox",
+      async (outbox) => {
+        await writeFile(join(world.root, "private.md"), "## Summary\n\nNot the session's to post.");
+        await symlink(join(world.root, "private.md"), join(outbox, "brief.md"));
+      },
+      "brief.md isn't a file: the outbox takes no symlink or other entry in its place",
+    ],
+    ["a folder named brief.md", (outbox) => mkdir(join(outbox, "brief.md")), "brief.md isn't a file: the outbox takes no symlink or other entry in its place"],
+    [
+      "a media link to a folder outside the outbox",
+      async (outbox) => {
+        await writeFile(join(outbox, "brief.md"), KEYED_BRIEF);
+        await mkdir(join(world.root, "elsewhere"));
+        await symlink(join(world.root, "elsewhere"), join(outbox, "media"));
+      },
+      "media isn't a folder: the outbox takes no symlink or other entry in its place",
+    ],
+  ])("%s", async (_, make, rule) => {
+    await world.tick();
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    const { "brief.md": _brief, ...rest } = briefWith();
+    const folder = await handRun(issue, rest);
+    await make(join(folder, "outbox"));
     const before = world.tracker.writes.length;
     const command = cli(world);
     expect(await command.run("apply", folder)).toBe(1);

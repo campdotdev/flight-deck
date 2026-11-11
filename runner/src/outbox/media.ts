@@ -3,8 +3,8 @@
 // once and embeds it once (ADR 0019).
 import { extname } from "node:path";
 
-/** `![alt](target)` or `![alt](target "title")`, with an optional `<target>`. */
-const IMAGE = /!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g;
+/** `![alt](target)`, or with a title in `"…"`, `'…'`, or `(…)` after the target, and an optional `<target>`. */
+const IMAGE = /!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g;
 
 /** A bare file name: no folder, no scheme, no query, and not `.` or `..`. */
 function isBareName(target: string): boolean {

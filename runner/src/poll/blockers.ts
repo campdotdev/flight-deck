@@ -23,8 +23,9 @@ export function blockerTest(issue: SnapshotIssue): BlockerTest {
   for (const blocker of issue.blockers) {
     const counted = countsAs(blocker);
     if (!counted.readable) open.push(blocker);
-    else if (counted.status_type === "canceled") canceled.push(blocker as ReadableIssue);
-    else if (counted.status_type === "duplicate") nothing.push(blocker as ReadableIssue);
+    // The pause names the issue whose status stopped plan: a duplicate blocker's original, when it has one.
+    else if (counted.status_type === "canceled") canceled.push(counted);
+    else if (counted.status_type === "duplicate") nothing.push(counted);
     else if (counted.status_type !== "completed") open.push(blocker);
   }
   if (canceled.length > 0 || nothing.length > 0) return { kind: "pause", canceled, nothing };

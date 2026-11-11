@@ -177,6 +177,25 @@ describe("a blocker that won't be done", () => {
     ]);
   });
 
+  test("a duplicate blocker of a canceled original pauses the issue, and names the original", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const duplicate = blocker("Duplicate", "Pick colors");
+    const original = blocker("Canceled", "Pick the palette");
+    world.tracker.setDuplicate(duplicate.id, original.id);
+    world.tracker.addBlocker(issue.id, duplicate.id);
+    world.send(issue);
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    expect(world.tracker.writes.find((write) => write.kind === "comment")).toEqual({
+      kind: "comment",
+      issue: issue.identifier,
+      body: pauseComment(
+        "🟡 Needs your help: a blocker was canceled",
+        `Plan can't start, because a blocker of this issue won't be done. ${link(original)} was canceled. Remove the blocking relation, or reopen the blocker.`,
+      ),
+    });
+  });
+
   test("a duplicate blocker with no original pauses the issue", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     const orphan = blocker("Duplicate", "Pick colors");

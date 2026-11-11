@@ -41,6 +41,9 @@ export interface FollowUp {
 /** The handoff file each move names. */
 const HANDOFF_FILES: Partial<Record<Role, string>> = { ready_to_build: "brief.md", paused: "pause.md" };
 const HANDOFF_NAMES = new Set(["brief.md", "pause.md", "claims.md", "verdict.md"]);
+/** The envelope's other files, and its folders. */
+const FILES = new Set(["outcome.json", "summary.md"]);
+const FOLDERS = new Set(["media", "follow-ups"]);
 /** The moves each stage's outbox may make. */
 const STAGE_MOVES: Partial<Record<Stage, readonly Role[]>> = { plan: ["ready_to_build", "paused", "duplicate"] };
 /** The moves each stage's pause answers may name. Plan's name only `ready_to_plan`, because plan rewrites the brief (ADR 0026). */
@@ -69,9 +72,16 @@ export interface CheckContext {
 /** Reads the outbox and checks it (spec 1, "Checks"). The first broken rule fails it. */
 export async function readEnvelope(outbox: string, context: CheckContext): Promise<EnvelopeResult> {
   const fail = (rule: string): EnvelopeResult => ({ ok: false, rule });
-  const names = (await readdir(outbox).catch(() => null))?.sort() ?? null;
-  if (names === null) return fail("the outbox is missing");
+  const entries = await readdir(outbox, { withFileTypes: true }).catch(() => null);
+  if (entries === null) return fail("the outbox is missing");
+  const names = entries.map((entry) => entry.name).sort();
   if (!names.includes("outcome.json")) return fail("the outbox holds no outcome.json");
+  // The runner reads what the session left, so a symlink could hand it a file the session's sandbox can't read.
+  for (const entry of entries) {
+    const folder = FOLDERS.has(entry.name);
+    if (!folder && !FILES.has(entry.name) && !HANDOFF_NAMES.has(entry.name)) continue;
+    if (folder ? !entry.isDirectory() : !entry.isFile()) return fail(`${entry.name} isn't a ${folder ? "folder" : "file"}: the outbox takes no symlink or other entry in its place`);
+  }
 
   let outcome: Record<string, unknown>;
   try {

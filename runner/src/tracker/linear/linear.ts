@@ -67,10 +67,16 @@ interface FullIssueNode extends IssueNode {
 }
 
 /** Linear's form of a UUID, which the mutations' ID arguments take. An identifier such as `SHA-12` isn't one. */
+/** The team cache's key: the workspace and the team key. */
+function teamKey(repo: TrackerRepo): string {
+  return `${repo.workspace}/${repo.team}`;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class LinearTracker implements Tracker {
   private readonly transport: Transport;
+  /** Each team, by `teamKey`, since two workspaces can each hold a team with the same key. */
   private readonly teams = new Map<string, Team>();
   /** Each session's Reader token, by session ID, with its workspace. */
   private readonly readers = new Map<string, { workspace: string; token: string }>();
@@ -326,7 +332,7 @@ export class LinearTracker implements Tracker {
   /** The UUID of the team's status that the record names for the role, reading the team again once when it's missing. */
   private async stateId(repo: TrackerRepo, role: Role): Promise<string> {
     const name = repo.statuses[role];
-    const cached = this.teams.get(repo.team)?.states.find((state) => state.name === name);
+    const cached = this.teams.get(teamKey(repo))?.states.find((state) => state.name === name);
     if (cached !== undefined) return cached.id;
     const state = (await this.loadTeam(repo))?.states.find((each) => each.name === name);
     if (state === undefined) throw new TrackerRefused(`team ${repo.team} has no status ${name}`);
@@ -334,7 +340,7 @@ export class LinearTracker implements Tracker {
   }
 
   private async team(repo: TrackerRepo): Promise<Team> {
-    const team = this.teams.get(repo.team) ?? (await this.loadTeam(repo));
+    const team = this.teams.get(teamKey(repo)) ?? (await this.loadTeam(repo));
     if (team === null) throw new TrackerRefused(`the Flight Deck app can't read team ${repo.team}`);
     return team;
   }
@@ -344,11 +350,11 @@ export class LinearTracker implements Tracker {
     const data = await this.query<{ teams: { nodes: { id: string; key: string; states: { nodes: Team["states"] } }[] } }>(repo.workspace, Q.TEAM, { key: repo.team });
     const node = data.teams.nodes.find((each) => each.key === repo.team);
     if (node === undefined) {
-      this.teams.delete(repo.team);
+      this.teams.delete(teamKey(repo));
       return null;
     }
     const team = { id: node.id, key: node.key, states: node.states.nodes };
-    this.teams.set(repo.team, team);
+    this.teams.set(teamKey(repo), team);
     return team;
   }
 }

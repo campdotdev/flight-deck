@@ -40,8 +40,10 @@ export async function updateCommand(argv: string[], context: CommandContext): Pr
     context.err(`The runner refused to hold for the update: ${held.error}`);
     return 1;
   }
+  // Sent even when the hold got no answer: a runner too busy to answer still holds once its queue reaches the
+  // request, and the release waits in the queue behind it.
   const release = async () => {
-    if (held !== null) await ask(socket, { op: "release", cause: "update" }, waitMs);
+    await ask(socket, { op: "release", cause: "update" }, waitMs);
   };
 
   let sessions: SessionEntry[];

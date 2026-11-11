@@ -145,6 +145,21 @@ describe("refuses, and changes nothing,", () => {
     expect(shell.calls).toEqual([]);
   });
 
+  test("while the session list on disk holds an entry and the runner is too busy to answer the hold, and still ends it", async () => {
+    await mkdir(join(folders.data, "state"), { recursive: true });
+    await writeFile(join(folders.data, "state/sessions.json"), JSON.stringify([entry("a1b2c3", "SHA-1", "running")]));
+    // A runner in a tick: the hold's answer comes after the command stops waiting for it.
+    socket = await listen(join(folders.data, "state/runner.sock"), async (request) => {
+      requests.push(request);
+      if (request.op === "hold") await Bun.sleep(600);
+      return { ok: true };
+    });
+    const cli = command();
+    expect(await cli.run("update", "--from", build)).toBe(1);
+    expect(cli.err[0]).toStartWith("Refused: the session list holds 1 session");
+    expect(requests).toEqual([{ op: "hold", cause: "update" }, { op: "release", cause: "update" }]);
+  });
+
   test("a version already in versions/, before it asks the runner anything", async () => {
     await runner();
     const again = await versionFolder(join(root, "again"), OLD);

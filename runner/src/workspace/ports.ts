@@ -10,13 +10,15 @@ export const SESSION_PORTS = { from: 4400, to: 4999 } as const;
 type App = NonNullable<RepoRecord["app"]>;
 
 /**
- * The session's port: `default_port` for a single-instance app, which "Starts" has already tested. Otherwise the
- * lowest port in 4400 to 4999 that no listed session holds and that `portInUse` finds free. Throws when none is
- * free, or when a listed session holds the single-instance app's port, which fails `prepare`.
+ * The session's port: `default_port` for a single-instance app. "Starts" tests it before a take, and this tests
+ * it again, because a failed session's retry starts with no take. Otherwise the lowest port in 4400 to 4999 that
+ * no listed session holds and that `portInUse` finds free. Throws when none is free, or when a listed session or
+ * another process holds the single-instance app's port, which fails `prepare`.
  */
 export async function sessionPort(app: App, held: ReadonlySet<number>): Promise<number> {
   if (app.single_instance) {
     if (held.has(app.default_port)) throw new Error(`another session holds the app's port ${app.default_port}`);
+    if (await portInUse(app.default_port)) throw new Error(`port ${app.default_port}, which the app runs on, is in use`);
     return app.default_port;
   }
   for (let port = SESSION_PORTS.from; port <= SESSION_PORTS.to; port++) {

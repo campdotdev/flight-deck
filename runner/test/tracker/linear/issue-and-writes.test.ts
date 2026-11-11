@@ -2,10 +2,10 @@
 // folds, top-level comments, the write order for flags and unsubscribes, the brief's report, unsigned uploads,
 // detach, and duplicates in one request (spec 1, "Tracker (Linear)").
 import { afterEach, describe, expect, test } from "bun:test";
-import { IssueNotFoundError, TrackerRefused, type LinearTracker } from "../../../src/tracker/index.ts";
-import { notFound, type FakeLinear } from "./fake-linear.ts";
+import { IssueNotFoundError, LinearTracker, TrackerRefused } from "../../../src/tracker/index.ts";
+import { FakeLinear, notFound } from "./fake-linear.ts";
 import { commentNode, issueNode, page, repo, stateId, TEAM_ID, teamReply, uuid, world } from "./linear-world.ts";
-import { STATUS_NAMES } from "../../statuses.ts";
+import { STATUS_NAMES, STATUS_TYPES } from "../../statuses.ts";
 
 let linear: FakeLinear;
 let tracker: LinearTracker;
@@ -131,6 +131,34 @@ describe("checkTeam", () => {
     await expect(tracker.move(ref, "landed")).rejects.toThrow(new TrackerRefused("team SHA has no status Landed"));
     expect(linear.operations()).toEqual(["FlightDeckTeam", "FlightDeckTeam", "FlightDeckUpdate", "FlightDeckTeam"]);
     expect(writes()).toEqual([["FlightDeckUpdate", { id: uuid(1), input: { stateId: stateId("Paused") } }]]);
+  });
+});
+
+describe("two workspaces whose teams share a key", () => {
+  test("each keeps its own team's statuses, so a move sends its own workspace's status", async () => {
+    linear = FakeLinear.start();
+    linear.apps.set("fd-client", "fd-secret");
+    tracker = new LinearTracker({
+      identity: { kind: "flight_deck" },
+      api: linear.url,
+      apps: async () => ({ flight_deck: { id: "fd-client", secret: "fd-secret" }, reader: { id: "reader-client", secret: "reader-secret" } }),
+      log: () => {},
+    });
+    const elsewhere = { ...repo, workspace: "elsewhere" };
+    const names = Object.values(STATUS_NAMES);
+    const otherStates = names.map((name) => ({ id: `elsewhere-${stateId(name)}`, name, type: STATUS_TYPES[name] ?? "started" }));
+    linear.once("FlightDeckTeam", teamReply(names));
+    linear.once("FlightDeckTeam", { data: { teams: { nodes: [{ id: "team-elsewhere", key: "SHA", states: { nodes: otherStates } }] } } });
+    linear.on("FlightDeckUpdate", { data: { issueUpdate: { success: true } } });
+    await tracker.checkTeam(repo);
+    await tracker.checkTeam(elsewhere);
+
+    await tracker.move(ref, "ready_to_build");
+    await tracker.move({ id: uuid(2), repo: elsewhere }, "ready_to_build");
+    expect(writes()).toEqual([
+      ["FlightDeckUpdate", { id: uuid(1), input: { stateId: stateId("Ready to build") } }],
+      ["FlightDeckUpdate", { id: uuid(2), input: { stateId: `elsewhere-${stateId("Ready to build")}` } }],
+    ]);
   });
 });
 

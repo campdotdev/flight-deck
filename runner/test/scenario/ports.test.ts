@@ -165,6 +165,23 @@ describe("a single-instance app", () => {
   });
 });
 
+describe("a single-instance app's retry", () => {
+  test("never starts on a port another process took after the first session, so prepare fails instead", async () => {
+    const port = await freePort();
+    world = await World.create({ record: singleInstance(port) });
+    const issue = sent({ title: "Save button is blue" });
+    world.harness.script(issue.identifier, { exit: { kind: "timed_out" } });
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+
+    expect(await listen("127.0.0.1", port)).not.toBeNull();
+    await world.tick();
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+  });
+});
+
 describe("two single-instance apps on one port", () => {
   test("the second repo's take waits while the first repo's session holds the port, with no pause", async () => {
     const port = await freePort();
