@@ -51,6 +51,16 @@ describe("hiddenPrompt", () => {
     expect(written.join("")).toBe("One: \nTwo: \nThree: \n");
   });
 
+  test("a Windows line ending split across two chunks ends one line", async () => {
+    const { input, prompt } = terminal(false);
+    const first = prompt.secret("One");
+    input.write("first\r");
+    expect(await first).toBe("first");
+    const second = prompt.secret("Two");
+    input.write("\nsecond\r\n");
+    expect(await second).toBe("second");
+  });
+
   test("a last line with no line break counts, and input that has ended cancels the next prompt", async () => {
     const { input, prompt } = terminal(false);
     const answer = prompt.secret("Key");

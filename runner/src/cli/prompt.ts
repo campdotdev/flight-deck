@@ -35,6 +35,8 @@ const CANCEL = new Set(["\x03", "\x04"]);
 export function hiddenPrompt(input: PromptInput, output: { write(text: string): unknown }): Prompt {
   // What arrived after the last answer's line break, such as the next lines of piped input.
   let pending = "";
+  // The last answer ended at a `\r`, so a `\n` that comes next, even in a later chunk, belongs to that line.
+  let afterReturn = false;
   let ended = false;
   let waiting: (() => void) | null = null;
   let listening = false;
@@ -70,9 +72,12 @@ export function hiddenPrompt(input: PromptInput, output: { write(text: string): 
         while (pending !== "") {
           const char = pending[0]!;
           pending = pending.slice(1);
+          // A Windows line ending from a pipe: the `\n` after the `\r` belongs to the line the `\r` ended.
+          const lineFeedAfterReturn = afterReturn && char === "\n";
+          afterReturn = false;
+          if (lineFeedAfterReturn) continue;
           if (ENTER.has(char)) {
-            // A Windows line ending from a pipe: the `\n` after the `\r` belongs to this line.
-            if (char === "\r" && pending[0] === "\n") pending = pending.slice(1);
+            afterReturn = char === "\r";
             return answer;
           }
           if (raw && CANCEL.has(char)) throw new Canceled();

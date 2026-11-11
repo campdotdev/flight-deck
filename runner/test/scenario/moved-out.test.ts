@@ -65,6 +65,26 @@ describe("an issue moved out of Planning", () => {
     });
   }
 
+  for (const [how, move] of [
+    ["by archiving it", (issue: StoredIssue) => world.tracker.archive(issue.id)],
+    ["to another team", (issue: StoredIssue) => world.tracker.moveToTeam(issue.id, "OTH", STATUSES.planning[0])],
+  ] as const) {
+    test(`${how} before its rate_limited exit is handled isn't requeued`, async () => {
+      world.tracker.addTeam({ key: "OTH", name: "Other", statuses: Object.values(STATUSES).map(([name, type]) => ({ name, type })) });
+      const issue = world.issue({ title: "Save button is blue" });
+      world.send(issue);
+      world.harness.script(issue.identifier, { exit: { kind: "rate_limited", resetsAt: null } });
+      await world.tick();
+      const writes = writesFrom();
+
+      move(issue);
+      await world.tick();
+      expect(writes()).toEqual([]);
+      expect(world.tracker.stored(issue.id).status).toBe("Planning");
+      expect((await world.status()).sessions).toEqual([]);
+    });
+  }
+
   test("drops a waiting retry, even while the runner is held", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     world.send(issue);

@@ -3,6 +3,7 @@
 // session had, so issue memory records it before the move.
 import { Lifecycle } from "../../lifecycle/index.ts";
 import type { RestartCause } from "../../state/index.ts";
+import { stillWorking } from "../moved-out.ts";
 import { WORKING } from "../stages.ts";
 import type { ExitContext } from "./context.ts";
 
@@ -10,14 +11,14 @@ import type { ExitContext } from "./context.ts";
 export async function requeue(context: ExitContext, after: RestartCause): Promise<void> {
   const { entry, repo, state, tracker } = context;
   await context.finish();
-  const working = WORKING[entry.stage];
-  const issue = await tracker.issue({ id: entry.issue_id, repo });
-  if (working === undefined || issue.role !== working) {
-    await context.log(`left ${working}, not requeued`);
+  // An issue the maintainer archived, deleted, or moved to another team has left the stage too.
+  const issue = await stillWorking(tracker, repo, entry);
+  if (issue === null || issue.role === null) {
+    await context.log(`left ${WORKING[entry.stage]}, not requeued`);
     return;
   }
   const memory = await state.issueMemory(repo.name, entry.issue_id);
   await state.writeIssueMemory(repo.name, entry.issue_id, { ...memory, restart: { attempt: entry.attempt, after } });
-  const moved = await new Lifecycle(tracker).move({ ...issue, role: working }, "ready_to_plan", "requeue");
+  const moved = await new Lifecycle(tracker).move({ ...issue, role: issue.role }, "ready_to_plan", "requeue");
   await context.log(moved.ok ? `requeued after ${after}, attempt ${entry.attempt} kept` : `requeue refused: ${moved.violation}`);
 }

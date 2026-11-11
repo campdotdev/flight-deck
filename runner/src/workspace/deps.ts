@@ -2,8 +2,8 @@
 // worktree into the session folder's `deps/`, which holds an APFS clone of the dependency cache, or an empty
 // folder when the repo has no good cache yet.
 import { existsSync, lstatSync } from "node:fs";
-import { appendFile, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { appendFile, lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { dirname, join, relative, sep } from "node:path";
 
 /** The file every symlink target holds, because pnpm 11 deletes an empty target and then fails (ADR 0018). */
 export const PLACEHOLDER = ".flight-deck-keep";
@@ -45,7 +45,7 @@ export async function linkDeps(worktree: string, deps: string, folders: string[]
     if (existsSync(link) || isSymlink(link)) {
       throw new Error(`The worktree already holds ${folder}, which dependencies.folders lists. The record can't list a folder the repo commits.`);
     }
-    await mkdir(dirname(link), { recursive: true });
+    await parentInside(worktree, link, folder);
     await symlink(join(deps, folder), link);
     lines.push(`/${folder}`);
   }
@@ -63,11 +63,31 @@ export async function copyFiles(repo: string, files: string, worktree: string, l
     const source = join(files, path);
     if (!existsSync(source)) throw new Error(`copy_files lists ${path}, which register hasn't copied. Run flight-deck register ${repo} --files.`);
     const target = join(worktree, path);
-    await mkdir(dirname(target), { recursive: true });
+    await parentInside(worktree, target, path);
     await rm(target, { recursive: true, force: true });
     const proc = Bun.spawn(["/bin/cp", "-R", source, target], { stdout: "ignore", stderr: "pipe" });
     const [err, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
     if (code !== 0) throw new Error(`cp -R ${source}: ${err.trim() || `exit ${code}`}`);
+  }
+}
+
+/**
+ * Makes each folder from `root` down to `path`'s parent, one at a time, and refuses a symlink or a file on the
+ * way. A repo can commit a symlink to a folder outside the worktree, and a write through it would land there.
+ */
+async function parentInside(root: string, path: string, name: string): Promise<void> {
+  let at = root;
+  for (const part of relative(root, dirname(path)).split(sep)) {
+    if (part === "") continue;
+    at = join(at, part);
+    const info = await lstat(at).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (info === null) await mkdir(at);
+    else if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error(`The worktree holds ${relative(root, at)} as a symlink or a file, so Flight Deck won't write ${name} through it.`);
+    }
   }
 }
 
