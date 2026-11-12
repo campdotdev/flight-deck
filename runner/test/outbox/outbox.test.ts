@@ -143,3 +143,16 @@ describe("an outbox file that isn't a regular file", () => {
     expect(tracker.writes).toEqual([]);
   });
 });
+
+describe("a brief with a Python session in a fenced code block", () => {
+  const session = ["```", ">>> import shaders", ">>> shaders.render(None)", "Traceback (most recent call last):", ">>> Report", ">>>", "```"].join("\n");
+  const brief = BRIEF.replace("The Save button is blue.", `The Save button is blue:\n\n${session}`);
+
+  test("keeps its >>> lines in the description and in the comment, and its >>> Report line passes", async () => {
+    await leave(outbox.brief({ summary: SUMMARY, brief, version: VERSION }));
+    expect(await apply()).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
+    const read = await tracker.issue({ id: issue.id, repo });
+    expect(read.description.startsWith(`${brief}\n\n+++ Report`)).toBe(true);
+    expect(read.comments.at(-1)?.body).toContain(`+++ Details\n\n${brief}\n\n`);
+  });
+});

@@ -131,6 +131,11 @@ describe("post", () => {
     await tracker.post(one, "Line\n\n>>> Details\n\nBody\n\n>>>", { flag: false });
     expect((await tracker.issue(one)).comments.at(-1)?.body).toBe("Line\n\n+++ Details\n\nBody\n\n+++");
   });
+  test("it leaves a fold line in a fenced code block as it is", async () => {
+    const one = issue();
+    await tracker.post(one, "```\n>>> import shaders\n>>>\n```", { flag: false });
+    expect((await tracker.issue(one)).comments.at(-1)?.body).toBe("```\n>>> import shaders\n>>>\n```");
+  });
 });
 
 describe("writeBrief", () => {
@@ -186,6 +191,24 @@ describe("writeBrief", () => {
     const one = issue(pasted);
     await tracker.writeBrief(one, brief, { runnerWroteBrief: false });
     expect((await tracker.issue(one)).description).toBe(`${brief}\n\n+++ Report\n\nSteps below.\n\n#### Report\n\nold text\n\n+++`);
+  });
+
+  test("a fold line in a fenced code block is code, in the brief and in the report", async () => {
+    const session = "```\n>>> import shaders\n+++ Report\n>>>\n```";
+    const one = issue(`It crashes:\n\n${session}`);
+    await tracker.writeBrief(one, `## Summary\n\n${session}`, { runnerWroteBrief: false });
+    const description = `## Summary\n\n${session}\n\n+++ Report\n\nIt crashes:\n\n${session}\n\n+++`;
+    expect((await tracker.issue(one)).description).toBe(description);
+    // A re-plan finds the same report, though the code block holds a Report line.
+    await tracker.writeBrief(one, "## Summary\n\nNew.", { runnerWroteBrief: true });
+    expect((await tracker.issue(one)).description).toBe(`## Summary\n\nNew.\n\n+++ Report\n\nIt crashes:\n\n${session}\n\n+++`);
+  });
+
+  test("a fence of tildes or a longer fence holds code too, until a matching fence closes it", async () => {
+    const one = issue("x");
+    const brief = "~~~~\n>>> a\n~~~\n>>> b\n~~~~\n\n>>> Proof\n\nlog\n\n>>>";
+    await tracker.writeBrief(one, brief, { runnerWroteBrief: false });
+    expect((await tracker.issue(one)).description).toBe("~~~~\n>>> a\n~~~\n>>> b\n~~~~\n\n+++ Proof\n\nlog\n\n+++\n\n+++ Report\n\nx\n\n+++");
   });
 
   test("it turns the brief's >>> fold lines into +++", async () => {
