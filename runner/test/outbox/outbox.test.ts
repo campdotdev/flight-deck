@@ -106,6 +106,22 @@ describe("follow-up issues", () => {
   });
 });
 
+describe("media", () => {
+  test("fails the outbox until the Outbox can upload it, and nothing is written", async () => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: `${BRIEF}\n\n![Before](before.png)`, version: VERSION }));
+    await mkdir(join(sessionFolder, "outbox", "media"));
+    await writeFile(join(sessionFolder, "outbox", "media", "before.png"), "png");
+    expect(await apply()).toEqual({ result: "failed", rule: "the Outbox can't upload media yet", writes: [] });
+    expect(tracker.writes).toEqual([]);
+  });
+
+  test("an empty media folder, which prepare makes for every session, fails nothing", async () => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
+    await mkdir(join(sessionFolder, "outbox", "media"));
+    expect(await apply()).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
+  });
+});
+
 describe("an outbox file that isn't a regular file", () => {
   test.each(["outcome.json", "brief.md", "summary.md"])("%s as a symlink to a file outside the outbox writes nothing", async (name) => {
     const files = outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION });

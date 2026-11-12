@@ -3,7 +3,7 @@
 // Later tickets add the dependency cache, copied files, ports, the temp-folder check, and the sweep.
 import { randomInt } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { paths, sessionParts, type Folders } from "../folders/index.ts";
 import type { Registration } from "../install/index.ts";
@@ -121,6 +121,10 @@ export class Workspace {
 
   /** Makes one session's folder and worktree. */
   async prepare(plan: PreparePlan): Promise<PreparedWorkspace> {
+    // The session root has mode 0700 (spec 1, "Folders and files"), so no other user on the Mac can read a
+    // checkout or a brief under /Users/Shared. A root made with the umask's mode, or loosened since, is tightened.
+    await mkdir(this.folders.sessionRoot, { recursive: true });
+    await chmod(this.folders.sessionRoot, 0o700);
     const sessionFolder = paths.sessionFolder(this.folders, plan.session);
     const parts = sessionParts(sessionFolder);
     const worktree = paths.worktree(this.folders, plan.session);

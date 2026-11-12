@@ -29,6 +29,11 @@ const STAGE_MOVES: Partial<Record<Stage, readonly Role[]>> = { plan: ["ready_to_
 const MOVE_CAUSES: Partial<Record<Role, Cause>> = { ready_to_build: "handoff", paused: "pause", duplicate: "duplicate" };
 /** The moves this Outbox applies so far. FLD-95 adds `paused`, and FLD-97 adds `duplicate` and follow-up issues. */
 const APPLIES: readonly Role[] = ["ready_to_build"];
+/** The envelope's folders this Outbox can't apply yet, each with the rule it fails. */
+const UNAPPLIED_FOLDERS: readonly [string, string][] = [
+  ["follow-ups", "the Outbox can't file follow-up issues yet"],
+  ["media", "the Outbox can't upload media yet"],
+];
 
 export type EnvelopeResult = { ok: true; envelope: Envelope } | { ok: false; rule: string };
 
@@ -82,11 +87,13 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   if (handoffs.length > 1) return fail(`the outbox holds ${handoffs.length} handoff files: ${handoffs.join(", ")}`);
   const stray = names.find((name) => !["outcome.json", "summary.md", "media", "follow-ups", ...handoffs].includes(name));
   if (stray !== undefined) return fail(`${stray} isn't part of the outbox's envelope`);
-  // FLD-97 files follow-up issues. Until then, the Outbox refuses them, because `dispose` would delete them unfiled.
-  // An empty folder files nothing, and a `follow-ups` that isn't a folder fails too.
-  if (names.includes("follow-ups")) {
-    const followUps = await readdir(join(outbox, "follow-ups")).catch(() => null);
-    if (followUps === null || followUps.length > 0) return fail("the Outbox can't file follow-up issues yet");
+  // FLD-97 files follow-up issues, and a later ticket uploads media with `Tracker.upload`. Until then, the Outbox
+  // refuses them, because the post would lose them and `dispose` would delete them. An empty folder holds nothing,
+  // and one that isn't a folder fails too.
+  for (const [folder, rule] of UNAPPLIED_FOLDERS) {
+    if (!names.includes(folder)) continue;
+    const entries = await readdir(join(outbox, folder)).catch(() => null);
+    if (entries === null || entries.length > 0) return fail(rule);
   }
 
   const text = await readRegularFile(join(outbox, handoffName));

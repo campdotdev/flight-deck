@@ -1,7 +1,7 @@
 // Workspace runs with real git in a temporary root (spec 1, "Other module tests").
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { paths } from "../../src/folders/index.ts";
 import { readRecord, type RepoRecord } from "../../src/record/index.ts";
@@ -117,6 +117,22 @@ describe("prepare", () => {
     const prepared = await workspace.prepare(plan(await workspace.newSessionId(), world.commit));
     expect(await readdir(prepared.inbox)).toEqual(["synced-comments.json"]);
     expect(await readFile(join(prepared.inbox, "synced-comments.json"), "utf8")).toBe("[]");
+  });
+});
+
+describe("the session root", () => {
+  test("prepare makes a missing root with mode 0700", async () => {
+    await rm(world.folders.sessionRoot, { recursive: true, force: true });
+    await workspace.fetch(registration());
+    await workspace.prepare(plan("abc123", world.commit));
+    expect((await stat(world.folders.sessionRoot)).mode & 0o777).toBe(0o700);
+  });
+
+  test("prepare tightens a root other users can read to mode 0700", async () => {
+    await chmod(world.folders.sessionRoot, 0o755);
+    await workspace.fetch(registration());
+    await workspace.prepare(plan("abc123", world.commit));
+    expect((await stat(world.folders.sessionRoot)).mode & 0o777).toBe(0o700);
   });
 });
 
