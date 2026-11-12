@@ -4,6 +4,7 @@
 //
 // This is the tracer bullet's poll: fetch, snapshot, and starts. Later tickets add the team check, moved-out
 // issues, answers, flags, subscriptions, stale takes, trouble, usage, holds, retries, and the start order.
+import { readFile } from "node:fs/promises";
 import type { Folders } from "../folders/index.ts";
 import { paths, sessionParts } from "../folders/index.ts";
 import type { Exit, Harness, HarnessSession } from "../harness/index.ts";
@@ -13,7 +14,7 @@ import { Outbox } from "../outbox/index.ts";
 import { durationMs, readRecord, type RecordResult, type RepoRecord, type Role } from "../record/index.ts";
 import { State, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
 import type { Snapshot, SnapshotIssue, Tracker, TrackerRepo } from "../tracker/index.ts";
-import { Workspace, type FetchResult } from "../workspace/index.ts";
+import { Workspace, type FetchResult, type SessionJson } from "../workspace/index.ts";
 
 export interface PollOptions {
   folders: Folders;
@@ -85,26 +86,18 @@ export class Poll {
 
   private async handleExits(now: Date, config: Config, workspace: Workspace): Promise<void> {
     const queued = this.exits.splice(0);
-    if (queued.length === 0) return;
-    const outbox = new Outbox({
-      version: this.version,
-      state: this.state,
-      repo: (name) => {
-        const registration = config.repos.find((repo) => repo.name === name);
-        return registration === undefined ? null : trackerRepo(config, registration, null);
-      },
-    });
     for (const { session, exit } of queued) {
       const sessions = await this.state.sessions();
       const entry = sessions.find((each) => each.id === session);
       if (entry === undefined) continue;
       const registration = config.repos.find((repo) => repo.name === entry.repo);
-      const repo = registration === undefined ? null : trackerRepo(config, registration, null);
+      const repo = registration === undefined ? null : await this.sessionRepo(config, registration, entry.id, workspace);
       if (repo !== null) await this.tracker.revoke({ id: entry.id, repo });
 
       if (exit.kind === "exited" && repo !== null) {
         const issue = await this.tracker.issue({ id: entry.issue_id, repo });
         if (issue.role === WORKING[entry.stage]) {
+          const outbox = new Outbox({ version: this.version, state: this.state, repo: (name) => (name === entry.repo ? repo : null) });
           const result = await outbox.apply(paths.sessionFolder(this.folders, entry.id), { identity: this.tracker });
           await this.state.log(now, `${entry.id} ${entry.issue}: outbox ${JSON.stringify(result)}`);
         } else {
@@ -118,6 +111,25 @@ export class Poll {
       await workspace.dispose({ session: entry.id, worktree: entry.worktree });
       await this.state.writeSessions((await this.state.sessions()).filter((each) => each.id !== entry.id));
     }
+  }
+
+  /**
+   * The repo as the take saw it: the record at the commit `session.json` names, which the take read and found
+   * valid. The default branch's record or the registration's copy may name other statuses by now, and reading
+   * the issue's status with those would discard a finished outbox or move the issue to the wrong status.
+   * A session folder or commit that can't be read falls back to the registration's copy.
+   */
+  private async sessionRepo(config: Config, registration: Registration, session: string, workspace: Workspace): Promise<TrackerRepo | null> {
+    let record: RepoRecord | null = null;
+    try {
+      const json = JSON.parse(await readFile(sessionParts(paths.sessionFolder(this.folders, session)).sessionJson, "utf8")) as SessionJson;
+      const text = await workspace.show(registration, json.commit, RECORD_PATH);
+      const read = text === null ? null : readRecord(text);
+      if (read?.ok === true) record = read.record;
+    } catch {
+      // Falls back to the registration's copy below.
+    }
+    return trackerRepo(config, registration, record);
   }
 
   // Each repo.

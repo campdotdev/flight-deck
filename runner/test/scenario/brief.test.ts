@@ -1,6 +1,6 @@
 // A sent issue gets a brief: the tracer bullet through the runner, at the one seam.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { outbox, UNMAPPED_STATUS, World } from "./world.ts";
+import { outbox, SHADERS_RECORD, UNMAPPED_STATUS, World } from "./world.ts";
 
 const REPORT = "The Save button is blue on the settings page.\n\nIt should be red, like every other Save button.";
 
@@ -243,6 +243,36 @@ describe("an issue moved out while its session runs", () => {
   });
 });
 
+describe("the exit reads the issue's status with the statuses the take read", () => {
+  const exitAfterTake = async (between: () => Promise<void>) => {
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    world.send(issue);
+    world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: SUMMARY, brief: BRIEF }) });
+    await world.tick();
+    await between();
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 });
+    await world.tick();
+    return issue;
+  };
+
+  test("when the registration's copy names other statuses", async () => {
+    world.config.repos[0]!.tracker.statuses.planning = UNMAPPED_STATUS;
+    await world.writeConfig();
+    const issue = await exitAfterTake(async () => {});
+    expect(world.tracker.writes.map((write) => write.kind)).toEqual(["move", "description", "unsubscribe", "comment", "move"]);
+    expect(world.tracker.writes.at(-1)).toEqual({ kind: "move", issue: issue.identifier, status: "Ready to build" });
+  });
+
+  test("when the default branch's record changed while the session ran", async () => {
+    const issue = await exitAfterTake(async () => {
+      await world.push({ ".flight-deck/record.toml": SHADERS_RECORD.replace('ready_to_build = "Ready to build"', `ready_to_build = "${UNMAPPED_STATUS}"`) });
+      // A poll while the session runs fetches the new record.
+      await world.tick();
+    });
+    expect(world.tracker.writes.at(-1)).toEqual({ kind: "move", issue: issue.identifier, status: "Ready to build" });
+  });
+});
+
 describe("a handoff the Outbox refuses", () => {
   const good = () => outbox.brief({ summary: SUMMARY, brief: BRIEF });
   test.each([
@@ -255,6 +285,7 @@ describe("a handoff the Outbox refuses", () => {
     ["a key outcome.json doesn't have", () => ({ ...good(), "outcome.json": JSON.stringify({ version: "0.1.0", stage: "plan", move: "ready_to_build", of: "SHA-9" }) })],
     ["a break not marked accepted", () => ({ ...good(), "brief.md": BRIEF.replace("## Key interfaces\n\nNone.", "## Key interfaces\n\n- `Button`: break, drops the color prop") })],
     ["a Report fold in the brief", () => ({ ...good(), "brief.md": `${BRIEF}\n\n>>> Report\n\nold\n\n>>>` })],
+    ["an empty brief", () => ({ ...good(), "brief.md": " \n\n" })],
   ])("with %s writes nothing to the issue", async (_, files) => {
     const issue = world.issue({ title: "Save button is blue", description: REPORT });
     world.send(issue);

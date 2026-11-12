@@ -98,6 +98,7 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
 
   const text = await readRegularFile(join(outbox, handoffName));
   if (text === null) return fail(`${handoffName} isn't a regular file`);
+  if (text.trim() === "") return fail(`${handoffName} is empty`);
   if (handoffName === "brief.md") {
     const rule = briefRule(text);
     if (rule !== null) return fail(rule);

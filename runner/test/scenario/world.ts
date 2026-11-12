@@ -102,7 +102,7 @@ export class World {
           checkout: join(root, "checkout"),
           package_manager: "/usr/bin/true",
           path: "/usr/bin:/bin:/usr/sbin:/sbin",
-          tracker: { kind: "linear", workspace: "campdotdev", team: "SHA", statuses: statusNames },
+          tracker: { kind: "linear", workspace: "campdotdev", team: "SHA", statuses: { ...statusNames } },
         },
       ],
       linear: { campdotdev: { maintainer_id: this.maintainer.id, maintainer_name: this.maintainer.name, app_user_id: this.appUser } },
