@@ -55,6 +55,10 @@ describe("the schema key", () => {
     expect(shaders.startsWith("# Flight Deck repo record")).toBe(true);
     expect(readRecord(`\n# another comment\n${shaders}`).ok).toBe(true);
   });
+
+  test("a byte-order mark may come before schema", () => {
+    expect(readRecord(`﻿${shaders}`).ok).toBe(true);
+  });
 });
 
 describe("schema errors", () => {

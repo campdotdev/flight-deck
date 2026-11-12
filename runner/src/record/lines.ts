@@ -32,7 +32,8 @@ function scan(text: string): { lines: Map<string, number>; first: Path | undefin
   let first: Path | undefined;
   const tableArrays = new Map<string, number>(); // an array of tables to its entry count
   let table: Path = [];
-  let pos = 0;
+  // Bun accepts a byte-order mark, which would otherwise read as an empty first key.
+  let pos = text.startsWith("﻿") ? 1 : 0;
   let line = 1;
 
   const mark = (path: Path, header = false) => {
