@@ -180,48 +180,81 @@ describe("hosts", () => {
   });
 });
 
-const HOME_FORM = 'must be a path inside "~/", such as "~/.npm", with no "." or ".." part and no glob character';
+const HOME_FORM = 'must be a path inside "~/", such as "~/.nvm", with no "." or ".." part and no glob character';
+const READ_FORM = 'must be a folder a session may read, such as "~/.nvm", or a path inside one';
+
+/** Spec 1's folders a session may read. */
+const READABLE = [
+  "~/.nvm",
+  "~/.volta",
+  "~/.bun/bin",
+  "~/.bun/install/cache",
+  "~/Library/pnpm",
+  "~/.fnm",
+  "~/.local/share/fnm",
+  "~/Library/Application Support/fnm",
+  "~/.local/state/fnm_multishells",
+  "~/Library/Caches/fnm_multishells",
+  "~/.local/share/mise/installs",
+  "~/.local/share/mise/shims",
+  "~/.asdf/installs",
+  "~/.asdf/shims",
+  "~/.npm/_cacache",
+  "~/Library/Caches/ms-playwright",
+  "~/Library/Caches/Cypress",
+  "~/Library/Caches/pnpm",
+  "~/Library/Caches/Yarn",
+  "~/Library/Caches/node-gyp",
+  "~/.cache/puppeteer",
+];
 
 describe("read_paths", () => {
-  test.each(["~/.npm", "~/.cache/ms-playwright", "~/Library/Caches/pnpm", "~/.config/git", "~/.local/state/x", "~/.npm/"])(
+  test.each([...READABLE, "~/.nvm/", "~/.NVM", "~/.nvm/versions/node/v22.22.2/bin", "~/Library/Caches/ms-playwright/chromium-1217"])(
     "%s may be read",
     (path) => {
       expect(errorsFor('read_paths = []', JSON.stringify([path]))).toEqual([]);
     },
   );
 
-  test.each(["~/", "~", "/Users/maintainer/.npm", ".npm", "~/../etc", "~/./.ssh", "~//.ssh", "~/.npm/..", "~/.config/flight-*/**", "~/.ss?", "~/.[s]sh", "~/{.ssh,.npm}"])('"%s" is not a path inside ~/', (path) => {
+  test.each(["~/", "~", "/Users/maintainer/.nvm", ".nvm", "~/../etc", "~/./.ssh", "~//.ssh", "~/.nvm/..", "~/.config/flight-*/**", "~/.ss?", "~/.[s]sh", "~/{.ssh,.nvm}"])('"%s" is not a path inside ~/', (path) => {
     expect(errorsFor('read_paths = []', JSON.stringify([path]))).toEqual([`sandbox.read_paths[1]: ${HOME_FORM}`]);
   });
 
   test.each([
-    ["~/.ssh", "~/.ssh"],
-    ["~/.ssh/", "~/.ssh"],
-    ["~/.ssh/known_hosts", "~/.ssh"],
-    ["~/.SSH", "~/.ssh"],
-    ["~/.config/flight-deck", "~/.config/flight-deck"],
-    ["~/.config", "~/.config/flight-deck"],
-    ["~/.config/gh/hosts.yml", "~/.config/gh"],
-    ["~/.local", "~/.local/share/flight-deck"],
-    ["~/.local/share/flight-deck/state", "~/.local/share/flight-deck"],
-    ["~/.claude", "~/.claude"],
-    ["~/.claude/skills", "~/.claude"],
-    ["~/.gnupg", "~/.gnupg"],
-    ["~/.aws/config", "~/.aws"],
-    ["~/.npmrc", "~/.npmrc"],
-    ["~/.NPMRC", "~/.npmrc"],
-    ["~/.git-credentials", "~/.git-credentials"],
-    ["~/Library", "~/Library/Keychains"],
-    ["~/Library/Keychains/login.keychain-db", "~/Library/Keychains"],
-  ])("%s is an error", (path, folder) => {
-    expect(errorsFor('read_paths = []', JSON.stringify(["~/.npm", path]))).toEqual([
-      `sandbox.read_paths[2]: reopens ${folder}, which no session may read`,
-    ]);
+    // Folders that hold a credential or the runner's socket.
+    "~/.ssh",
+    "~/.SSH/known_hosts",
+    "~/.config/flight-deck",
+    "~/.local/share/flight-deck",
+    "~/.claude",
+    "~/.gnupg",
+    "~/.aws",
+    "~/.config/gh",
+    "~/Library/Keychains",
+    "~/.npmrc",
+    "~/.git-credentials",
+    "~/.config/git/credentials",
+    "~/.netrc",
+    "~/.docker/config.json",
+    "~/Library/Application Support/com.vercel.cli",
+    // Folders that hold a listed folder and more.
+    "~/.npm",
+    "~/.bun",
+    "~/Library",
+    "~/Library/Caches",
+    "~/.local/share/mise",
+    "~/.asdf",
+    // Names that only start like a listed folder.
+    "~/.nvmrc",
+    "~/.nvm-old",
+    "~/.bun/binary",
+  ])("%s is an error", (path) => {
+    expect(errorsFor('read_paths = []', JSON.stringify(["~/.nvm", path]))).toEqual([`sandbox.read_paths[2]: ${READ_FORM}`]);
   });
 
   test("a rule's error and the schema's in one list come out in the list's order", () => {
     expect(errorsFor("read_paths = []", '["~/.ssh", "~/.ss?"]')).toEqual([
-      "sandbox.read_paths[1]: reopens ~/.ssh, which no session may read",
+      `sandbox.read_paths[1]: ${READ_FORM}`,
       `sandbox.read_paths[2]: ${HOME_FORM}`,
     ]);
     expect(errorsFor(HOSTS, '[\n  "github.com",\n  "not a host",\n]')).toEqual([
