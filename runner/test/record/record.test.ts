@@ -262,6 +262,19 @@ describe("read_paths", () => {
       `sandbox.hosts[2]: ${HOST_FORM}`,
     ]);
   });
+
+  test("errors from two lists on one line stay with their lists, in order", () => {
+    const start = shaders.indexOf("[sandbox]");
+    const end = shaders.indexOf("read_paths = []", start) + "read_paths = []".length;
+    const sandbox = 'sandbox = { hosts = ["github.com", "not a host"], read_paths = ["~/.ssh", "~/.ss?"] }';
+    const text = edit("copy_files = []\n", `copy_files = []\n${sandbox}\n`, shaders.slice(0, start) + shaders.slice(end));
+    expect(errorsOf(text)).toEqual([
+      "sandbox.hosts[1]: is GitHub, and no session may reach GitHub",
+      `sandbox.hosts[2]: ${HOST_FORM}`,
+      `sandbox.read_paths[1]: ${READ_FORM}`,
+      `sandbox.read_paths[2]: ${HOME_FORM}`,
+    ]);
+  });
 });
 
 const CHECKOUT_FORM = 'must be a path relative to the checkout, with no leading "/" and no ".." part';

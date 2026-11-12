@@ -148,25 +148,38 @@ function formatPath(path: Path): string {
 
 function sortByLine(problems: Problem[], keys: KeyLines): Problem[] {
   const line = (problem: Problem) => keys.lineOf(problem.missing ? problem.path.slice(0, -1) : problem.path);
+  const order = pathOrder(problems.map((problem) => problem.path));
   return problems
-    .map((problem) => ({ problem, line: line(problem) }))
-    .sort((a, b) => a.line - b.line || byIndex(a.problem.path, b.problem.path))
+    .map((problem) => ({ problem, line: line(problem), order: order(problem.path) }))
+    .sort((a, b) => a.line - b.line || compareOrder(a.order, b.order))
     .map(({ problem }) => problem);
 }
 
 /**
- * Orders two paths on the same line by the first array index where they differ. The key lines
- * don't mark a list's entries, so every error in one list shares the list's line, and the schema's
- * errors would otherwise all come before the rules'. Paths that differ at a key keep their order.
+ * Orders the errors that share a line. The key lines don't mark a list's entries, so every error in
+ * one list shares the list's line, and the schema's errors would otherwise all come before the
+ * rules'. Each path becomes a list of numbers: an array index stays itself, and a key becomes the
+ * position of the first error under it. So each list's errors stay together, sorted by index, even
+ * when two lists share a line in an inline table.
  */
-function byIndex(a: Path, b: Path): number {
+function pathOrder(paths: Path[]): (path: Path) => number[] {
+  const firstSeen = new Map<string, number>();
+  paths.forEach((path, i) => {
+    for (let k = 1; k <= path.length; k++) {
+      const id = JSON.stringify(path.slice(0, k));
+      if (!firstSeen.has(id)) firstSeen.set(id, i);
+    }
+  });
+  return (path) =>
+    path.map((part, k) => (typeof part === "number" ? part : (firstSeen.get(JSON.stringify(path.slice(0, k + 1))) ?? 0)));
+}
+
+function compareOrder(a: number[], b: number[]): number {
   for (let k = 0; k < Math.min(a.length, b.length); k++) {
-    const x = a[k];
-    const y = b[k];
-    if (x === y) continue;
-    return typeof x === "number" && typeof y === "number" ? x - y : 0;
+    const diff = (a[k] ?? 0) - (b[k] ?? 0);
+    if (diff !== 0) return diff;
   }
-  return 0;
+  return a.length - b.length;
 }
 
 function format(problem: Problem): string {
