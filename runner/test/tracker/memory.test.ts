@@ -211,6 +211,21 @@ describe("writeBrief", () => {
     expect((await tracker.issue(one)).description).toBe("~~~~\n>>> a\n~~~\n>>> b\n~~~~\n\n+++ Proof\n\nlog\n\n+++\n\n+++ Report\n\nx\n\n+++");
   });
 
+  test("a report whose code block never closes gets a closing fence, so a re-plan still replaces the brief", async () => {
+    const one = issue("It crashes:\n\n```\nTraceback (most recent call last):");
+    await tracker.writeBrief(one, brief, { runnerWroteBrief: false });
+    const report = "It crashes:\n\n```\nTraceback (most recent call last):\n```";
+    expect((await tracker.issue(one)).description).toBe(`${brief}\n\n+++ Report\n\n${report}\n\n+++`);
+    await tracker.writeBrief(one, "## Summary\n\nNew.", { runnerWroteBrief: true });
+    expect((await tracker.issue(one)).description).toBe(`## Summary\n\nNew.\n\n+++ Report\n\n${report}\n\n+++`);
+  });
+
+  test("a brief whose code block never closes gets a closing fence before the Report fold", async () => {
+    const one = issue("x");
+    await tracker.writeBrief(one, "## Summary\n\n~~~~\nlog", { runnerWroteBrief: false });
+    expect((await tracker.issue(one)).description).toBe("## Summary\n\n~~~~\nlog\n~~~~\n\n+++ Report\n\nx\n\n+++");
+  });
+
   test("it turns the brief's >>> fold lines into +++", async () => {
     const one = issue("x");
     await tracker.writeBrief(one, "## Summary\n\n>>> Proof\n\nlog\n\n>>>", { runnerWroteBrief: false });

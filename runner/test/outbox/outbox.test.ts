@@ -68,6 +68,21 @@ describe("a second apply", () => {
   });
 });
 
+describe("a retry after a post whose response was lost", () => {
+  test("finds the session's comment by its footer and doesn't post it twice", async () => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
+    const post = tracker.post.bind(tracker);
+    tracker.post = async (...args) => {
+      await post(...args);
+      throw new Error("socket hang up");
+    };
+    await expect(apply()).rejects.toThrow("socket hang up");
+    tracker.post = post;
+    expect(await apply()).toEqual({ result: "applied", writes: ["post", "move"] });
+    expect((await tracker.issue({ id: issue.id, repo })).comments).toHaveLength(1);
+  });
+});
+
 describe("a plan handoff", () => {
   test("on a paused issue writes nothing, though an answer may move it to Ready to build", async () => {
     tracker.setStatus(issue.id, STATUSES.paused[0]);

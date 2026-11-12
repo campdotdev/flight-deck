@@ -65,12 +65,16 @@ export class Outbox {
 
     const ref: IssueRef = { id: issue.id, repo };
     const memory = await this.options.state.issueMemory(session.repo, issue.id);
+    const footer = sessionFooter(this.options.version, session.stage, session.session);
     const comment = handoffComment({
       phrase: statusPhrase(envelope.outcome.move),
       summary: envelope.summary,
       handoff: envelope.handoff.text,
-      footer: sessionFooter(this.options.version, session.stage, session.session),
+      footer,
     });
+    // A post can land without reaching `applied.json`, when its response or the journal write is lost. The footer
+    // names the session, so a retry finds the comment it already posted and doesn't post it twice.
+    const posted = issue.comments.some(({ body }) => body.split("\n").some((line) => line.trim() === footer));
 
     // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
     const steps: [WriteName, () => Promise<string | null>][] = [
@@ -82,7 +86,13 @@ export class Outbox {
           return null;
         },
       ],
-      ["post", async () => (await tracker.post(ref, comment, { flag: false }), null)],
+      [
+        "post",
+        async () => {
+          if (!posted) await tracker.post(ref, comment, { flag: false });
+          return null;
+        },
+      ],
       [
         "move",
         async () => {

@@ -12,10 +12,13 @@ function foldTitle(line: string): string | null {
   return match[1] ?? "";
 }
 
-/** Each line with its fold title, or `null` for a line that isn't a fold line or sits in a fenced code block. */
-function foldLines(text: string): { line: string; title: string | null }[] {
+/**
+ * Each line with its fold title, or `null` for a line that isn't a fold line or sits in a fenced code block, and
+ * the fence of a code block still open at the end of the text, or `null`.
+ */
+function scan(text: string): { lines: { line: string; title: string | null }[]; open: string | null } {
   let fence: string | null = null;
-  return text.split("\n").map((line) => {
+  const lines = text.split("\n").map((line) => {
     const marker = FENCE.exec(line)?.[1];
     if (fence === null) {
       if (marker !== undefined) fence = marker;
@@ -25,6 +28,17 @@ function foldLines(text: string): { line: string; title: string | null }[] {
     if (marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = null;
     return { line, title: null };
   });
+  return { lines, open: fence };
+}
+
+function foldLines(text: string): { line: string; title: string | null }[] {
+  return scan(text).lines;
+}
+
+/** Closes a code block that runs to the end of the text, such as a pasted crash log, so the line after it isn't code. */
+function closeFence(text: string): string {
+  const { open } = scan(text);
+  return open === null ? text : `${text}\n${open}`;
 }
 
 /** The titles of the text's opening fold lines, outside fenced code blocks. */
@@ -64,7 +78,7 @@ export function flattenFolds(text: string): string {
 
 /** A fold of text, written the way every adapter writes one. */
 export function fold(title: string, body: string): string {
-  return `+++ ${title}\n\n${body}\n\n+++`;
+  return `+++ ${title}\n\n${closeFence(body)}\n\n+++`;
 }
 
 /** The text inside the description's last fold when that fold is `+++ Report` and ends the description, else `null`. */
@@ -94,5 +108,5 @@ export function reportOf(description: string, runnerWroteBrief: boolean): string
 
 /** The description `writeBrief` writes: the brief, then a `+++ Report` fold that holds the report. */
 export function briefDescription(brief: string, description: string, runnerWroteBrief: boolean): string {
-  return `${plusFolds(brief.trim())}\n\n${fold("Report", reportOf(description, runnerWroteBrief))}`;
+  return `${closeFence(plusFolds(brief.trim()))}\n\n${fold("Report", reportOf(description, runnerWroteBrief))}`;
 }
