@@ -94,8 +94,10 @@ function scan(text: string): { lines: Map<string, number>; first: Path | undefin
   const skipMultiline = (fence: string) => {
     pos += 3;
     while (pos < text.length && !text.startsWith(fence, pos)) {
+      // A backslash escapes the next character, which may be the newline a line-ending backslash trims.
+      if (fence === '"""' && text[pos] === "\\") pos++;
       if (text[pos] === "\n") line++;
-      pos += fence === '"""' && text[pos] === "\\" ? 2 : 1;
+      pos++;
     }
     pos += 3;
     // A closing fence may carry up to two quotes of the string's own.
