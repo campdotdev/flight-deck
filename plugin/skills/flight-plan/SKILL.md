@@ -55,7 +55,7 @@ The runner's carry comment is the one exception to the footer rule. It quotes wh
 Work in this order:
 
 1. Read the record and run the dependency install, as `shared/session.md` says.
-2. Read the report, the comment thread, and the repo's `GLOSSARY.md` and ADRs if it has them. Read the inbox.
+2. Read the report, the comment thread, the parent spec for a sub-issue, and the repo's `GLOSSARY.md` and ADRs if it has them. Read the inbox.
 3. Look for a duplicate among the team's open issues, and for code that already does what the report asks. List the team's open issues with `list_issues`, and read each likely match whole with `get_issue`, because a search `query` misses words inside descriptions. See "Duplicates".
 4. For a bug, follow each skill in `session.json`'s `slots` `reproduce`, in order. See "Bugs".
 5. Settle scope. Read `<skills>/ponytail/SKILL.md` and follow it at the `ultra` level, on the request rather than on code: the smallest change that fully covers the report. Its order for picking a change shapes the brief's scope and Context: skip what nobody asked for, then reuse what the repo has, then the standard library, then an installed dependency. Ultra's pushback becomes Out of scope, or a pause. Then check the change against the pause cases below.
@@ -117,7 +117,7 @@ Each answer is one lowercase word, says what happens, and moves the issue to `re
 
 An issue is too big for one build when you can't fill every section of the brief without guessing, or when its acceptance criteria span more than one seam that build would commit separately. Pause with a proposed split: sub-issue titles, one line each, and their blocking order. The maintainer makes the split.
 
-When the report orders its own work, such as "start with MeshGradient, then sweep the rest", brief the first part instead. File each other part as a follow-up issue.
+When the report orders its own work, such as "start with MeshGradient, then sweep the rest", brief the first part instead. File each other part as a follow-up issue. On a sub-issue, file no follow-up issue for the other parts. Pause with a proposed split into sibling sub-issues, because a follow-up issue never joins the spec, and the spec PR would ship without the rest.
 
 ## Bugs
 
