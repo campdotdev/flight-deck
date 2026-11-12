@@ -273,6 +273,32 @@ describe("the exit reads the issue's status with the statuses the take read", ()
   });
 });
 
+describe("an exit whose handling throws", () => {
+  test("stays queued, and the next poll handles it and the exits after it", async () => {
+    const one = world.issue({ title: "Save button is blue", description: REPORT });
+    const two = world.issue({ title: "Cancel button is blue", description: REPORT });
+    for (const issue of [one, two]) {
+      world.send(issue);
+      world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: SUMMARY, brief: BRIEF }), exit: { kind: "exited", code: 0 } });
+    }
+    await world.tick();
+    // The first Linear read at the exits fails, as a network error would on the real adapter.
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 1;
+    world.tracker.issue = async (ref) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    await world.tick();
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+    for (const issue of [one, two]) {
+      expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+      expect(world.tracker.writes.filter((write) => write.issue === issue.identifier && write.kind === "comment")).toHaveLength(1);
+    }
+  });
+});
+
 describe("a handoff the Outbox refuses", () => {
   const good = () => outbox.brief({ summary: SUMMARY, brief: BRIEF });
   test.each([

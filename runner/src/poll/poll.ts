@@ -84,33 +84,46 @@ export class Poll {
 
   // Exits.
 
+  /**
+   * An exit leaves the queue only once it's handled. One that throws, such as on a failed Linear read, stays queued
+   * for the next tick, and the exits after it are still handled. Handling it again is safe: the Outbox skips the
+   * writes `applied.json` records, and an issue the move already left Planning has its outbox discarded.
+   */
   private async handleExits(now: Date, config: Config, workspace: Workspace): Promise<void> {
-    const queued = this.exits.splice(0);
-    for (const { session, exit } of queued) {
-      const sessions = await this.state.sessions();
-      const entry = sessions.find((each) => each.id === session);
-      if (entry === undefined) continue;
-      const registration = config.repos.find((repo) => repo.name === entry.repo);
-      const repo = registration === undefined ? null : await this.sessionRepo(config, registration, entry.id, workspace);
-      if (repo !== null) await this.tracker.revoke({ id: entry.id, repo });
-
-      if (exit.kind === "exited" && repo !== null) {
-        const issue = await this.tracker.issue({ id: entry.issue_id, repo });
-        if (issue.role === WORKING[entry.stage]) {
-          const outbox = new Outbox({ version: this.version, state: this.state, repo: (name) => (name === entry.repo ? repo : null) });
-          const result = await outbox.apply(paths.sessionFolder(this.folders, entry.id), { identity: this.tracker });
-          await this.state.log(now, `${entry.id} ${entry.issue}: outbox ${JSON.stringify(result)}`);
-        } else {
-          // The issue moved out while the session ran, so its outbox is discarded.
-          await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, outbox discarded`);
-        }
-      } else {
-        await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind}`);
+    for (const queued of [...this.exits]) {
+      try {
+        await this.handleExit(now, config, workspace, queued);
+        this.exits.splice(this.exits.indexOf(queued), 1);
+      } catch (error) {
+        await this.state.log(now, `${queued.session}: exit ${queued.exit.kind} not handled, retrying next poll: ${(error as Error).message}`);
       }
-
-      await workspace.dispose({ session: entry.id, worktree: entry.worktree });
-      await this.state.writeSessions((await this.state.sessions()).filter((each) => each.id !== entry.id));
     }
+  }
+
+  private async handleExit(now: Date, config: Config, workspace: Workspace, { session, exit }: QueuedExit): Promise<void> {
+    const sessions = await this.state.sessions();
+    const entry = sessions.find((each) => each.id === session);
+    if (entry === undefined) return;
+    const registration = config.repos.find((repo) => repo.name === entry.repo);
+    const repo = registration === undefined ? null : await this.sessionRepo(config, registration, entry.id, workspace);
+    if (repo !== null) await this.tracker.revoke({ id: entry.id, repo });
+
+    if (exit.kind === "exited" && repo !== null) {
+      const issue = await this.tracker.issue({ id: entry.issue_id, repo });
+      if (issue.role === WORKING[entry.stage]) {
+        const outbox = new Outbox({ version: this.version, state: this.state, repo: (name) => (name === entry.repo ? repo : null) });
+        const result = await outbox.apply(paths.sessionFolder(this.folders, entry.id), { identity: this.tracker });
+        await this.state.log(now, `${entry.id} ${entry.issue}: outbox ${JSON.stringify(result)}`);
+      } else {
+        // The issue moved out while the session ran, so its outbox is discarded.
+        await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, outbox discarded`);
+      }
+    } else {
+      await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind}`);
+    }
+
+    await workspace.dispose({ session: entry.id, worktree: entry.worktree });
+    await this.state.writeSessions((await this.state.sessions()).filter((each) => each.id !== entry.id));
   }
 
   /**
