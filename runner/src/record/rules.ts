@@ -13,7 +13,7 @@ export interface Problem {
 
 const GITHUB_HOSTS = ["github.com", "api.github.com", "uploads.github.com"];
 
-// ADRs 0007 and 0017: each would reopen a credential or the runner's socket.
+// ADRs 0007, 0017, and 0018: each would reopen a credential or the runner's socket.
 const FORBIDDEN_READ_PATHS = [
   "~/.config/flight-deck",
   "~/.local/share/flight-deck",
@@ -22,6 +22,8 @@ const FORBIDDEN_READ_PATHS = [
   "~/.gnupg",
   "~/.aws",
   "~/.config/gh",
+  "~/.npmrc",
+  "~/.git-credentials",
   "~/Library/Keychains",
 ];
 

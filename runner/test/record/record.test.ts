@@ -204,6 +204,9 @@ describe("read_paths", () => {
     ["~/.claude/skills", "~/.claude"],
     ["~/.gnupg", "~/.gnupg"],
     ["~/.aws/config", "~/.aws"],
+    ["~/.npmrc", "~/.npmrc"],
+    ["~/.NPMRC", "~/.npmrc"],
+    ["~/.git-credentials", "~/.git-credentials"],
     ["~/Library", "~/Library/Keychains"],
     ["~/Library/Keychains/login.keychain-db", "~/Library/Keychains"],
   ])("%s is an error", (path, folder) => {
