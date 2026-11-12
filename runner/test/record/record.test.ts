@@ -86,7 +86,7 @@ describe("schema errors", () => {
     expect(errorsOf(text)).toEqual(expected);
   });
 
-  test("sort by the line of the offending key, or of a missing key's table header, with top-level keys at line 0", () => {
+  test("sort by the line of the offending key, or of a missing key's table header, with a missing top-level key at line 0", () => {
     let text = shaders;
     text = edit('plan = "30m"', 'plan = "half an hour"', text); // near the end
     text = edit('team = "SHA"\n', "", text); // missing from [tracker]
