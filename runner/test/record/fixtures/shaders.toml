@@ -1,0 +1,148 @@
+# Flight Deck repo record for campdotdev/shaders. Draft written by /flight-setup on 2026-10-21.
+# TOML, committed, no credentials, no implicit defaults: every field is written out, including Flight Deck's defaults.
+# Schema 1: the record accepted in FLD-42, cut to spec 1's fields.
+schema = 1
+
+copy_files = []
+
+[tracker]
+kind = "linear"
+workspace = "campdotdev"
+team = "SHA"
+
+[tracker.statuses]
+intake = "Triage"
+backlog = "Backlog"
+ready_to_plan = "Ready to plan"
+planning = "Planning"
+ready_to_build = "Ready to build"
+building = "Building"
+ready_to_check = "Ready to check"
+checking = "Checking"
+landed = "Landed"
+paused = "Paused"
+in_review = "In Review"
+done = "Done"
+canceled = "Canceled"
+duplicate = "Duplicate"
+
+[dependencies]
+# Every CI job's first step, word for word (.github/workflows/ci.yml).
+command = "pnpm install --frozen-lockfile"
+folders = ["node_modules"]
+
+# CI's build-typecheck-lint job runs typecheck, lint, format, and build in this order.
+# build has no command category, so it is an extra below.
+[[commands]]
+name = "typecheck"
+category = "types"
+run = "pnpm typecheck"
+where = "local"
+
+[[commands]]
+name = "lint"
+category = "lint"
+run = "pnpm lint"
+where = "local"
+
+[[commands]]
+name = "format"
+category = "format"
+run = "pnpm format:check"
+where = "local"
+
+# CI's unit-tests job.
+[[commands]]
+name = "unit"
+category = "unit"
+run = "pnpm test"
+where = "local"
+
+# CI's visual-regression-shard matrix. The Playwright suite (visual baselines plus the
+# @a11y specs) runs in Microsoft's Playwright container, and the Linux baselines only
+# match that image's fonts and SwiftShader output.
+[[commands]]
+name = "visual regression"
+category = "e2e"
+run = "pnpm --filter @shaders/docs-tests test:visual"
+where = "ci"
+
+# Builds both packages and the docs site's static export. The docs build fetches IBM Plex Mono
+# from fonts.googleapis.com through next/font/google, which is why that host is in sandbox.hosts.
+[[extras]]
+name = "build"
+where = "local"
+run = "pnpm build"
+
+# docs/agents/pull-requests.md: run before the push. Diffs the branch against its base, so on
+# the default branch it reports nothing. Exit 1 means findings.
+[[extras]]
+name = "fallow-audit"
+where = "local"
+run = "pnpm exec fallow audit --base origin/main"
+
+# .claude/skills/react-doctor/SKILL.md: run after React code changes. --no-score keeps it
+# off the react.doctor score API, as the repo's PostToolBatch hook does.
+[[extras]]
+name = "react-doctor"
+where = "local"
+run = "pnpm exec react-doctor --yes --verbose --scope changed --no-score"
+
+# Posts a sticky summary as github-actions[bot] on 24 of the last 30 PRs, about 30 s after the PR
+# opens, and inline review comments when it finds a new warning. Runs on drafts and every push.
+[[extras]]
+name = "React Doctor"
+where = "ci"
+
+# Reports as diff annotations and a job summary only; it posts no comment and fails only when fallow itself breaks.
+[[extras]]
+name = "Fallow audit"
+where = "ci"
+
+[app]
+# apps/docs: "INCLUDE_DEV_ROUTES=1 next dev -p 3000", written as next's own command so it takes {port}.
+# The trial of 2026-10-21 answered / with 200 after 22 s on port 4476.
+start = "INCLUDE_DEV_ROUTES=1 pnpm --filter @shaders/docs exec next dev -p {port}"
+url = "http://localhost:{port}/"
+default_port = 3000
+ready_timeout = "180s"
+single_instance = false
+
+# design and finish stay empty until spec 5 ships design-check and changeset.
+[slots]
+plan = { reproduce = ["reproducing-bugs"], design = [] }
+build = { finish = [] }
+check = { review = [] }
+
+[sandbox]
+# registry.npmjs.org: the lockfile's packages and the pnpm@10.34.5 pin. nodejs.org: the
+# devEngines node 22.22.2 pin with onFail = download (11 tarball URLs in pnpm-lock.yaml).
+# fonts.googleapis.com and fonts.gstatic.com: apps/docs loads its fonts through next/font/google,
+# which fetches them at build and dev time.
+hosts = ["registry.npmjs.org", "nodejs.org", "fonts.googleapis.com", "fonts.gstatic.com"]
+# The only trial denial was pnpm reading ~/.npmrc, a warning on every command, and every command
+# passed. That file holds an auth line, so it stays out of read_paths.
+read_paths = []
+
+# The trial's install and local commands took 5.0 min together, under a quarter of build's and
+# check's limits, so the defaults hold.
+[time_limits]
+plan = "30m"
+build = "90m"
+check = "45m"
+
+# Repo instructions a factory session can't follow as written, each with the maintainer's answer (2026-10-21, reaffirmed 2026-10-22).
+[[conflicts]]
+source = "AGENTS.md"
+rule = "Build shaders in gated phases: end each phase at something the author can open, then stop and wait for the author to react in the dev server. docs/agents/tsl.md adds: at the start, ask who types the code."
+answer = "Factory sessions don't gate. A session builds its ticket end to end and explains the new TSL and GPU concepts under '## What changes' in the PR body. The maintainer routes shader-learning tickets to themselves with the ready-for-human label."
+
+[[conflicts]]
+source = "docs/agents/version-control.md"
+rule = "Make every commit, branch, push, and PR through `but` in the shared GitButler workspace, never `git commit` or `git checkout`, with one branch per session named from the ticket."
+answer = "Sessions run in Flight Deck's own worktree, not the shared workspace, and the doc already says to use plain git in a worktree. The flow names the branch, commits, pushes, opens the PR, and never lands."
+
+[[conflicts]]
+source = "docs/agents/pull-requests.md"
+rule = "Before the push, run /code-review and the technical-writing prose pass. After the bots post, run resolve-pr-feedback or /watch-pr on each new review, and after three rounds with top-severity findings left, stop and ask the author."
+answer = "Sessions run the fallow-audit command and the prose pass. The flow owns bot findings and when to stop, so resolve-pr-feedback and watch-pr don't run, and 'stop and ask the author' is the flow's pause. The returns and loop_cap debrief thresholds carry the three-round limit."
