@@ -150,8 +150,23 @@ function sortByLine(problems: Problem[], keys: KeyLines): Problem[] {
   const line = (problem: Problem) => keys.lineOf(problem.missing ? problem.path.slice(0, -1) : problem.path);
   return problems
     .map((problem) => ({ problem, line: line(problem) }))
-    .sort((a, b) => a.line - b.line)
+    .sort((a, b) => a.line - b.line || byIndex(a.problem.path, b.problem.path))
     .map(({ problem }) => problem);
+}
+
+/**
+ * Orders two paths on the same line by the first array index where they differ. The key lines
+ * don't mark a list's entries, so every error in one list shares the list's line, and the schema's
+ * errors would otherwise all come before the rules'. Paths that differ at a key keep their order.
+ */
+function byIndex(a: Path, b: Path): number {
+  for (let k = 0; k < Math.min(a.length, b.length); k++) {
+    const x = a[k];
+    const y = b[k];
+    if (x === y) continue;
+    return typeof x === "number" && typeof y === "number" ? x - y : 0;
+  }
+  return 0;
 }
 
 function format(problem: Problem): string {

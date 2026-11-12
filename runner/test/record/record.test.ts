@@ -214,6 +214,17 @@ describe("read_paths", () => {
       `sandbox.read_paths[2]: reopens ${folder}, which no session may read`,
     ]);
   });
+
+  test("a rule's error and the schema's in one list come out in the list's order", () => {
+    expect(errorsFor("read_paths = []", '["~/.ssh", "~/.ss?"]')).toEqual([
+      "sandbox.read_paths[1]: reopens ~/.ssh, which no session may read",
+      `sandbox.read_paths[2]: ${HOME_FORM}`,
+    ]);
+    expect(errorsFor(HOSTS, '[\n  "github.com",\n  "not a host",\n]')).toEqual([
+      "sandbox.hosts[1]: is GitHub, and no session may reach GitHub",
+      `sandbox.hosts[2]: ${HOST_FORM}`,
+    ]);
+  });
 });
 
 const CHECKOUT_FORM = 'must be a path relative to the checkout, with no leading "/" and no ".." part';
