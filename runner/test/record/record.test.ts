@@ -176,7 +176,7 @@ describe("hosts", () => {
   });
 });
 
-const HOME_FORM = 'must be a path inside "~/", such as "~/.npm", with no "." or ".." part';
+const HOME_FORM = 'must be a path inside "~/", such as "~/.npm", with no "." or ".." part and no glob character';
 
 describe("read_paths", () => {
   test.each(["~/.npm", "~/.cache/ms-playwright", "~/Library/Caches/pnpm", "~/.config/git", "~/.local/state/x", "~/.npm/"])(
@@ -186,7 +186,7 @@ describe("read_paths", () => {
     },
   );
 
-  test.each(["~/", "~", "/Users/maintainer/.npm", ".npm", "~/../etc", "~/./.ssh", "~//.ssh", "~/.npm/.."])('"%s" is not a path inside ~/', (path) => {
+  test.each(["~/", "~", "/Users/maintainer/.npm", ".npm", "~/../etc", "~/./.ssh", "~//.ssh", "~/.npm/..", "~/.config/flight-*/**", "~/.ss?", "~/.[s]sh", "~/{.ssh,.npm}"])('"%s" is not a path inside ~/', (path) => {
     expect(errorsFor('read_paths = []', JSON.stringify([path]))).toEqual([`sandbox.read_paths[1]: ${HOME_FORM}`]);
   });
 

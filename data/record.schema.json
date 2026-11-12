@@ -218,8 +218,8 @@
     },
     "homePath": {
       "type": "string",
-      "pattern": "^~(/(?!\\.\\.?(/|$))[^/]+)+/?$",
-      "message": "must be a path inside \"~/\", such as \"~/.npm\", with no \".\" or \"..\" part"
+      "pattern": "^~(/(?!\\.\\.?(/|$))[^/*?\\[\\]{}]+)+/?$",
+      "message": "must be a path inside \"~/\", such as \"~/.npm\", with no \".\" or \"..\" part and no glob character"
     },
     "checkoutPath": {
       "type": "string",
