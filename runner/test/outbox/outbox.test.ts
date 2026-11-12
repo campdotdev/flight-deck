@@ -35,7 +35,9 @@ beforeEach(async () => {
   tracker = new InMemoryTracker({ clock: () => new Date("2026-11-10T09:00:00Z"), appUser: "flight-deck-app" });
   tracker.addUser({ id: "maintainer", name: "Hunter" });
   tracker.addUser({ id: "flight-deck-app", name: "Flight Deck" });
-  tracker.addTeam({ key: "SHA", name: "Shaders", statuses: Object.values(STATUSES).map(([name, type]) => ({ name, type })) });
+  // Icebox maps to no role.
+  const statuses = [...Object.values(STATUSES), ["Icebox", "backlog"] as const].map(([name, type]) => ({ name, type }));
+  tracker.addTeam({ key: "SHA", name: "Shaders", statuses });
   issue = tracker.addIssue({ team: "SHA", status: STATUSES.planning[0], creator: "maintainer", title: "Save button is blue", description: "" });
 
   sessionFolder = join(folders.sessionRoot, "sessions", "abc123");
@@ -72,6 +74,35 @@ describe("a plan handoff", () => {
     await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
     expect(await apply()).toEqual({ result: "failed", rule: "Lifecycle doesn't allow paused to ready_to_build", writes: [] });
     expect(tracker.writes).toEqual([]);
+  });
+});
+
+describe("an issue in a status that maps to no role", () => {
+  test("writes nothing", async () => {
+    tracker.setStatus(issue.id, "Icebox");
+    await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
+    expect(await apply()).toEqual({
+      result: "failed",
+      rule: "the issue's status maps to no role, so Lifecycle allows no move to ready_to_build",
+      writes: [],
+    });
+    expect(tracker.writes).toEqual([]);
+  });
+});
+
+describe("follow-up issues", () => {
+  test("fail the outbox until the Outbox can file them, and nothing is written", async () => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
+    await mkdir(join(sessionFolder, "outbox", "follow-ups"));
+    await writeFile(join(sessionFolder, "outbox", "follow-ups", "1.md"), "# Theme tokens drift\n\nThe theme has two greens.");
+    expect(await apply()).toEqual({ result: "failed", rule: "the Outbox can't file follow-up issues yet", writes: [] });
+    expect(tracker.writes).toEqual([]);
+  });
+
+  test("an empty follow-ups folder files nothing and fails nothing", async () => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
+    await mkdir(join(sessionFolder, "outbox", "follow-ups"));
+    expect(await apply()).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
   });
 });
 

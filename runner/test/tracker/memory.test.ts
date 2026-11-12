@@ -35,7 +35,9 @@ beforeEach(() => {
   tracker = new InMemoryTracker({ clock: () => now, appUser: "app" });
   tracker.addUser({ id: "maintainer", name: "Hunter" });
   tracker.addUser({ id: "stranger", name: "Sam" });
-  tracker.addTeam({ key: "SHA", name: "Shaders", statuses: Object.values(STATUSES).map((name) => ({ name, type: "started" })) });
+  // Icebox maps to no role.
+  const statuses = [...Object.values(STATUSES), "Icebox"].map((name) => ({ name, type: "started" as const }));
+  tracker.addTeam({ key: "SHA", name: "Shaders", statuses });
 });
 
 function issue(description = "The button is blue.", status = "Planning"): IssueRef & { identifier: string } {
@@ -76,6 +78,12 @@ describe("what the in-memory Tracker models", () => {
       [sent.identifier, "ready_to_plan"],
       [triaged.identifier, "intake"],
     ]);
+  });
+
+  test("an issue in a status that maps to no role reads with no role, and a snapshot leaves it out", async () => {
+    const one = issue("x", "Icebox");
+    expect((await tracker.issue(one)).role).toBeNull();
+    expect((await tracker.snapshot(repo)).issues).toEqual([]);
   });
 
   test("intake and backlog may name one status, which reads back as intake", async () => {
@@ -154,6 +162,14 @@ describe("writeBrief", () => {
     const one = issue(`${brief}\n\n+++ Report\n\nThe button is blue.\n\n+++`);
     await tracker.writeBrief(one, "## Summary\n\nNew.", { runnerWroteBrief: false });
     expect((await tracker.issue(one)).description).toBe("## Summary\n\nNew.\n\n+++ Report\n\nThe button is blue.\n\n+++");
+  });
+
+  test("a report that opens with a longer heading than ## Summary isn't a brief, so it stays whole", async () => {
+    const one = issue("## Summary of the crash\n\nOpen settings.\n\n+++ Report\n\nlog\n\n+++");
+    await tracker.writeBrief(one, "## Summary\n\nNew.", { runnerWroteBrief: false });
+    expect((await tracker.issue(one)).description).toBe(
+      "## Summary\n\nNew.\n\n+++ Report\n\n## Summary of the crash\n\nOpen settings.\n\n#### Report\n\nlog\n\n+++",
+    );
   });
 
   test("a Report fold that a stranger pasted is part of the report, and its fold lines become headings", async () => {

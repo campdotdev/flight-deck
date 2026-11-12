@@ -179,10 +179,8 @@ export class InMemoryTracker implements Tracker {
 
   async issue(ref: IssueRef): Promise<TrackerIssue> {
     const issue = this.stored(ref.id);
-    const read = this.snapshotIssue(issue, ref.repo);
-    if (read === null) throw new Error(`${issue.identifier}'s status ${issue.status} has no role`);
     return {
-      ...read,
+      ...this.read(issue, ref.repo),
       description: issue.description,
       creator: issue.creator,
       comments: issue.comments.map((comment) => ({ ...comment })),
@@ -265,16 +263,20 @@ export class InMemoryTracker implements Tracker {
     return comment;
   }
 
+  /** A snapshot leaves out an issue whose status maps to no role. */
   private snapshotIssue(issue: StoredIssue, repo: TrackerRepo): SnapshotIssue | null {
-    const role = roleOf(repo, issue.status);
-    if (role === null) return null;
+    const read = this.read(issue, repo);
+    return read.role === null ? null : { ...read, role: read.role };
+  }
+
+  private read(issue: StoredIssue, repo: TrackerRepo): Omit<SnapshotIssue, "role"> & { role: Role | null } {
     return {
       id: issue.id,
       repo,
       identifier: issue.identifier,
       title: issue.title,
       url: `https://linear.app/${repo.workspace}/issue/${issue.identifier}`,
-      role,
+      role: roleOf(repo, issue.status),
       status: issue.status,
       status_since: issue.status_since,
       assignee: issue.assignee,

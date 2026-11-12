@@ -31,6 +31,9 @@ export const STATUSES: Record<Role, [string, StatusType]> = {
   duplicate: ["Duplicate", "duplicate"],
 };
 
+/** A status on Shaders' team that the record's `[tracker.statuses]` leaves out, so it maps to no role. */
+export const UNMAPPED_STATUS = "Icebox";
+
 const statusNames = Object.fromEntries(Object.entries(STATUSES).map(([role, [name]]) => [role, name])) as Record<Role, string>;
 
 /** Shaders' schema-1 record, without its `[app]` table, because ports come in a later ticket. */
@@ -83,7 +86,8 @@ export class World {
     this.tracker = new InMemoryTracker({ clock: () => this.now, appUser: this.appUser });
     this.tracker.addUser({ id: this.maintainer.id, name: this.maintainer.name });
     this.tracker.addUser({ id: this.appUser, name: "Flight Deck" });
-    this.tracker.addTeam({ key: "SHA", name: "Shaders", statuses: Object.values(STATUSES).map(([name, type]) => ({ name, type })) });
+    const statuses = [...Object.values(STATUSES), [UNMAPPED_STATUS, "backlog"] as const].map(([name, type]) => ({ name, type }));
+    this.tracker.addTeam({ key: "SHA", name: "Shaders", statuses });
     this.config = {
       auth: "subscription",
       concurrency_cap: 2,

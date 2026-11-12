@@ -35,8 +35,8 @@ export type EnvelopeResult = { ok: true; envelope: Envelope } | { ok: false; rul
 export interface CheckContext {
   version: string;
   stage: Stage;
-  /** The issue's role now. */
-  role: Role;
+  /** The issue's role now, or `null` when its status maps to none. */
+  role: Role | null;
   lifecycle: Lifecycle;
   /** Whether `applied.json` records the move, so the issue already left the status the move starts from. */
   moved: boolean;
@@ -67,8 +67,9 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   const role = move as Role;
   if (!(STAGE_MOVES[context.stage] ?? []).includes(role)) return fail(`${context.stage} can't move an issue to ${role}`);
   const cause = MOVE_CAUSES[role];
-  if (!context.moved && (cause === undefined || !context.lifecycle.allows(context.role, role, cause))) {
-    return fail(`Lifecycle doesn't allow ${context.role} to ${role}`);
+  if (!context.moved) {
+    if (context.role === null) return fail(`the issue's status maps to no role, so Lifecycle allows no move to ${role}`);
+    if (cause === undefined || !context.lifecycle.allows(context.role, role, cause)) return fail(`Lifecycle doesn't allow ${context.role} to ${role}`);
   }
   if (!APPLIES.includes(role)) return fail(`the Outbox can't apply a move to ${role} yet`);
 
@@ -81,6 +82,12 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   if (handoffs.length > 1) return fail(`the outbox holds ${handoffs.length} handoff files: ${handoffs.join(", ")}`);
   const stray = names.find((name) => !["outcome.json", "summary.md", "media", "follow-ups", ...handoffs].includes(name));
   if (stray !== undefined) return fail(`${stray} isn't part of the outbox's envelope`);
+  // FLD-97 files follow-up issues. Until then, the Outbox refuses them, because `dispose` would delete them unfiled.
+  // An empty folder files nothing, and a `follow-ups` that isn't a folder fails too.
+  if (names.includes("follow-ups")) {
+    const followUps = await readdir(join(outbox, "follow-ups")).catch(() => null);
+    if (followUps === null || followUps.length > 0) return fail("the Outbox can't file follow-up issues yet");
+  }
 
   const text = await readRegularFile(join(outbox, handoffName));
   if (text === null) return fail(`${handoffName} isn't a regular file`);

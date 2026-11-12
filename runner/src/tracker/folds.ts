@@ -69,7 +69,7 @@ function trailingReport(description: string): string | null {
  */
 export function reportOf(description: string, runnerWroteBrief: boolean): string {
   const inFold = trailingReport(description);
-  const isBrief = inFold !== null && (runnerWroteBrief || description.trimStart().startsWith("## Summary"));
+  const isBrief = inFold !== null && (runnerWroteBrief || /^## Summary[ \t]*(?:\n|$)/.test(description.trimStart()));
   return isBrief ? inFold : flattenFolds(description.trim());
 }
 

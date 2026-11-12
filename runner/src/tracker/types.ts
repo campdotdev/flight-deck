@@ -65,7 +65,9 @@ export interface TrackerComment {
 }
 
 /** One issue as `issue` returns it. */
-export interface TrackerIssue extends SnapshotIssue {
+export interface TrackerIssue extends Omit<SnapshotIssue, "role"> {
+  /** `null` when the issue's status maps to no role, such as a status the record's `[tracker.statuses]` leaves out. */
+  role: Role | null;
   description: string;
   /** The creator's user ID. */
   creator: string;

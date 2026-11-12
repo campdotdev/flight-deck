@@ -1,6 +1,6 @@
 // A sent issue gets a brief: the tracer bullet through the runner, at the one seam.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { outbox, World } from "./world.ts";
+import { outbox, UNMAPPED_STATUS, World } from "./world.ts";
 
 const REPORT = "The Save button is blue on the settings page.\n\nIt should be red, like every other Save button.";
 
@@ -226,6 +226,20 @@ describe("status.json", () => {
     expect(status.repos).toEqual([
       { name: "campdotdev/shaders", record: "ok", cache: "missing", waiting_for_specs: [], waiting_for_blockers: [], waiting_for_port: null },
     ]);
+  });
+});
+
+describe("an issue moved out while its session runs", () => {
+  test("to a status that maps to no role gets nothing written, and the session leaves the list", async () => {
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    world.send(issue);
+    world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: SUMMARY, brief: BRIEF }) });
+    await world.tick();
+    world.tracker.setStatus(issue.id, UNMAPPED_STATUS);
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 });
+    await world.tick();
+    expect(world.tracker.writes).toEqual([{ kind: "move", issue: issue.identifier, status: "Planning" }]);
+    expect((await world.status()).sessions).toEqual([]);
   });
 });
 

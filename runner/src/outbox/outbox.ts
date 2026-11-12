@@ -86,6 +86,8 @@ export class Outbox {
       [
         "move",
         async () => {
+          // The check refuses an issue with no role before any write, unless the move already landed.
+          if (issue.role === null) return `${issue.identifier}'s status ${issue.status} maps to no role`;
           const moved = await lifecycle.move({ ...ref, role: issue.role }, envelope.outcome.move, "handoff");
           return moved.ok ? null : moved.violation;
         },
