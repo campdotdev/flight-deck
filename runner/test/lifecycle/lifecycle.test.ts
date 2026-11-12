@@ -76,10 +76,12 @@ describe("every other move is a violation", () => {
 });
 
 describe("allows", () => {
-  test("answers whether any cause allows a move, for the Outbox's check", () => {
+  test("answers whether the table allows a move for a cause, for the Outbox's check", () => {
     const lifecycle = recordingTracker().lifecycle;
-    expect(lifecycle.allows("planning", "ready_to_build")).toBe(true);
-    expect(lifecycle.allows("planning", "building")).toBe(false);
-    expect(lifecycle.allows("paused", "ready_to_plan")).toBe(true);
+    expect(lifecycle.allows("planning", "ready_to_build", "handoff")).toBe(true);
+    expect(lifecycle.allows("planning", "building", "handoff")).toBe(false);
+    expect(lifecycle.allows("paused", "ready_to_build", "answer")).toBe(true);
+    // An answer may move a paused issue to Ready to build, but a handoff may not.
+    expect(lifecycle.allows("paused", "ready_to_build", "handoff")).toBe(false);
   });
 });

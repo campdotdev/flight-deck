@@ -49,11 +49,16 @@ export class Outbox {
     const lifecycle = new Lifecycle(tracker);
     const issue = await tracker.issue({ id: session.issue, repo });
 
+    // A second apply skips the writes already recorded, so once the move has landed, the issue's status no longer
+    // has to allow it.
+    const appliedFile = join(sessionFolder, "applied.json");
+    const applied = await readJson<WriteName[]>(appliedFile, []);
     const checked = await readEnvelope(sessionParts(sessionFolder).outbox, {
       version: this.options.version,
       stage: session.stage,
       role: issue.role,
       lifecycle,
+      moved: applied.includes("move"),
     });
     if (!checked.ok) return { result: "failed", rule: checked.rule, writes: [] };
     const { envelope } = checked;
@@ -87,8 +92,6 @@ export class Outbox {
       ],
     ];
 
-    const appliedFile = join(sessionFolder, "applied.json");
-    const applied = await readJson<WriteName[]>(appliedFile, []);
     const writes: string[] = [];
     for (const [name, write] of steps) {
       if (applied.includes(name)) continue;

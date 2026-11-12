@@ -1,7 +1,8 @@
 // The envelope every outbox shares (overview, spec 1's "The envelope"), and the checks `apply` makes on it.
-import { readdir, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { Lifecycle } from "../lifecycle/index.ts";
+import type { Cause, Lifecycle } from "../lifecycle/index.ts";
 import { ROLES, type Role } from "../record/index.ts";
 import type { Stage } from "../state/index.ts";
 
@@ -24,6 +25,8 @@ const HANDOFF_FILES: Partial<Record<Role, string>> = { ready_to_build: "brief.md
 const HANDOFF_NAMES = new Set(["brief.md", "pause.md", "claims.md", "verdict.md"]);
 /** The moves each stage's outbox may make. */
 const STAGE_MOVES: Partial<Record<Stage, readonly Role[]>> = { plan: ["ready_to_build", "paused", "duplicate"] };
+/** The cause an outbox makes each move with. */
+const MOVE_CAUSES: Partial<Record<Role, Cause>> = { ready_to_build: "handoff", paused: "pause", duplicate: "duplicate" };
 /** The moves this Outbox applies so far. FLD-95 adds `paused`, and FLD-97 adds `duplicate` and follow-up issues. */
 const APPLIES: readonly Role[] = ["ready_to_build"];
 
@@ -35,6 +38,8 @@ export interface CheckContext {
   /** The issue's role now. */
   role: Role;
   lifecycle: Lifecycle;
+  /** Whether `applied.json` records the move, so the issue already left the status the move starts from. */
+  moved: boolean;
 }
 
 /** Reads the outbox and checks it (spec 1, "Checks"). The first broken rule fails it. */
@@ -44,9 +49,11 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   if (names === null) return fail("the outbox is missing");
   if (!names.includes("outcome.json")) return fail("the outbox holds no outcome.json");
 
+  const outcomeText = await readRegularFile(join(outbox, "outcome.json"));
+  if (outcomeText === null) return fail("outcome.json isn't a regular file");
   let outcome: Record<string, unknown>;
   try {
-    outcome = JSON.parse(await readFile(join(outbox, "outcome.json"), "utf8")) as Record<string, unknown>;
+    outcome = JSON.parse(outcomeText) as Record<string, unknown>;
   } catch {
     return fail("outcome.json isn't JSON");
   }
@@ -59,7 +66,10 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   if (typeof move !== "string" || !(ROLES as readonly string[]).includes(move)) return fail(`outcome.json's move ${String(move)} isn't a role`);
   const role = move as Role;
   if (!(STAGE_MOVES[context.stage] ?? []).includes(role)) return fail(`${context.stage} can't move an issue to ${role}`);
-  if (!context.lifecycle.allows(context.role, role)) return fail(`Lifecycle doesn't allow ${context.role} to ${role}`);
+  const cause = MOVE_CAUSES[role];
+  if (!context.moved && (cause === undefined || !context.lifecycle.allows(context.role, role, cause))) {
+    return fail(`Lifecycle doesn't allow ${context.role} to ${role}`);
+  }
   if (!APPLIES.includes(role)) return fail(`the Outbox can't apply a move to ${role} yet`);
 
   const extraKey = Object.keys(outcome).find((key) => !["version", "stage", "move"].includes(key));
@@ -72,13 +82,40 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   const stray = names.find((name) => !["outcome.json", "summary.md", "media", "follow-ups", ...handoffs].includes(name));
   if (stray !== undefined) return fail(`${stray} isn't part of the outbox's envelope`);
 
-  const text = await readFile(join(outbox, handoffName), "utf8");
+  const text = await readRegularFile(join(outbox, handoffName));
+  if (text === null) return fail(`${handoffName} isn't a regular file`);
   if (handoffName === "brief.md") {
     const rule = briefRule(text);
     if (rule !== null) return fail(rule);
   }
-  const summary = names.includes("summary.md") ? await readFile(join(outbox, "summary.md"), "utf8") : null;
+  let summary: string | null = null;
+  if (names.includes("summary.md")) {
+    summary = await readRegularFile(join(outbox, "summary.md"));
+    if (summary === null) return fail("summary.md isn't a regular file");
+  }
   return { ok: true, envelope: { outcome: { version: context.version, stage: context.stage, move: role }, summary, handoff: { name: handoffName, text } } };
+}
+
+/**
+ * The file's text, or `null` when it isn't a regular file or can't be read. A session could leave a symlink to a
+ * file it can't read itself, and the runner would post that file to Linear, so the open never follows one (ADR 0007).
+ * `O_NONBLOCK` keeps a named pipe from holding the open.
+ */
+async function readRegularFile(path: string): Promise<string | null> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch {
+    return null;
+  }
+  try {
+    if (!(await handle.stat()).isFile()) return null;
+    return await handle.readFile("utf8");
+  } catch {
+    return null;
+  } finally {
+    await handle.close();
+  }
 }
 
 /** The broken rule in a brief, or `null`. */
