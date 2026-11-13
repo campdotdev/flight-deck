@@ -335,6 +335,27 @@ describe("a repo whose snapshot fails", () => {
   });
 });
 
+describe("a repo whose answers, flags, or subscriptions step fails", () => {
+  test("skips only that repo's starts, as a failed snapshot does", async () => {
+    const first = world.config.repos[0]!;
+    const second = "campdotdev/shaders-docs";
+    world.config.repos.push({ ...first, name: second, checkout: join(world.root, "checkout-docs") });
+    await world.writeConfig();
+    // The first repo's step 7 fails on a Linear write, as a network error would on the real adapter.
+    const unsubscribe = world.tracker.unsubscribe.bind(world.tracker);
+    world.tracker.unsubscribe = async (ref) => {
+      if (ref.repo.name === first.name) throw new Error("fetch failed");
+      return unsubscribe(ref);
+    };
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    expect(world.harness.started.map(({ session }) => [session.repo, session.issue])).toEqual([[second, issue.identifier]]);
+    expect((await world.status()).polled_at).toBe(world.now.toISOString());
+  });
+});
+
 describe("a start that fails after the take", () => {
   test("leaves no entry and no workspace, so it holds no slot, and the tick goes on", async () => {
     // The cap is 2, and both starts fail on a Linear write, as a network error would on the real adapter.

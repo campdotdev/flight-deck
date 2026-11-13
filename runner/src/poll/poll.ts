@@ -169,9 +169,9 @@ export class Poll {
     }
     const repo = trackerRepo(config, registration, record?.ok === true ? record.record : null);
 
-    // 3. Snapshot, with the comments since the repo's cursor. A failed Linear read, such as a network error or a
-    // 5xx, skips this repo's starts for this poll only. The other repos still poll, and the tick still publishes
-    // the heartbeat and `status.json`.
+    // 3. Snapshot, with the comments since the repo's cursor. A failed Linear call, such as a network error or a
+    // 5xx, in the snapshot or in steps 5 to 7 skips this repo's starts for this poll only. The other repos still
+    // poll, and the tick still publishes the heartbeat and `status.json`.
     let snapshot: Snapshot | null = null;
     if (repo !== null) {
       try {
@@ -181,14 +181,19 @@ export class Poll {
       }
     }
     if (repo !== null && snapshot !== null) {
-      // 5. Answers. FLD-104 adds step 4, moved out.
-      const handled = await this.answers(now, repo, snapshot);
-      // The cursor moves only once every comment it passes is in issue memory.
-      const latest = snapshot.comments.at(-1)?.created_at;
-      if (latest !== undefined) await this.state.writeCursor(registration.name, latest);
-      // 6. Flags, and 7. Subscriptions.
-      await this.flags(now, repo, snapshot, handled);
-      await this.subscriptions(repo, snapshot, handled);
+      try {
+        // 5. Answers. FLD-104 adds step 4, moved out.
+        const handled = await this.answers(now, repo, snapshot);
+        // The cursor moves only once every comment it passes is in issue memory.
+        const latest = snapshot.comments.at(-1)?.created_at;
+        if (latest !== undefined) await this.state.writeCursor(registration.name, latest);
+        // 6. Flags, and 7. Subscriptions.
+        await this.flags(now, repo, snapshot, handled);
+        await this.subscriptions(repo, snapshot, handled);
+      } catch (error) {
+        await this.state.log(now, `${registration.name}: answers, flags, or subscriptions failed: ${(error as Error).message}`);
+        snapshot = null;
+      }
     }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
     return { registration, tracker: repo, fetch, record, snapshot, waitingForSpecs };
