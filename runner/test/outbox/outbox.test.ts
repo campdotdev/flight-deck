@@ -121,6 +121,22 @@ describe("a retry after a brief write whose response was lost", () => {
   });
 });
 
+describe("a retry after a move whose response was lost", () => {
+  test("finds the issue in Ready to build and succeeds without moving it again", async () => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
+    const move = tracker.move.bind(tracker);
+    tracker.move = async (...args) => {
+      await move(...args);
+      throw new Error("socket hang up");
+    };
+    await expect(apply()).rejects.toThrow("socket hang up");
+    tracker.move = move;
+    const writes = tracker.writes.length;
+    expect(await apply()).toEqual({ result: "applied", writes: ["move"] });
+    expect(tracker.writes.length).toBe(writes);
+  });
+});
+
 describe("a plan handoff", () => {
   test("on a paused issue writes nothing, though an answer may move it to Ready to build", async () => {
     tracker.setStatus(issue.id, STATUSES.paused[0]);

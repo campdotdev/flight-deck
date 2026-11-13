@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
+import type { Role } from "../record/index.ts";
 import { readJson, writeJson, type State } from "../state/index.ts";
 import type { IssueRef, Tracker, TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
@@ -50,15 +51,18 @@ export class Outbox {
     const issue = await tracker.issue({ id: session.issue, repo });
 
     // A second apply skips the writes already recorded, so once the move has landed, the issue's status no longer
-    // has to allow it.
+    // has to allow it. A move can land without reaching `applied.json`, when its response or the journal write is
+    // lost. Once the writes before it are recorded, an issue already in the role the move goes to counts as moved.
     const appliedFile = join(sessionFolder, "applied.json");
     const applied = await readJson<WriteName[]>(appliedFile, []);
+    const moveLanded = (to: Role): boolean =>
+      applied.includes("move") || (applied.includes("writeBrief") && applied.includes("post") && issue.role === to);
     const checked = await readEnvelope(sessionParts(sessionFolder).outbox, {
       version: this.options.version,
       stage: session.stage,
       role: issue.role,
       lifecycle,
-      moved: applied.includes("move"),
+      moved: moveLanded,
     });
     if (!checked.ok) return { result: "failed", rule: checked.rule, writes: [] };
     const { envelope } = checked;
@@ -101,6 +105,7 @@ export class Outbox {
       [
         "move",
         async () => {
+          if (moveLanded(envelope.outcome.move)) return null;
           // The check refuses an issue with no role before any write, unless the move already landed.
           if (issue.role === null) return `${issue.identifier}'s status ${issue.status} maps to no role`;
           const moved = await lifecycle.move({ ...ref, role: issue.role }, envelope.outcome.move, "handoff");

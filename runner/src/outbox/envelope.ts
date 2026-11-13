@@ -44,8 +44,8 @@ export interface CheckContext {
   /** The issue's role now, or `null` when its status maps to none. */
   role: Role | null;
   lifecycle: Lifecycle;
-  /** Whether `applied.json` records the move, so the issue already left the status the move starts from. */
-  moved: boolean;
+  /** Whether the move to this role already landed, so the issue already left the status the move starts from. */
+  moved(to: Role): boolean;
 }
 
 /** Reads the outbox and checks it (spec 1, "Checks"). The first broken rule fails it. */
@@ -73,7 +73,7 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   const role = move as Role;
   if (!(STAGE_MOVES[context.stage] ?? []).includes(role)) return fail(`${context.stage} can't move an issue to ${role}`);
   const cause = MOVE_CAUSES[role];
-  if (!context.moved) {
+  if (!context.moved(role)) {
     if (context.role === null) return fail(`the issue's status maps to no role, so Lifecycle allows no move to ${role}`);
     if (cause === undefined || !context.lifecycle.allows(context.role, role, cause)) return fail(`Lifecycle doesn't allow ${context.role} to ${role}`);
   }
