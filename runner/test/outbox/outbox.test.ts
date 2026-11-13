@@ -159,6 +159,14 @@ describe("a pause retried after a lost response", () => {
     expect((await state.issueMemory(repo.name, issue.id)).pause?.comment_at).toBe(comments[0]!.created_at);
   });
 
+  test("a new handoff doesn't keep the answers of a pause an earlier session opened", async () => {
+    const stale = { answers: [{ word: "brand", does: "plan uses the brand red", move: "ready_to_plan" as const }], session: "old111" };
+    await state.writeIssueMemory(repo.name, issue.id, { brief: null, flag: null, pause: { ...stale, comment_at: "2026-11-09T09:00:00Z", replies: [] } });
+    await leavePause();
+    expect(await apply()).toMatchObject({ result: "paused", writes: ["post", "move", "pause"] });
+    expect((await state.issueMemory(repo.name, issue.id)).pause).toMatchObject({ answers: ANSWERS, session: "abc123" });
+  });
+
   test("after a move whose response was lost finds the issue in Paused and doesn't move it again", async () => {
     await leavePause();
     const move = tracker.move.bind(tracker);

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import type { Role } from "../record/index.ts";
-import { readJson, writeJson, type State } from "../state/index.ts";
+import { readJson, writeJson, type OpenPause, type State } from "../state/index.ts";
 import type { IssueRef, Tracker, TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
 import { handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
@@ -127,6 +127,9 @@ export class Outbox {
     // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
     let steps: [WriteName, () => Promise<string | null>][];
     if (move === "paused") {
+      // A pause an earlier handoff opened, such as before a hand run took the paused issue back into Planning,
+      // offered other answers, so this handoff starts a fresh one.
+      const ownPause = (pause: OpenPause | null): OpenPause | null => (pause?.session === session.session ? pause : null);
       steps = [
         [
           "post",
@@ -137,7 +140,7 @@ export class Outbox {
             const since = this.options.clock().toISOString();
             const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since };
             const memory = await state.issueMemory(session.repo, issue.id);
-            const pause = memory.pause ?? { answers, comment_at: since, replies: [] };
+            const pause = ownPause(memory.pause) ?? { answers, session: session.session, comment_at: since, replies: [] };
             const flagged = { ...memory, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } };
             await state.writeIssueMemory(session.repo, issue.id, { ...flagged, pause });
             const at = posted?.created_at ?? (await tracker.post(ref, comment, { flag: true })).created_at;
@@ -152,7 +155,12 @@ export class Outbox {
           "pause",
           async () => {
             const memory = await state.issueMemory(session.repo, issue.id);
-            const pause = memory.pause ?? { answers, comment_at: memory.flag?.since ?? this.options.clock().toISOString(), replies: [] };
+            const pause = ownPause(memory.pause) ?? {
+              answers,
+              session: session.session,
+              comment_at: memory.flag?.since ?? this.options.clock().toISOString(),
+              replies: [],
+            };
             // A reply no snapshot has returned yet counts too. A reply a snapshot saw keeps the body it saw then.
             const known = new Set(pause.replies.map((reply) => reply.id));
             const unseen = repliesAfter(await tracker.issue(ref), pause.comment_at).filter((reply) => !known.has(reply.id));
