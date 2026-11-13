@@ -1,5 +1,7 @@
 // A sent issue gets a brief: the tracer bullet through the runner, at the one seam.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readdir } from "node:fs/promises";
+import { paths } from "../../src/folders/index.ts";
 import { outbox, SHADERS_RECORD, UNMAPPED_STATUS, World } from "./world.ts";
 
 const REPORT = "The Save button is blue on the settings page.\n\nIt should be red, like every other Save button.";
@@ -296,6 +298,41 @@ describe("an exit whose handling throws", () => {
       expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
       expect(world.tracker.writes.filter((write) => write.issue === issue.identifier && write.kind === "comment")).toHaveLength(1);
     }
+  });
+});
+
+describe("a start that fails after the take", () => {
+  test("leaves no entry and no workspace, so it holds no slot, and the tick goes on", async () => {
+    // The cap is 2, and both starts fail on a Linear write, as a network error would on the real adapter.
+    const mint = world.tracker.sessionToken.bind(world.tracker);
+    let failures = 2;
+    world.tracker.sessionToken = async (session) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return mint(session);
+    };
+    const [one, two, three] = ["One", "Two", "Three"].map((title) => world.issue({ title, description: REPORT }));
+    world.send(one!);
+    world.send(two!);
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+    expect(await readdir(paths.worktrees(world.folders)).catch(() => [])).toEqual([]);
+    expect(await readdir(paths.sessions(world.folders)).catch(() => [])).toEqual([]);
+
+    world.send(three!);
+    world.harness.script(three!.identifier, { outbox: outbox.brief({ summary: SUMMARY, brief: BRIEF }) });
+    await world.tick();
+    expect(world.harness.started.map((start) => start.session.issue)).toEqual([three!.identifier]);
+  });
+
+  test("revokes the Reader token when the Harness can't start the session", async () => {
+    world.harness.start = async () => {
+      throw new Error("claude not found");
+    };
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    world.send(issue);
+    await world.tick();
+    expect(world.tracker.tokens.map(({ revoked }) => revoked)).toEqual([true]);
+    expect((await world.status()).sessions).toEqual([]);
   });
 });
 

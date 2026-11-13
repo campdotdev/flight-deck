@@ -7,7 +7,7 @@
 import { readFile } from "node:fs/promises";
 import type { Folders } from "../folders/index.ts";
 import { paths, sessionParts } from "../folders/index.ts";
-import type { Exit, Harness, HarnessSession } from "../harness/index.ts";
+import type { Exit, Handle, Harness, HarnessSession } from "../harness/index.ts";
 import { readConfig, type Config, type Registration } from "../install/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
@@ -215,24 +215,29 @@ export class Poll {
 
     // 1. The entry first, then the take, so the issue never sits in Planning unseen (ADR 0002).
     await this.state.writeSessions([...(await this.state.sessions()), entry]);
-    const taken = await this.lifecycle.move(issue, "planning", "take");
-    if (!taken.ok) {
-      await this.state.log(now, `${id} ${issue.identifier}: take refused: ${taken.violation}`);
-      await this.dropEntry(id);
-      return;
-    }
-
-    // 2. The record at the commit the session starts from: the default branch's tip at this poll.
-    const commit = poll.fetch.head;
-    const deadline = new Date(now.getTime() + durationMs(record.time_limits.plan)).toISOString();
-    const linear = config.linear[repo.workspace];
-    const full = await this.tracker.issue(issue);
-    const memory = await this.state.issueMemory(registration.name, issue.id);
-
-    // 3. Prepare. FLD-98 counts a failed prepare as a failed session.
-    let prepared;
+    // A throw from here until the Harness holds the session, such as a failed Linear read, ends the start: the
+    // workspace and the entry go, so a `starting` entry with no session never holds a slot. FLD-98 counts it as a
+    // failed session.
+    let minted = false;
+    let handle: Handle;
+    let deadline: string;
     try {
-      prepared = await workspace.prepare({
+      const taken = await this.lifecycle.move(issue, "planning", "take");
+      if (!taken.ok) {
+        await this.state.log(now, `${id} ${issue.identifier}: take refused: ${taken.violation}`);
+        await this.dropEntry(id);
+        return;
+      }
+
+      // 2. The record at the commit the session starts from: the default branch's tip at this poll.
+      const commit = poll.fetch.head;
+      deadline = new Date(now.getTime() + durationMs(record.time_limits.plan)).toISOString();
+      const linear = config.linear[repo.workspace];
+      const full = await this.tracker.issue(issue);
+      const memory = await this.state.issueMemory(registration.name, issue.id);
+
+      // 3. Prepare.
+      const prepared = await workspace.prepare({
         session: id,
         stage,
         mode: "issue",
@@ -254,34 +259,36 @@ export class Poll {
           syncedComments: full.comments.filter((comment) => comment.synced).map((comment) => comment.id),
         },
       });
+
+      // 4. The Reader token, then the session.
+      await this.tracker.sessionToken({ id, repo });
+      minted = true;
+      const session: HarnessSession = {
+        id,
+        stage,
+        mode: "issue",
+        repo: registration.name,
+        issue: issue.identifier,
+        worktree: prepared.worktree,
+        sessionFolder: prepared.sessionFolder,
+        sessionJson: sessionParts(prepared.sessionFolder).sessionJson,
+        transcript: paths.transcript(this.folders, registration.name, id),
+        deadline,
+        model: config.models.plan,
+        versionFolder: this.versionFolder,
+      };
+      handle = await this.harness.start(session, {
+        exit: (exit) => void this.exits.push({ session: id, exit }),
+        // FLD-105 turns each event into the plan-limit hold.
+        rateLimit: () => {},
+      });
     } catch (error) {
-      await this.state.log(now, `${id} ${issue.identifier}: prepare failed: ${(error as Error).message}`);
-      await workspace.dispose({ session: id, worktree });
-      await this.dropEntry(id);
+      await this.state.log(now, `${id} ${issue.identifier}: start failed: ${(error as Error).message}`);
+      await this.endStart(now, workspace, id, worktree, minted ? repo : null);
       return;
     }
 
-    // 4. The Reader token, then the session.
-    await this.tracker.sessionToken({ id, repo });
-    const session: HarnessSession = {
-      id,
-      stage,
-      mode: "issue",
-      repo: registration.name,
-      issue: issue.identifier,
-      worktree: prepared.worktree,
-      sessionFolder: prepared.sessionFolder,
-      sessionJson: sessionParts(prepared.sessionFolder).sessionJson,
-      transcript: paths.transcript(this.folders, registration.name, id),
-      deadline,
-      model: config.models.plan,
-      versionFolder: this.versionFolder,
-    };
-    const handle = await this.harness.start(session, {
-      exit: (exit) => void this.exits.push({ session: id, exit }),
-      // FLD-105 turns each event into the plan-limit hold.
-      rateLimit: () => {},
-    });
+    // The session runs now, so its exit cleans up after it, even if this write fails.
     const running: SessionEntry = {
       ...entry,
       pid: handle.pid,
@@ -292,6 +299,22 @@ export class Poll {
       state: "running",
     };
     await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === id ? running : each)));
+  }
+
+  /** Undoes a start that failed before the Harness held its session. Each step runs even when one before it fails. */
+  private async endStart(now: Date, workspace: Workspace, id: string, worktree: string, minted: TrackerRepo | null): Promise<void> {
+    const steps: [string, () => Promise<void>][] = [
+      ["revoke", async () => (minted === null ? undefined : await this.tracker.revoke({ id, repo: minted }))],
+      ["dispose", () => workspace.dispose({ session: id, worktree })],
+      ["drop", () => this.dropEntry(id)],
+    ];
+    for (const [name, step] of steps) {
+      try {
+        await step();
+      } catch (error) {
+        await this.state.log(now, `${id}: ${name} after a failed start failed: ${(error as Error).message}`);
+      }
+    }
   }
 
   private async dropEntry(id: string): Promise<void> {
