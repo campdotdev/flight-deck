@@ -5,8 +5,10 @@
 // node reset-server.cjs <key.pem> <cert.pem> <client> <method> <where> <cuts> [served]
 //   client: fetch, request, or get; header, which sets a header after https.request(); cancel, which destroys
 //   the request 500 ms in; destroy-response and cancel-body, which destroy the https response or cancel the
-//   fetch body 500 ms in; or paused, which reads nothing for 300 ms and reports what the response buffered.
-//   where: body (after 5 of 10 bytes), head (before any answer), or large (a 1 MiB body, never cut).
+//   fetch body 500 ms in; paused, which reads nothing for 300 ms and reports what the response buffered; body,
+//   which sends a one-byte body; or timeout, which sets a 300 ms timeout that destroys the request.
+//   where: body (after 5 of 10 bytes), head (before any answer), large (a 1 MiB body, never cut), or stall
+//   (cut like head, then never answer).
 //   served: etag (the default), date (Last-Modified and no ETag), none (neither), or changed (a new ETag and
 //   body after the first answer).
 "use strict";
@@ -45,7 +47,8 @@ const server = net.createServer((raw) => {
     const validator =
       served === "date" ? "Last-Modified: Wed, 11 May 2022 19:24:48 GMT\r\n" : served === "none" ? "" : `ETag: "${changed ? "v2" : "v1"}"\r\n`;
     const reset = () => setTimeout(() => raw.resetAndDestroy(), 50);
-    if (cut && where === "head") return reset();
+    if (cut && (where === "head" || where === "stall")) return reset();
+    if (where === "stall") return;
     socket.write(`HTTP/1.1 200 OK\r\nContent-Length: ${full.length}\r\n${validator}\r\n${body}`, cut ? reset : undefined);
   });
 });
@@ -101,8 +104,10 @@ function viaRequest(url) {
     };
     req = client === "get" ? https.get(url, options, onResponse) : https.request(url, options, onResponse);
     if (client === "header") req.setHeader("X-Token", "t");
+    if (client === "timeout") req.setTimeout(300, () => req.destroy(Object.assign(new Error("timed out"), { code: "ETIMEDOUT" })));
     req.on("error", reject);
-    if (client !== "get") req.end();
+    if (client === "body") req.end("x");
+    else if (client !== "get") req.end();
   });
 }
 

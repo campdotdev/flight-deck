@@ -102,10 +102,10 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
     await rm(certs, { recursive: true, force: true });
   });
 
-  type Client = "fetch" | "request" | "get" | "header" | "cancel" | "destroy-response" | "cancel-body" | "paused";
+  type Client = "fetch" | "request" | "get" | "header" | "cancel" | "destroy-response" | "cancel-body" | "paused" | "body" | "timeout";
   type Served = "etag" | "date" | "none" | "changed";
 
-  async function run(client: Client, method: string, where: "body" | "head" | "large", cuts: number, options: { load?: boolean; served?: Served } = {}): Promise<Run> {
+  async function run(client: Client, method: string, where: "body" | "head" | "large" | "stall", cuts: number, options: { load?: boolean; served?: Served } = {}): Promise<Run> {
     const args = [client, method, where, String(cuts), options.served ?? "etag"];
     const proc = Bun.spawn([node!, fixture, join(certs, "key.pem"), join(certs, "cert.pem"), ...args], {
       env: {
@@ -198,6 +198,14 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
       expect(each.codes).toContain("ECONNRESET");
       expect(gaps(each.arrivals)).toEqual([1, 2, 4]);
     }
+  });
+
+  test("a GET that sends a body isn't retried", async () => {
+    expect(await run("body", "GET", "head", 1)).toMatchObject({ ok: false, codes: ["ECONNRESET"], arrivals: [expect.any(Number)] });
+  });
+
+  test("a retry keeps the caller's timeout, and its timeout reaches the caller", async () => {
+    expect(await run("timeout", "GET", "stall", 1)).toMatchObject({ ok: false, codes: ["ETIMEDOUT"], arrivals: [expect.any(Number), expect.any(Number)] });
   });
 
   test("a POST cut short isn't retried", async () => {

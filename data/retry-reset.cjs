@@ -91,7 +91,10 @@ async function fetchWithRetries(self, input, init) {
           }
           // A different answer can't continue the body the caller already holds part of.
           const header = (response) => (name) => response.headers.get(name);
-          if (next.status !== first.status || next.body === null || !sameRepresentation(header(first), header(next))) throw error;
+          if (next.status !== first.status || next.body === null || !sameRepresentation(header(first), header(next))) {
+            if (next.body !== null) await next.body.cancel().catch(() => {});
+            throw error;
+          }
           reader = next.body.getReader();
           skip = delivered;
           continue;
@@ -150,11 +153,17 @@ https.get = function get(...args) {
 /**
  * Hands the caller one response, fed by each attempt in turn. The caller only ever holds the first request,
  * so a reset's error and close are held back from it while a retry runs, and the last attempt's end, error,
- * or close reach it as the first request's own. Destroying the first request stops a pending or running retry.
+ * timeout, or close reach it as the first request's own. Destroying the first request stops a pending or
+ * running retry. A request that sends a body isn't retried, because a retry can't send it again.
  */
 function retryResets(self, req, args) {
   const emit = req.emit;
   const destroy = req.destroy;
+  const write = req.write;
+  const end = req.end;
+  const setRequestTimeout = req.setTimeout;
+  let sendsBody = false;
+  let timeoutMs = null;
   let attempts = 0;
   let retrying = false;
   let canceled = false;
@@ -194,6 +203,23 @@ function retryResets(self, req, args) {
     if (active !== req) active.destroy();
   }
 
+  const isBody = (chunk) => chunk != null && typeof chunk !== "function" && chunk.length !== 0;
+  req.write = function (chunk, ...rest) {
+    if (isBody(chunk)) sendsBody = true;
+    return write.call(this, chunk, ...rest);
+  };
+  req.end = function (chunk, ...rest) {
+    if (isBody(chunk)) sendsBody = true;
+    return end.call(this, chunk, ...rest);
+  };
+
+  // A timeout the caller sets applies to whichever attempt is in flight, and each retry starts with it.
+  req.setTimeout = function (ms, callback) {
+    timeoutMs = ms;
+    if (active !== req) active.setTimeout(ms);
+    return setRequestTimeout.call(this, ms, callback);
+  };
+
   // Before a retry, the first request is the attempt in flight, and destroying it is enough. After one, the
   // first request is already gone, so this stops the retry and ends the caller's request as destroy would.
   req.destroy = function (error) {
@@ -215,7 +241,8 @@ function retryResets(self, req, args) {
     const failure = (error) => {
       if (failed) return true;
       failed = true;
-      if (!canceled && isReset(error) && attempts < DELAYS_MS.length) {
+      const declared = Number(req.getHeader("content-length")) > 0;
+      if (!canceled && !sendsBody && !declared && isReset(error) && attempts < DELAYS_MS.length) {
         retrying = true;
         const ms = DELAYS_MS[attempts++];
         timer = setTimeout(() => {
@@ -227,6 +254,7 @@ function retryResets(self, req, args) {
             for (const name of next.getHeaderNames()) if (!req.hasHeader(name)) next.removeHeader(name);
             for (const name of req.getRawHeaderNames()) next.setHeader(name, req.getHeader(name));
           }
+          if (timeoutMs !== null) next.setTimeout(timeoutMs);
           active = next;
           attach(next, false);
           next.end();
@@ -263,7 +291,9 @@ function retryResets(self, req, args) {
         forward("response", proxy);
       } else if (res.statusCode !== statusCode || !sameRepresentation((name) => proxy.headers[name], (name) => res.headers[name])) {
         failed = true;
-        res.resume();
+        // Stop the rejected answer's download rather than read it to the end.
+        res.on("error", () => {});
+        res.destroy();
         fail(Object.assign(new Error("aborted"), { code: "ECONNRESET" }));
         return;
       }
@@ -312,6 +342,9 @@ function retryResets(self, req, args) {
     });
     attempt.on("error", (error) => {
       if (!canceled && !failure(error)) fail(error);
+    });
+    attempt.on("timeout", () => {
+      if (!canceled) forward("timeout");
     });
     attempt.on("close", () => {
       if (!canceled && !failed) {
