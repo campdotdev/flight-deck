@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
+import type { Role } from "../record/index.ts";
 import { readJson, writeJson, type State } from "../state/index.ts";
 import type { IssueRef, Tracker, TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
@@ -51,11 +52,20 @@ export class Outbox {
     const lifecycle = new Lifecycle(tracker);
     const issue = await tracker.issue({ id: session.issue, repo });
 
+    // A second apply skips the writes already recorded, so once the move has landed, the issue's status no longer
+    // has to allow it. A move can land without reaching `applied.json`, when its response or the journal write is
+    // lost. Once the writes before it are recorded, an issue already in the role the move goes to counts as moved.
+    const appliedFile = join(sessionFolder, "applied.json");
+    const applied = await readJson<WriteName[]>(appliedFile, []);
+    const beforeMove = (to: Role): WriteName[] => (to === "paused" ? ["post"] : ["writeBrief", "post"]);
+    const moveLanded = (to: Role): boolean =>
+      applied.includes("move") || (beforeMove(to).every((name) => applied.includes(name)) && issue.role === to);
     const checked = await readEnvelope(sessionParts(sessionFolder).outbox, {
       version: this.options.version,
       stage: session.stage,
       role: issue.role,
       lifecycle,
+      moved: moveLanded,
     });
     if (!checked.ok) return { result: "failed", rule: checked.rule, writes: [] };
     const { envelope } = checked;
@@ -64,16 +74,28 @@ export class Outbox {
     const state = this.options.state;
     const { move, answers = [], needs } = envelope.outcome;
     const phrase = statusPhrase(move, needs);
+    const footer = sessionFooter(this.options.version, session.stage, session.session);
     const comment = handoffComment({
       phrase,
       summary: envelope.summary,
       answers: answers.map((answer) => ({ word: answer.word, does: answer.does, status: repo.statuses[answer.move] })),
       handoff: envelope.handoff.text,
-      footer: sessionFooter(this.options.version, session.stage, session.session),
+      footer,
     });
+    // A post can land without reaching `applied.json`, when its response or the journal write is lost. The footer
+    // names the session, so a retry finds the comment it already posted and doesn't post it twice. The post is
+    // always a top-level Linear comment, so a reply or a comment through the GitHub sync, which anyone who can
+    // comment on the GitHub issue can write, never counts. The author doesn't count either: the runner's post and
+    // a hand `flight-deck apply` of the same session go out as different users.
+    const posted = issue.comments.find(
+      ({ body, synced, parent }) => !synced && parent === null && body.split("\n").some((line) => line.trim() === footer),
+    );
     const moveStep: [WriteName, () => Promise<string | null>] = [
       "move",
       async () => {
+        if (moveLanded(move)) return null;
+        // The check refuses an issue with no role before any write, unless the move already landed.
+        if (issue.role === null) return `${issue.identifier}'s status ${issue.status} maps to no role`;
         const moved = await lifecycle.move({ ...ref, role: issue.role }, move, move === "paused" ? "pause" : "handoff");
         return moved.ok ? null : moved.violation;
       },
@@ -82,7 +104,7 @@ export class Outbox {
     // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
     let steps: [WriteName, () => Promise<string | null>][];
     if (move === "paused") {
-      let commentAt: string | null = null;
+      let commentAt: string | null = posted?.created_at ?? null;
       steps = [
         [
           "post",
@@ -91,7 +113,7 @@ export class Outbox {
             const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since: this.options.clock().toISOString() };
             const memory = await state.issueMemory(session.repo, issue.id);
             await state.writeIssueMemory(session.repo, issue.id, { ...memory, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } });
-            commentAt = (await tracker.post(ref, comment, { flag: true })).created_at;
+            if (posted === undefined) commentAt = (await tracker.post(ref, comment, { flag: true })).created_at;
             return null;
           },
         ],
@@ -118,13 +140,17 @@ export class Outbox {
             return null;
           },
         ],
-        ["post", async () => (await tracker.post(ref, comment, { flag: false }), null)],
+        [
+          "post",
+          async () => {
+            if (posted === undefined) await tracker.post(ref, comment, { flag: false });
+            return null;
+          },
+        ],
         moveStep,
       ];
     }
 
-    const appliedFile = join(sessionFolder, "applied.json");
-    const applied = await readJson<WriteName[]>(appliedFile, []);
     const writes: string[] = [];
     for (const [name, write] of steps) {
       if (applied.includes(name)) continue;

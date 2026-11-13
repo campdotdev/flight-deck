@@ -22,6 +22,7 @@ describe("parse errors", () => {
     ["a key defined twice", edit('team = "SHA"', 'team = "SHA"\nteam = "SHA"'), ["line 12: Cannot redefine key 'team'"]],
     ["after a multi-line value", edit('folders = ["node_modules"]', 'folders = [\n  "node_modules",\n]\nfolders = []'), ["line 35: Cannot redefine key 'folders'"]],
     ["an unterminated string", edit('team = "SHA"', 'team = "SHA'), ["line 11: Unterminated string; newlines must be escaped in basic strings"]],
+    ["an unterminated string after a multi-line one", edit('team = "SHA"', 'team = """\nSHA"""\nnote = """\nSHA'), ["line 13: Unterminated string"]],
   ])("%s names its line", (_, text, expected) => {
     expect(errorsOf(text)).toEqual(expected);
   });
@@ -54,6 +55,10 @@ describe("the schema key", () => {
     expect(shaders.startsWith("# Flight Deck repo record")).toBe(true);
     expect(readRecord(`\n# another comment\n${shaders}`).ok).toBe(true);
   });
+
+  test("a byte-order mark may come before schema", () => {
+    expect(readRecord(`﻿${shaders}`).ok).toBe(true);
+  });
 });
 
 describe("schema errors", () => {
@@ -81,7 +86,7 @@ describe("schema errors", () => {
     expect(errorsOf(text)).toEqual(expected);
   });
 
-  test("sort by the line of the offending key, or of a missing key's table header, with top-level keys at line 0", () => {
+  test("sort by the line of the offending key, or of a missing key's table header, with a missing top-level key at line 0", () => {
     let text = shaders;
     text = edit('plan = "30m"', 'plan = "half an hour"', text); // near the end
     text = edit('team = "SHA"\n', "", text); // missing from [tracker]
@@ -101,6 +106,12 @@ describe("schema errors", () => {
       "slots.check.review: is missing",
       'time_limits.plan: must be a duration such as "30m" or "1h30m"',
     ]);
+  });
+
+  test("a missing key sorts by its table's own header, even when a child table's header comes first", () => {
+    let text = edit('[tracker]\nkind = "linear"\nworkspace = "campdotdev"\nteam = "SHA"\n\n', "");
+    text = edit('folders = ["node_modules"]\n', 'folders = "node_modules"\n\n[tracker]\nkind = "linear"\nworkspace = "campdotdev"\n', text);
+    expect(errorsOf(text)).toEqual(["dependencies.folders: must be a list", "tracker.team: is missing"]);
   });
 
   test("a CI-only extra may leave out run", () => {
@@ -169,39 +180,99 @@ describe("hosts", () => {
   });
 });
 
-const HOME_FORM = 'must be a path inside "~/", such as "~/.npm", with no "." or ".." part';
+const HOME_FORM = 'must be a path inside "~/", such as "~/.nvm", with no "." or ".." part and no glob character';
+const READ_FORM = 'must be a folder a session may read, such as "~/.nvm", or a path inside one';
+
+/** Spec 1's folders a session may read. */
+const READABLE = [
+  "~/.nvm",
+  "~/.volta",
+  "~/.bun/bin",
+  "~/.bun/install/cache",
+  "~/Library/pnpm",
+  "~/.fnm",
+  "~/.local/share/fnm",
+  "~/Library/Application Support/fnm",
+  "~/.local/state/fnm_multishells",
+  "~/Library/Caches/fnm_multishells",
+  "~/.local/share/mise/installs",
+  "~/.local/share/mise/shims",
+  "~/.asdf/installs",
+  "~/.asdf/shims",
+  "~/.npm/_cacache",
+  "~/Library/Caches/ms-playwright",
+  "~/Library/Caches/Cypress",
+  "~/Library/Caches/pnpm",
+  "~/Library/Caches/Yarn",
+  "~/Library/Caches/node-gyp",
+  "~/.cache/puppeteer",
+];
 
 describe("read_paths", () => {
-  test.each(["~/.npm", "~/.cache/ms-playwright", "~/Library/Caches/pnpm", "~/.config/git", "~/.local/state/x", "~/.npm/"])(
+  test.each([...READABLE, "~/.nvm/", "~/.NVM", "~/.nvm/versions/node/v22.22.2/bin", "~/Library/Caches/ms-playwright/chromium-1217"])(
     "%s may be read",
     (path) => {
       expect(errorsFor('read_paths = []', JSON.stringify([path]))).toEqual([]);
     },
   );
 
-  test.each(["~/", "~", "/Users/maintainer/.npm", ".npm", "~/../etc", "~/./.ssh", "~//.ssh", "~/.npm/.."])('"%s" is not a path inside ~/', (path) => {
+  test.each(["~/", "~", "/Users/maintainer/.nvm", ".nvm", "~/../etc", "~/./.ssh", "~//.ssh", "~/.nvm/..", "~/.config/flight-*/**", "~/.ss?", "~/.[s]sh", "~/{.ssh,.nvm}"])('"%s" is not a path inside ~/', (path) => {
     expect(errorsFor('read_paths = []', JSON.stringify([path]))).toEqual([`sandbox.read_paths[1]: ${HOME_FORM}`]);
   });
 
   test.each([
-    ["~/.ssh", "~/.ssh"],
-    ["~/.ssh/", "~/.ssh"],
-    ["~/.ssh/known_hosts", "~/.ssh"],
-    ["~/.SSH", "~/.ssh"],
-    ["~/.config/flight-deck", "~/.config/flight-deck"],
-    ["~/.config", "~/.config/flight-deck"],
-    ["~/.config/gh/hosts.yml", "~/.config/gh"],
-    ["~/.local", "~/.local/share/flight-deck"],
-    ["~/.local/share/flight-deck/state", "~/.local/share/flight-deck"],
-    ["~/.claude", "~/.claude"],
-    ["~/.claude/skills", "~/.claude"],
-    ["~/.gnupg", "~/.gnupg"],
-    ["~/.aws/config", "~/.aws"],
-    ["~/Library", "~/Library/Keychains"],
-    ["~/Library/Keychains/login.keychain-db", "~/Library/Keychains"],
-  ])("%s is an error", (path, folder) => {
-    expect(errorsFor('read_paths = []', JSON.stringify(["~/.npm", path]))).toEqual([
-      `sandbox.read_paths[2]: reopens ${folder}, which no session may read`,
+    // Folders that hold a credential or the runner's socket.
+    "~/.ssh",
+    "~/.SSH/known_hosts",
+    "~/.config/flight-deck",
+    "~/.local/share/flight-deck",
+    "~/.claude",
+    "~/.gnupg",
+    "~/.aws",
+    "~/.config/gh",
+    "~/Library/Keychains",
+    "~/.npmrc",
+    "~/.git-credentials",
+    "~/.config/git/credentials",
+    "~/.netrc",
+    "~/.docker/config.json",
+    "~/Library/Application Support/com.vercel.cli",
+    // Folders that hold a listed folder and more.
+    "~/.npm",
+    "~/.bun",
+    "~/Library",
+    "~/Library/Caches",
+    "~/.local/share/mise",
+    "~/.asdf",
+    // Names that only start like a listed folder.
+    "~/.nvmrc",
+    "~/.nvm-old",
+    "~/.bun/binary",
+  ])("%s is an error", (path) => {
+    expect(errorsFor('read_paths = []', JSON.stringify(["~/.nvm", path]))).toEqual([`sandbox.read_paths[2]: ${READ_FORM}`]);
+  });
+
+  test("a rule's error and the schema's in one list come out in the list's order", () => {
+    expect(errorsFor("read_paths = []", '["~/.ssh", "~/.ss?"]')).toEqual([
+      `sandbox.read_paths[1]: ${READ_FORM}`,
+      `sandbox.read_paths[2]: ${HOME_FORM}`,
+    ]);
+    expect(errorsFor(HOSTS, '[\n  "github.com",\n  "not a host",\n]')).toEqual([
+      "sandbox.hosts[1]: is GitHub, and no session may reach GitHub",
+      `sandbox.hosts[2]: ${HOST_FORM}`,
+    ]);
+  });
+
+  test("errors from two lists on one line stay with their lists, in order", () => {
+    const start = shaders.indexOf("[sandbox]");
+    const end = shaders.indexOf("read_paths = []", start) + "read_paths = []".length;
+    const sandbox = 'sandbox = { hosts = ["github.com", "not a host"], read_paths = ["~/.ssh", "~/.ss?"] }';
+    const text = edit("copy_files = []\n", `copy_files = []\n${sandbox}\n`, shaders.slice(0, start) + shaders.slice(end));
+    expect(errorsOf(text)).toEqual([
+      "sandbox.hosts[1]: is GitHub, and no session may reach GitHub",
+      `sandbox.hosts[2]: ${HOST_FORM}`,
+      `sandbox.read_paths[1]: ${READ_FORM}`,
+      `sandbox.read_paths[2]: ${HOME_FORM}`,
     ]);
   });
 });

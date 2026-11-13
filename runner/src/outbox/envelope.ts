@@ -1,8 +1,10 @@
 // The envelope every outbox shares (overview, spec 1's "The envelope"), and the checks `apply` makes on it.
-import { readdir, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { Lifecycle } from "../lifecycle/index.ts";
+import type { Cause, Lifecycle } from "../lifecycle/index.ts";
 import { ROLES, type Role } from "../record/index.ts";
+import { codeLines, foldTitles, opensAsBrief } from "../tracker/index.ts";
 import type { Answer, Stage } from "../state/index.ts";
 
 export interface Outcome {
@@ -28,6 +30,8 @@ const HANDOFF_FILES: Partial<Record<Role, string>> = { ready_to_build: "brief.md
 const HANDOFF_NAMES = new Set(["brief.md", "pause.md", "claims.md", "verdict.md"]);
 /** The moves each stage's outbox may make. */
 const STAGE_MOVES: Partial<Record<Stage, readonly Role[]>> = { plan: ["ready_to_build", "paused", "duplicate"] };
+/** The cause an outbox makes each move with. */
+const MOVE_CAUSES: Partial<Record<Role, Cause>> = { ready_to_build: "handoff", paused: "pause", duplicate: "duplicate" };
 /** The moves each stage's pause answers may name. Plan's name only `ready_to_plan`, because plan rewrites the brief (ADR 0026). */
 const ANSWER_MOVES: Partial<Record<Stage, readonly Role[]>> = { plan: ["ready_to_plan"] };
 /** The most answers a pause offers (ADR 0019). */
@@ -39,15 +43,22 @@ const OUTCOME_KEYS: Partial<Record<Role, readonly string[]>> = {
 };
 /** The moves this Outbox applies so far. FLD-97 adds `duplicate` and follow-up issues. */
 const APPLIES: readonly Role[] = ["ready_to_build", "paused"];
+/** The envelope's folders this Outbox can't apply yet, each with the rule it fails. */
+const UNAPPLIED_FOLDERS: readonly [string, string][] = [
+  ["follow-ups", "the Outbox can't file follow-up issues yet"],
+  ["media", "the Outbox can't upload media yet"],
+];
 
 export type EnvelopeResult = { ok: true; envelope: Envelope } | { ok: false; rule: string };
 
 export interface CheckContext {
   version: string;
   stage: Stage;
-  /** The issue's role now. */
-  role: Role;
+  /** The issue's role now, or `null` when its status maps to none. */
+  role: Role | null;
   lifecycle: Lifecycle;
+  /** Whether the move to this role already landed, so the issue already left the status the move starts from. */
+  moved(to: Role): boolean;
 }
 
 /** Reads the outbox and checks it (spec 1, "Checks"). The first broken rule fails it. */
@@ -57,9 +68,11 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   if (names === null) return fail("the outbox is missing");
   if (!names.includes("outcome.json")) return fail("the outbox holds no outcome.json");
 
+  const outcomeText = await readRegularFile(join(outbox, "outcome.json"));
+  if (outcomeText === null) return fail("outcome.json isn't a regular file");
   let outcome: Record<string, unknown>;
   try {
-    outcome = JSON.parse(await readFile(join(outbox, "outcome.json"), "utf8")) as Record<string, unknown>;
+    outcome = JSON.parse(outcomeText) as Record<string, unknown>;
   } catch {
     return fail("outcome.json isn't JSON");
   }
@@ -72,7 +85,11 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   if (typeof move !== "string" || !(ROLES as readonly string[]).includes(move)) return fail(`outcome.json's move ${String(move)} isn't a role`);
   const role = move as Role;
   if (!(STAGE_MOVES[context.stage] ?? []).includes(role)) return fail(`${context.stage} can't move an issue to ${role}`);
-  if (!context.lifecycle.allows(context.role, role)) return fail(`Lifecycle doesn't allow ${context.role} to ${role}`);
+  const cause = MOVE_CAUSES[role];
+  if (!context.moved(role)) {
+    if (context.role === null) return fail(`the issue's status maps to no role, so Lifecycle allows no move to ${role}`);
+    if (cause === undefined || !context.lifecycle.allows(context.role, role, cause)) return fail(`Lifecycle doesn't allow ${context.role} to ${role}`);
+  }
   if (!APPLIES.includes(role)) return fail(`the Outbox can't apply a move to ${role} yet`);
 
   const extraKey = Object.keys(outcome).find((key) => !(OUTCOME_KEYS[role] ?? []).includes(key));
@@ -90,13 +107,29 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   if (handoffs.length > 1) return fail(`the outbox holds ${handoffs.length} handoff files: ${handoffs.join(", ")}`);
   const stray = names.find((name) => !["outcome.json", "summary.md", "media", "follow-ups", ...handoffs].includes(name));
   if (stray !== undefined) return fail(`${stray} isn't part of the outbox's envelope`);
+  // FLD-97 files follow-up issues, and a later ticket uploads media with `Tracker.upload`. Until then, the Outbox
+  // refuses them, because the post would lose them and `dispose` would delete them. An empty folder holds nothing,
+  // and one that isn't a folder fails too.
+  for (const [folder, rule] of UNAPPLIED_FOLDERS) {
+    if (!names.includes(folder)) continue;
+    const entries = await readdir(join(outbox, folder)).catch(() => null);
+    if (entries === null || entries.length > 0) return fail(rule);
+  }
 
-  const text = await readFile(join(outbox, handoffName), "utf8");
+  const text = await readRegularFile(join(outbox, handoffName));
+  if (text === null) return fail(`${handoffName} isn't a regular file`);
+  if (text.trim() === "") return fail(`${handoffName} is empty`);
   if (handoffName === "brief.md") {
     const rule = briefRule(text);
     if (rule !== null) return fail(rule);
   }
-  const summary = names.includes("summary.md") ? await readFile(join(outbox, "summary.md"), "utf8") : null;
+  if (namesImage(text)) return fail(`${handoffName} names an image, and the Outbox can't upload media yet`);
+  let summary: string | null = null;
+  if (names.includes("summary.md")) {
+    summary = await readRegularFile(join(outbox, "summary.md"));
+    if (summary === null) return fail("summary.md isn't a regular file");
+    if (namesImage(summary)) return fail("summary.md names an image, and the Outbox can't upload media yet");
+  }
   return { ok: true, envelope: { outcome: checkedOutcome, summary, handoff: { name: handoffName, text } } };
 }
 
@@ -117,25 +150,82 @@ function pauseRule(outcome: Record<string, unknown>, context: CheckContext): { a
     if (checked.some((each) => each.word === word)) return `the answer word ${word} appears twice`;
     if (typeof does !== "string" || does.trim() === "") return `the answer ${word} doesn't say what it does`;
     if (typeof move !== "string" || !(ROLES as readonly string[]).includes(move)) return `the answer ${word}'s move ${String(move)} isn't a role`;
-    if (!context.lifecycle.allows("paused", move as Role)) return `Lifecycle doesn't allow paused to ${move}, which the answer ${word} names`;
+    if (!context.lifecycle.allows("paused", move as Role, "answer")) return `Lifecycle doesn't allow paused to ${move}, which the answer ${word} names`;
     if (!(ANSWER_MOVES[context.stage] ?? []).includes(move as Role)) return `${context.stage}'s answers can't move an issue to ${move}`;
     checked.push({ word, does: does.trim(), move: move as Role });
   }
   return { answers: checked, needs };
 }
 
+/**
+ * The file's text with LF line ends, or `null` when it isn't a regular file or can't be read. A session could
+ * leave a symlink to a file it can't read itself, and the runner would post that file to Linear, so the open never
+ * follows one (ADR 0007). `O_NONBLOCK` keeps a named pipe from holding the open. Fold lines and headings are
+ * found line by line, and a CRLF file's `\r` would hide each one from the checks and from `flattenFolds`.
+ */
+async function readRegularFile(path: string): Promise<string | null> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch {
+    return null;
+  }
+  try {
+    if (!(await handle.stat()).isFile()) return null;
+    return (await handle.readFile("utf8")).replaceAll("\r\n", "\n");
+  } catch {
+    return null;
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Whether the text shows an image: Markdown's `![alt](target)` or `![alt][ref]`, or an HTML `<img>`, outside code.
+ * Until FLD-97 uploads media, an image's target is a URL or a path, which `session.md` forbids, or a `media/`
+ * file the post would lose, so the Outbox refuses every image.
+ */
+function namesImage(text: string): boolean {
+  return codeLines(text).some(({ line, code }) => {
+    if (code) return false;
+    const prose = line.replace(/(`+)[^`]*?\1/g, "");
+    return /!\[[^\]]*\][([]/.test(prose) || /<img\b/i.test(prose);
+  });
+}
+
 /** The broken rule in a brief, or `null`. */
 function briefRule(brief: string): string | null {
-  if (/^(?:\+\+\+|>>>)[ \t]+Report[ \t]*$/m.test(brief)) return "brief.md holds a Report fold line, which the next re-plan would take for the report";
+  // A re-plan finds the brief above the Report fold by this heading, even when issue memory doesn't record that
+  // the runner wrote it, such as after a brief write whose response was lost.
+  if (!opensAsBrief(brief)) return "brief.md doesn't open with ## Summary, the heading a re-plan finds the brief by";
+  if (foldTitles(brief).includes("Report")) return "brief.md holds a Report fold line, which the next re-plan would take for the report";
   const unaccepted = keyInterfaceBreaks(brief).find((bullet) => !bullet.accepted);
   if (unaccepted !== undefined) return `brief.md's Key interfaces lists a break of ${unaccepted.contract} that isn't marked (accepted)`;
   return null;
 }
 
-/** The bullets in a brief's `## Key interfaces` whose second part starts with "break" (ADR 0026). */
+/**
+ * The bullets in a brief's `## Key interfaces` whose second part starts with "break" (ADR 0026). The check is the
+ * runner's last guard against a break no one accepted, so it reads loosely: any list marker, a name with or
+ * without code font, and "break" in any case and as the start of a longer word such as "breaking". A bullet with
+ * no colon counts as all second part. Lines in a fenced code block are neither headings nor bullets. Only
+ * "break (accepted)" accepts.
+ */
 function keyInterfaceBreaks(brief: string): { contract: string; accepted: boolean }[] {
-  const section = /^## Key interfaces[ \t]*\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(brief)?.[1] ?? "";
-  return [...section.matchAll(/^- (`[^`]+`): (.*)$/gm)]
-    .filter(([, , second]) => /^break\b/.test(second ?? ""))
-    .map(([, contract, second]) => ({ contract: contract ?? "", accepted: /^break \(accepted\)/.test(second ?? "") }));
+  const breaks: { contract: string; accepted: boolean }[] = [];
+  let inSection = false;
+  for (const { line, code } of codeLines(brief)) {
+    if (code) continue;
+    if (/^#{1,2}[ \t]/.test(line)) {
+      inSection = /^## Key interfaces[ \t]*$/.test(line);
+      continue;
+    }
+    const item = inSection ? /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(.*)$/.exec(line)?.[1] : undefined;
+    if (item === undefined) continue;
+    const shaped = /^(`[^`]+`|[^:`]+?)[ \t]*:[ \t]*(.*)$/.exec(item);
+    const contract = (shaped?.[1] ?? item).trim();
+    const second = (shaped?.[2] ?? item).replace(/^[*_]+/, "");
+    if (/^break/i.test(second)) breaks.push({ contract, accepted: /^break \(accepted\)/.test(second) });
+  }
+  return breaks;
 }

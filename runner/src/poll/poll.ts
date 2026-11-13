@@ -4,16 +4,17 @@
 //
 // This is the tracer bullet's poll: fetch, snapshot, and starts. Later tickets add the team check, moved-out
 // issues, answers, flags, subscriptions, stale takes, trouble, usage, holds, retries, and the start order.
+import { readFile } from "node:fs/promises";
 import type { Folders } from "../folders/index.ts";
 import { paths, sessionParts } from "../folders/index.ts";
-import type { Exit, Harness, HarnessSession } from "../harness/index.ts";
+import type { Exit, Handle, Harness, HarnessSession } from "../harness/index.ts";
 import { readConfig, type Config, type Registration } from "../install/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
 import { durationMs, readRecord, type RecordResult, type RepoRecord, type Role } from "../record/index.ts";
 import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
 import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
-import { Workspace, type FetchResult } from "../workspace/index.ts";
+import { Workspace, type FetchResult, type SessionJson } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
 
 export interface PollOptions {
@@ -84,42 +85,73 @@ export class Poll {
 
   // Exits.
 
+  /**
+   * An exit leaves the queue only once it's handled. One that throws, such as on a failed Linear read, stays queued
+   * for the next tick, and the exits after it are still handled. Handling it again is safe: the Outbox skips the
+   * writes `applied.json` records, and an issue the move already left Planning has its outbox discarded.
+   */
   private async handleExits(now: Date, config: Config, workspace: Workspace): Promise<void> {
-    const queued = this.exits.splice(0);
-    if (queued.length === 0) return;
-    const outbox = new Outbox({
-      version: this.version,
-      state: this.state,
-      clock: () => now,
-      repo: (name) => {
-        const registration = config.repos.find((repo) => repo.name === name);
-        return registration === undefined ? null : trackerRepo(config, registration, null);
-      },
-    });
-    for (const { session, exit } of queued) {
-      const sessions = await this.state.sessions();
-      const entry = sessions.find((each) => each.id === session);
-      if (entry === undefined) continue;
-      const registration = config.repos.find((repo) => repo.name === entry.repo);
-      const repo = registration === undefined ? null : trackerRepo(config, registration, null);
-      if (repo !== null) await this.tracker.revoke({ id: entry.id, repo });
-
-      if (exit.kind === "exited" && repo !== null) {
-        const issue = await this.tracker.issue({ id: entry.issue_id, repo });
-        if (issue.role === WORKING[entry.stage]) {
-          const result = await outbox.apply(paths.sessionFolder(this.folders, entry.id), { identity: this.tracker });
-          await this.state.log(now, `${entry.id} ${entry.issue}: outbox ${JSON.stringify(result)}`);
-        } else {
-          // The issue moved out while the session ran, so its outbox is discarded.
-          await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, outbox discarded`);
-        }
-      } else {
-        await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind}`);
+    for (const queued of [...this.exits]) {
+      try {
+        await this.handleExit(now, config, workspace, queued);
+        this.exits.splice(this.exits.indexOf(queued), 1);
+      } catch (error) {
+        await this.state.log(now, `${queued.session}: exit ${queued.exit.kind} not handled, retrying next poll: ${(error as Error).message}`);
       }
-
-      await workspace.dispose({ session: entry.id, worktree: entry.worktree });
-      await this.state.writeSessions((await this.state.sessions()).filter((each) => each.id !== entry.id));
     }
+  }
+
+  private async handleExit(now: Date, config: Config, workspace: Workspace, { session, exit }: QueuedExit): Promise<void> {
+    const sessions = await this.state.sessions();
+    const entry = sessions.find((each) => each.id === session);
+    if (entry === undefined) return;
+    const registration = config.repos.find((repo) => repo.name === entry.repo);
+    const repo = registration === undefined ? null : await this.sessionRepo(config, registration, entry.id, workspace);
+    if (repo !== null) {
+      await this.tracker.revoke({ id: entry.id, repo });
+    } else {
+      // Linear's revoke takes only the token, but `Tracker.revoke` takes a repo, and with no registration or no
+      // `login linear` for the workspace, Poll can't build one. The token stays live until it expires, as one a
+      // crashed runner leaves does (ADR 0005). FLD-109 revokes by session from the token the adapter holds.
+      const why = registration === undefined ? `${entry.repo} isn't registered` : "its workspace has no Linear login";
+      await this.state.log(now, `${entry.id} ${entry.issue}: Reader token not revoked, because ${why}`);
+    }
+
+    if (exit.kind === "exited" && repo !== null) {
+      const issue = await this.tracker.issue({ id: entry.issue_id, repo });
+      if (issue.role === WORKING[entry.stage]) {
+        const outbox = new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => (name === entry.repo ? repo : null) });
+        const result = await outbox.apply(paths.sessionFolder(this.folders, entry.id), { identity: this.tracker });
+        await this.state.log(now, `${entry.id} ${entry.issue}: outbox ${JSON.stringify(result)}`);
+      } else {
+        // The issue moved out while the session ran, so its outbox is discarded.
+        await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, outbox discarded`);
+      }
+    } else {
+      await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind}`);
+    }
+
+    await workspace.dispose({ session: entry.id, worktree: entry.worktree });
+    await this.state.writeSessions((await this.state.sessions()).filter((each) => each.id !== entry.id));
+  }
+
+  /**
+   * The repo as the take saw it: the record at the commit `session.json` names, which the take read and found
+   * valid. The default branch's record or the registration's copy may name other statuses by now, and reading
+   * the issue's status with those would discard a finished outbox or move the issue to the wrong status.
+   * A session folder or commit that can't be read falls back to the registration's copy.
+   */
+  private async sessionRepo(config: Config, registration: Registration, session: string, workspace: Workspace): Promise<TrackerRepo | null> {
+    let record: RepoRecord | null = null;
+    try {
+      const json = JSON.parse(await readFile(sessionParts(paths.sessionFolder(this.folders, session)).sessionJson, "utf8")) as SessionJson;
+      const text = await workspace.show(registration, json.commit, RECORD_PATH);
+      const read = text === null ? null : readRecord(text);
+      if (read?.ok === true) record = read.record;
+    } catch {
+      // Falls back to the registration's copy below.
+    }
+    return trackerRepo(config, registration, record);
   }
 
   // Each repo.
@@ -137,8 +169,17 @@ export class Poll {
     }
     const repo = trackerRepo(config, registration, record?.ok === true ? record.record : null);
 
-    // 3. Snapshot, with the comments since the repo's cursor.
-    const snapshot = repo === null ? null : await this.tracker.snapshot(repo, { since: await this.state.cursor(registration.name) });
+    // 3. Snapshot, with the comments since the repo's cursor. A failed Linear read, such as a network error or a
+    // 5xx, skips this repo's starts for this poll only. The other repos still poll, and the tick still publishes
+    // the heartbeat and `status.json`.
+    let snapshot: Snapshot | null = null;
+    if (repo !== null) {
+      try {
+        snapshot = await this.tracker.snapshot(repo, { since: await this.state.cursor(registration.name) });
+      } catch (error) {
+        await this.state.log(now, `${registration.name}: snapshot failed: ${(error as Error).message}`);
+      }
+    }
     if (repo !== null && snapshot !== null) {
       // 5. Answers. FLD-104 adds step 4, moved out.
       const handled = await this.answers(now, repo, snapshot);
@@ -283,24 +324,29 @@ export class Poll {
 
     // 1. The entry first, then the take, so the issue never sits in Planning unseen (ADR 0002).
     await this.state.writeSessions([...(await this.state.sessions()), entry]);
-    const taken = await this.lifecycle.move(issue, "planning", "take");
-    if (!taken.ok) {
-      await this.state.log(now, `${id} ${issue.identifier}: take refused: ${taken.violation}`);
-      await this.dropEntry(id);
-      return;
-    }
-
-    // 2. The record at the commit the session starts from: the default branch's tip at this poll.
-    const commit = poll.fetch.head;
-    const deadline = new Date(now.getTime() + durationMs(record.time_limits.plan)).toISOString();
-    const linear = config.linear[repo.workspace];
-    const full = await this.tracker.issue(issue);
-    const memory = await this.state.issueMemory(registration.name, issue.id);
-
-    // 3. Prepare. FLD-98 counts a failed prepare as a failed session.
-    let prepared;
+    // A throw from here until the Harness holds the session, such as a failed Linear read, ends the start: the
+    // workspace and the entry go, so a `starting` entry with no session never holds a slot. FLD-98 counts it as a
+    // failed session.
+    let minted = false;
+    let handle: Handle;
+    let deadline: string;
     try {
-      prepared = await workspace.prepare({
+      const taken = await this.lifecycle.move(issue, "planning", "take");
+      if (!taken.ok) {
+        await this.state.log(now, `${id} ${issue.identifier}: take refused: ${taken.violation}`);
+        await this.dropEntry(id);
+        return;
+      }
+
+      // 2. The record at the commit the session starts from: the default branch's tip at this poll.
+      const commit = poll.fetch.head;
+      deadline = new Date(now.getTime() + durationMs(record.time_limits.plan)).toISOString();
+      const linear = config.linear[repo.workspace];
+      const full = await this.tracker.issue(issue);
+      const memory = await this.state.issueMemory(registration.name, issue.id);
+
+      // 3. Prepare.
+      const prepared = await workspace.prepare({
         session: id,
         stage,
         mode: "issue",
@@ -322,34 +368,37 @@ export class Poll {
           syncedComments: full.comments.filter((comment) => comment.synced).map((comment) => comment.id),
         },
       });
+
+      // 4. The Reader token, then the session. A mint can land without its response, so a failed start revokes
+      // from the moment the mint is sent. Revoking a session with no token does nothing.
+      minted = true;
+      await this.tracker.sessionToken({ id, repo });
+      const session: HarnessSession = {
+        id,
+        stage,
+        mode: "issue",
+        repo: registration.name,
+        issue: issue.identifier,
+        worktree: prepared.worktree,
+        sessionFolder: prepared.sessionFolder,
+        sessionJson: sessionParts(prepared.sessionFolder).sessionJson,
+        transcript: paths.transcript(this.folders, registration.name, id),
+        deadline,
+        model: config.models.plan,
+        versionFolder: this.versionFolder,
+      };
+      handle = await this.harness.start(session, {
+        exit: (exit) => void this.exits.push({ session: id, exit }),
+        // FLD-105 turns each event into the plan-limit hold.
+        rateLimit: () => {},
+      });
     } catch (error) {
-      await this.state.log(now, `${id} ${issue.identifier}: prepare failed: ${(error as Error).message}`);
-      await workspace.dispose({ session: id, worktree });
-      await this.dropEntry(id);
+      await this.state.log(now, `${id} ${issue.identifier}: start failed: ${(error as Error).message}`);
+      await this.endStart(now, workspace, id, worktree, minted ? repo : null);
       return;
     }
 
-    // 4. The Reader token, then the session.
-    await this.tracker.sessionToken({ id, repo });
-    const session: HarnessSession = {
-      id,
-      stage,
-      mode: "issue",
-      repo: registration.name,
-      issue: issue.identifier,
-      worktree: prepared.worktree,
-      sessionFolder: prepared.sessionFolder,
-      sessionJson: sessionParts(prepared.sessionFolder).sessionJson,
-      transcript: paths.transcript(this.folders, registration.name, id),
-      deadline,
-      model: config.models.plan,
-      versionFolder: this.versionFolder,
-    };
-    const handle = await this.harness.start(session, {
-      exit: (exit) => void this.exits.push({ session: id, exit }),
-      // FLD-105 turns each event into the plan-limit hold.
-      rateLimit: () => {},
-    });
+    // The session runs now, so its exit cleans up after it, even if this write fails.
     const running: SessionEntry = {
       ...entry,
       pid: handle.pid,
@@ -360,6 +409,22 @@ export class Poll {
       state: "running",
     };
     await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === id ? running : each)));
+  }
+
+  /** Undoes a start that failed before the Harness held its session. Each step runs even when one before it fails. */
+  private async endStart(now: Date, workspace: Workspace, id: string, worktree: string, minted: TrackerRepo | null): Promise<void> {
+    const steps: [string, () => Promise<void>][] = [
+      ["revoke", async () => (minted === null ? undefined : await this.tracker.revoke({ id, repo: minted }))],
+      ["dispose", () => workspace.dispose({ session: id, worktree })],
+      ["drop", () => this.dropEntry(id)],
+    ];
+    for (const [name, step] of steps) {
+      try {
+        await step();
+      } catch (error) {
+        await this.state.log(now, `${id}: ${name} after a failed start failed: ${(error as Error).message}`);
+      }
+    }
   }
 
   private async dropEntry(id: string): Promise<void> {

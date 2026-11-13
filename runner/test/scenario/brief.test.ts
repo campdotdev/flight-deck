@@ -1,6 +1,9 @@
 // A sent issue gets a brief: the tracer bullet through the runner, at the one seam.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { outbox, World } from "./world.ts";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { paths } from "../../src/folders/index.ts";
+import { outbox, SHADERS_RECORD, UNMAPPED_STATUS, World } from "./world.ts";
 
 const REPORT = "The Save button is blue on the settings page.\n\nIt should be red, like every other Save button.";
 
@@ -235,6 +238,151 @@ describe("status.json", () => {
   });
 });
 
+describe("an issue moved out while its session runs", () => {
+  test("to a status that maps to no role gets nothing written, and the session leaves the list", async () => {
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    world.send(issue);
+    world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: SUMMARY, brief: BRIEF }) });
+    await world.tick();
+    world.tracker.setStatus(issue.id, UNMAPPED_STATUS);
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 });
+    await world.tick();
+    expect(world.tracker.writes).toEqual([
+      { kind: "unsubscribe", issue: issue.identifier, user: world.maintainer.id },
+      { kind: "move", issue: issue.identifier, status: "Planning" },
+    ]);
+    expect((await world.status()).sessions).toEqual([]);
+  });
+});
+
+describe("the exit reads the issue's status with the statuses the take read", () => {
+  const exitAfterTake = async (between: () => Promise<void>) => {
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    world.send(issue);
+    world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: SUMMARY, brief: BRIEF }) });
+    await world.tick();
+    await between();
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 });
+    await world.tick();
+    return issue;
+  };
+
+  test("when the registration's copy names other statuses", async () => {
+    world.config.repos[0]!.tracker.statuses.planning = UNMAPPED_STATUS;
+    await world.writeConfig();
+    const issue = await exitAfterTake(async () => {});
+    expect(world.tracker.writes.map((write) => write.kind)).toEqual(["unsubscribe", "move", "description", "comment", "move"]);
+    expect(world.tracker.writes.at(-1)).toEqual({ kind: "move", issue: issue.identifier, status: "Ready to build" });
+  });
+
+  test("when the default branch's record changed while the session ran", async () => {
+    const issue = await exitAfterTake(async () => {
+      await world.push({ ".flight-deck/record.toml": SHADERS_RECORD.replace('ready_to_build = "Ready to build"', `ready_to_build = "${UNMAPPED_STATUS}"`) });
+      // A poll while the session runs fetches the new record.
+      await world.tick();
+    });
+    expect(world.tracker.writes.at(-1)).toEqual({ kind: "move", issue: issue.identifier, status: "Ready to build" });
+  });
+});
+
+describe("an exit whose handling throws", () => {
+  test("stays queued, and the next poll handles it and the exits after it", async () => {
+    const one = world.issue({ title: "Save button is blue", description: REPORT });
+    const two = world.issue({ title: "Cancel button is blue", description: REPORT });
+    for (const issue of [one, two]) {
+      world.send(issue);
+      world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: SUMMARY, brief: BRIEF }), exit: { kind: "exited", code: 0 } });
+    }
+    await world.tick();
+    // The first Linear read at the exits fails, as a network error would on the real adapter.
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 1;
+    world.tracker.issue = async (ref) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    await world.tick();
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+    for (const issue of [one, two]) {
+      expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+      expect(world.tracker.writes.filter((write) => write.issue === issue.identifier && write.kind === "comment")).toHaveLength(1);
+    }
+  });
+});
+
+describe("a repo whose snapshot fails", () => {
+  test("skips only that repo's starts, and the poll still publishes status.json", async () => {
+    // A second registration on the same team, polled after the first.
+    const first = world.config.repos[0]!;
+    const second = "campdotdev/shaders-docs";
+    world.config.repos.push({ ...first, name: second, checkout: join(world.root, "checkout-docs") });
+    await world.writeConfig();
+    // The first repo's snapshot fails, as a network error would on the real adapter.
+    const snapshot = world.tracker.snapshot.bind(world.tracker);
+    world.tracker.snapshot = async (repo) => {
+      if (repo.name === first.name) throw new Error("fetch failed");
+      return snapshot(repo);
+    };
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    expect(world.harness.started.map(({ session }) => [session.repo, session.issue])).toEqual([[second, issue.identifier]]);
+    const status = await world.status();
+    expect(status.polled_at).toBe(world.now.toISOString());
+    expect(status.repos.map(({ name }) => name)).toEqual([first.name, second]);
+  });
+});
+
+describe("a start that fails after the take", () => {
+  test("leaves no entry and no workspace, so it holds no slot, and the tick goes on", async () => {
+    // The cap is 2, and both starts fail on a Linear write, as a network error would on the real adapter.
+    const mint = world.tracker.sessionToken.bind(world.tracker);
+    let failures = 2;
+    world.tracker.sessionToken = async (session) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return mint(session);
+    };
+    const [one, two, three] = ["One", "Two", "Three"].map((title) => world.issue({ title, description: REPORT }));
+    world.send(one!);
+    world.send(two!);
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+    expect(await readdir(paths.worktrees(world.folders)).catch(() => [])).toEqual([]);
+    expect(await readdir(paths.sessions(world.folders)).catch(() => [])).toEqual([]);
+
+    world.send(three!);
+    world.harness.script(three!.identifier, { outbox: outbox.brief({ summary: SUMMARY, brief: BRIEF }) });
+    await world.tick();
+    expect(world.harness.started.map((start) => start.session.issue)).toEqual([three!.identifier]);
+  });
+
+  test("revokes a Reader token whose mint landed without its response", async () => {
+    const mint = world.tracker.sessionToken.bind(world.tracker);
+    world.tracker.sessionToken = async (session) => {
+      await mint(session);
+      throw new Error("socket hang up");
+    };
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    world.send(issue);
+    await world.tick();
+    expect(world.tracker.tokens.map(({ revoked }) => revoked)).toEqual([true]);
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
+  test("revokes the Reader token when the Harness can't start the session", async () => {
+    world.harness.start = async () => {
+      throw new Error("claude not found");
+    };
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    world.send(issue);
+    await world.tick();
+    expect(world.tracker.tokens.map(({ revoked }) => revoked)).toEqual([true]);
+    expect((await world.status()).sessions).toEqual([]);
+  });
+});
+
 describe("a handoff the Outbox refuses", () => {
   const good = () => outbox.brief({ summary: SUMMARY, brief: BRIEF });
   test.each([
@@ -247,6 +395,7 @@ describe("a handoff the Outbox refuses", () => {
     ["a key outcome.json doesn't have", () => ({ ...good(), "outcome.json": JSON.stringify({ version: "0.1.0", stage: "plan", move: "ready_to_build", of: "SHA-9" }) })],
     ["a break not marked accepted", () => ({ ...good(), "brief.md": BRIEF.replace("## Key interfaces\n\nNone.", "## Key interfaces\n\n- `Button`: break, drops the color prop") })],
     ["a Report fold in the brief", () => ({ ...good(), "brief.md": `${BRIEF}\n\n>>> Report\n\nold\n\n>>>` })],
+    ["an empty brief", () => ({ ...good(), "brief.md": " \n\n" })],
   ])("with %s writes nothing to the issue", async (_, files) => {
     const issue = world.issue({ title: "Save button is blue", description: REPORT });
     world.send(issue);
