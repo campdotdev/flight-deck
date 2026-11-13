@@ -119,9 +119,12 @@ export class Poll {
 
     if (exit.kind === "exited" && repo !== null) {
       const issue = await this.tracker.issue({ id: entry.issue_id, repo });
-      if (issue.role === WORKING[entry.stage]) {
+      const folder = paths.sessionFolder(this.folders, entry.id);
+      // An apply whose move landed before a lost response or a failed write after it runs again, so a pause's
+      // answers still land. The Outbox's check refuses any other status the maintainer moved the issue to.
+      if (issue.role === WORKING[entry.stage] || (await Outbox.moved(folder, issue.role))) {
         const outbox = new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => (name === entry.repo ? repo : null) });
-        const result = await outbox.apply(paths.sessionFolder(this.folders, entry.id), { identity: this.tracker });
+        const result = await outbox.apply(folder, { identity: this.tracker });
         await this.state.log(now, `${entry.id} ${entry.issue}: outbox ${JSON.stringify(result)}`);
       } else {
         // The issue moved out while the session ran, so its outbox is discarded.
@@ -218,11 +221,10 @@ export class Poll {
         .filter((comment) => comment.issue === issue.id && comment.created_at > pause.comment_at && !known.has(comment.id))
         .map(({ id, author, created_at, body, synced }) => ({ id, author, created_at, body, synced }));
       const open: OpenPause = { ...pause, replies: [...pause.replies, ...fresh] };
+      // The replies go into issue memory before the move, so a move that fails still leaves them as first seen.
+      if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, issue.id, { ...memory, pause: open });
       const answer = answerOf(open, repo.maintainer);
-      if (answer === null) {
-        if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, issue.id, { ...memory, pause: open });
-        continue;
-      }
+      if (answer === null) continue;
       const moved = await this.lifecycle.move(issue, answer.move, "answer");
       if (!moved.ok) {
         await this.state.log(now, `${issue.identifier}: answer ${answer.word} refused: ${moved.violation}`);

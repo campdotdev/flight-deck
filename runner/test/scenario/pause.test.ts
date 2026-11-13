@@ -272,3 +272,56 @@ describe("a one-word answer", () => {
     expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
   });
 });
+
+describe("a pause or answer whose Linear write fails", () => {
+  /** Makes `tracker.move` to `role` fail `times` times, before the move lands or, with `after`, after it. */
+  function failMoves(role: string, times: number, after = false) {
+    const move = world.tracker.move.bind(world.tracker);
+    let failures = times;
+    world.tracker.move = async (ref, to) => {
+      const fail = to === role && failures-- > 0;
+      if (fail && !after) throw new Error("fetch failed");
+      await move(ref, to);
+      if (fail) throw new Error("socket hang up");
+    };
+  }
+
+  test("a move to Paused whose response was lost still opens the pause, and an answer moves the issue on", async () => {
+    const issue = world.issue({ title: "Save button is blue", description: "It should be red." });
+    failMoves("paused", 1, true);
+    await paused(issue);
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    // The exit stays queued, and the retry records the pause though the issue left Planning.
+    await world.tick();
+    world.reply(issue, "brand");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+    expect(world.tracker.writes.filter((write) => write.kind === "comment")).toHaveLength(1);
+  });
+
+  test("a reply posted before the move to Paused lands still answers, though the cursor passed it", async () => {
+    const issue = world.issue({ title: "Save button is blue", description: "It should be red." });
+    failMoves("paused", 2);
+    await paused(issue);
+    world.reply(issue, "brand");
+    // A newer comment moves the repo's cursor past the answer.
+    world.reply(issue, "The hover state should match.");
+    // The move fails again, and the snapshot reads the reply while the issue sits in Planning.
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+  });
+
+  test("an answer whose move fails keeps the reply as the first snapshot saw it", async () => {
+    const issue = world.issue({ title: "Save button is blue", description: "It should be red." });
+    await paused(issue);
+    failMoves("ready_to_plan", 1);
+    const reply = world.reply(issue, "brand");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    world.tracker.editComment(reply, "Which red is the brand one?");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+  });
+});

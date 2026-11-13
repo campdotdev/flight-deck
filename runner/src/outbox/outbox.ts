@@ -10,6 +10,7 @@ import type { IssueRef, Tracker, TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
 import { handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope } from "./envelope.ts";
+import { repliesAfter } from "./replies.ts";
 
 export type ApplyResult =
   /** Every write landed. */
@@ -41,8 +42,33 @@ export interface OutboxOptions {
 /** The name `applied.json` records for each write. */
 type WriteName = "writeBrief" | "post" | "move" | "pause";
 
+/**
+ * Whether the move to `to` landed: `applied.json` records it, or records the writes before it while the issue
+ * already sits in `to`. A move can land without reaching `applied.json`, when its response or the journal write
+ * is lost.
+ */
+function moveLanded(applied: readonly WriteName[], role: Role | null, to: Role): boolean {
+  const before: WriteName[] = to === "paused" ? ["post"] : ["writeBrief", "post"];
+  return applied.includes("move") || (before.every((name) => applied.includes(name)) && role === to);
+}
+
 export class Outbox {
   constructor(private readonly options: OutboxOptions) {}
+
+  /**
+   * Whether an earlier apply of the session's outbox moved its issue, which now has `role`. Poll applies such an
+   * outbox again, though the issue left the working status, so the writes after the move still land.
+   */
+  static async moved(sessionFolder: string, role: Role | null): Promise<boolean> {
+    try {
+      const applied = await readJson<WriteName[]>(join(sessionFolder, "applied.json"), []);
+      if (applied.length === 0) return false;
+      const outcome = await readJson<{ move?: unknown }>(join(sessionParts(sessionFolder).outbox, "outcome.json"), {});
+      return typeof outcome.move === "string" && moveLanded(applied, role, outcome.move as Role);
+    } catch {
+      return false;
+    }
+  }
 
   async apply(sessionFolder: string, options: ApplyOptions): Promise<ApplyResult> {
     const session = JSON.parse(await readFile(sessionParts(sessionFolder).sessionJson, "utf8")) as SessionJson;
@@ -53,19 +79,16 @@ export class Outbox {
     const issue = await tracker.issue({ id: session.issue, repo });
 
     // A second apply skips the writes already recorded, so once the move has landed, the issue's status no longer
-    // has to allow it. A move can land without reaching `applied.json`, when its response or the journal write is
-    // lost. Once the writes before it are recorded, an issue already in the role the move goes to counts as moved.
+    // has to allow it.
     const appliedFile = join(sessionFolder, "applied.json");
     const applied = await readJson<WriteName[]>(appliedFile, []);
-    const beforeMove = (to: Role): WriteName[] => (to === "paused" ? ["post"] : ["writeBrief", "post"]);
-    const moveLanded = (to: Role): boolean =>
-      applied.includes("move") || (beforeMove(to).every((name) => applied.includes(name)) && issue.role === to);
+    const landed = (to: Role): boolean => moveLanded(applied, issue.role, to);
     const checked = await readEnvelope(sessionParts(sessionFolder).outbox, {
       version: this.options.version,
       stage: session.stage,
       role: issue.role,
       lifecycle,
-      moved: moveLanded,
+      moved: landed,
     });
     if (!checked.ok) return { result: "failed", rule: checked.rule, writes: [] };
     const { envelope } = checked;
@@ -93,7 +116,7 @@ export class Outbox {
     const moveStep: [WriteName, () => Promise<string | null>] = [
       "move",
       async () => {
-        if (moveLanded(move)) return null;
+        if (landed(move)) return null;
         // The check refuses an issue with no role before any write, unless the move already landed.
         if (issue.role === null) return `${issue.identifier}'s status ${issue.status} maps to no role`;
         const moved = await lifecycle.move({ ...ref, role: issue.role }, move, move === "paused" ? "pause" : "handoff");
@@ -124,7 +147,9 @@ export class Outbox {
             const memory = await state.issueMemory(session.repo, issue.id);
             // A resumed apply lost the comment's time, and the flag's start comes just before it.
             const at = commentAt ?? memory.flag?.since ?? this.options.clock().toISOString();
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { answers, comment_at: at, replies: [] } });
+            // A reply posted after the comment, before the move landed, counts too.
+            const replies = repliesAfter(await tracker.issue(ref), at);
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { answers, comment_at: at, replies } });
             return null;
           },
         ],
