@@ -127,16 +127,23 @@ export class Outbox {
     // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
     let steps: [WriteName, () => Promise<string | null>][];
     if (move === "paused") {
-      let commentAt: string | null = posted?.created_at ?? null;
       steps = [
         [
           "post",
           async () => {
-            // The flag goes into issue memory first, so the next poll never takes the assignee for one the runner didn't set.
-            const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since: this.options.clock().toISOString() };
+            // The flag and the pause go into issue memory before the comment. The flag keeps the next poll from
+            // taking the assignee for one the runner didn't set. The open pause lets each snapshot keep a reply as
+            // it first saw it, even while the move to Paused keeps failing. A retry keeps the replies saved so far.
+            const since = this.options.clock().toISOString();
+            const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since };
             const memory = await state.issueMemory(session.repo, issue.id);
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } });
-            if (posted === undefined) commentAt = (await tracker.post(ref, comment, { flag: true })).created_at;
+            const pause = memory.pause ?? { answers, comment_at: since, replies: [] };
+            const flagged = { ...memory, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } };
+            await state.writeIssueMemory(session.repo, issue.id, { ...flagged, pause });
+            const at = posted?.created_at ?? (await tracker.post(ref, comment, { flag: true })).created_at;
+            // Only a comment after the pause comment is a reply.
+            const replies = pause.replies.filter((reply) => reply.created_at > at);
+            await state.writeIssueMemory(session.repo, issue.id, { ...flagged, pause: { ...pause, comment_at: at, replies } });
             return null;
           },
         ],
@@ -145,11 +152,12 @@ export class Outbox {
           "pause",
           async () => {
             const memory = await state.issueMemory(session.repo, issue.id);
-            // A resumed apply lost the comment's time, and the flag's start comes just before it.
-            const at = commentAt ?? memory.flag?.since ?? this.options.clock().toISOString();
-            // A reply posted after the comment, before the move landed, counts too.
-            const replies = repliesAfter(await tracker.issue(ref), at);
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { answers, comment_at: at, replies } });
+            const pause = memory.pause ?? { answers, comment_at: memory.flag?.since ?? this.options.clock().toISOString(), replies: [] };
+            // A reply no snapshot has returned yet counts too. A reply a snapshot saw keeps the body it saw then.
+            const known = new Set(pause.replies.map((reply) => reply.id));
+            const unseen = repliesAfter(await tracker.issue(ref), pause.comment_at).filter((reply) => !known.has(reply.id));
+            const replies = [...pause.replies, ...unseen].sort((a, b) => a.created_at.localeCompare(b.created_at));
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { ...pause, replies } });
             return null;
           },
         ],

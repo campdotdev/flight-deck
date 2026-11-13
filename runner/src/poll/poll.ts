@@ -205,8 +205,8 @@ export class Poll {
   // 5. Answers.
 
   /**
-   * For each paused issue with an open pause, keeps each comment posted after the pause comment as the first
-   * snapshot that returned it saw it, then moves the issue when the oldest reply that names an answer does,
+   * For each issue with an open pause, keeps each comment posted after the pause comment as the first snapshot
+   * that returned it saw it. Then it moves each paused issue when the oldest reply that names an answer does,
    * and clears the flag (ADR 0019). Any other reply leaves the issue paused and flagged.
    */
   private async answers(now: Date, repo: TrackerRepo, snapshot: Snapshot): Promise<Set<string>> {
@@ -214,7 +214,8 @@ export class Poll {
     // another, still leaves them as first seen.
     const open: { issue: SnapshotIssue; memory: IssueMemory; pause: OpenPause }[] = [];
     for (const issue of snapshot.issues) {
-      if (issue.role !== "paused") continue;
+      // A pause whose move to Paused hasn't landed waits in Planning. It keeps its replies, and takes no answer yet.
+      if (issue.role !== "paused" && issue.role !== "planning") continue;
       const memory = await this.state.issueMemory(repo.name, issue.id);
       const pause = memory.pause;
       if (pause === null) continue;
@@ -224,7 +225,7 @@ export class Poll {
         .map(({ id, author, created_at, body, synced }) => ({ id, author, created_at, body, synced }));
       const seen: OpenPause = { ...pause, replies: [...pause.replies, ...fresh] };
       if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, issue.id, { ...memory, pause: seen });
-      open.push({ issue, memory, pause: seen });
+      if (issue.role === "paused") open.push({ issue, memory, pause: seen });
     }
 
     const handled = new Set<string>();
@@ -264,8 +265,8 @@ export class Poll {
       if (handled.has(issue.id)) continue;
       const memory = await this.state.issueMemory(repo.name, issue.id);
       let next = memory;
-      // A pause closes when its issue leaves Paused.
-      if (memory.pause !== null && issue.role !== "paused") next = { ...next, pause: null };
+      // A pause closes when its issue leaves Paused. One whose move to Paused hasn't landed waits in Planning.
+      if (memory.pause !== null && issue.role !== "paused" && issue.role !== "planning") next = { ...next, pause: null };
       if (memory.flag === null ? issue.assignee !== null : QUEUE_ROLES.includes(issue.role)) {
         await this.tracker.clearFlag(issue);
         next = { ...next, flag: null };

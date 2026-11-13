@@ -313,6 +313,21 @@ describe("a pause or answer whose Linear write fails", () => {
     expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
   });
 
+  test.each([
+    ["a question edited into an answer doesn't answer", "Which red is the brand one?", "brand", "Paused"],
+    ["an answer edited into a question still answers", "brand", "Which red is the brand one?", "Ready to plan"],
+  ])("while the move to Paused keeps failing, %s", async (_, first, edited, status) => {
+    const issue = world.issue({ title: "Save button is blue", description: "It should be red." });
+    failMoves("paused", 2);
+    await paused(issue);
+    const reply = world.reply(issue, first);
+    // The move fails again, and the snapshot reads the reply while the issue sits in Planning.
+    await world.tick();
+    world.tracker.editComment(reply, edited);
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe(status);
+  });
+
   test("an answer whose move fails doesn't stop another pause's replies from being kept as first seen", async () => {
     const first = world.issue({ title: "Save button is blue", description: "It should be red." });
     const second = world.issue({ title: "Cancel button is blue", description: "It should be red." });
