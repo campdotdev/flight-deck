@@ -113,9 +113,10 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
 }
 
 /**
- * The file's text, or `null` when it isn't a regular file or can't be read. A session could leave a symlink to a
- * file it can't read itself, and the runner would post that file to Linear, so the open never follows one (ADR 0007).
- * `O_NONBLOCK` keeps a named pipe from holding the open.
+ * The file's text with LF line ends, or `null` when it isn't a regular file or can't be read. A session could
+ * leave a symlink to a file it can't read itself, and the runner would post that file to Linear, so the open never
+ * follows one (ADR 0007). `O_NONBLOCK` keeps a named pipe from holding the open. Fold lines and headings are
+ * found line by line, and a CRLF file's `\r` would hide each one from the checks and from `flattenFolds`.
  */
 async function readRegularFile(path: string): Promise<string | null> {
   let handle;
@@ -126,7 +127,7 @@ async function readRegularFile(path: string): Promise<string | null> {
   }
   try {
     if (!(await handle.stat()).isFile()) return null;
-    return await handle.readFile("utf8");
+    return (await handle.readFile("utf8")).replaceAll("\r\n", "\n");
   } catch {
     return null;
   } finally {
@@ -148,14 +149,14 @@ function briefRule(brief: string): string | null {
 /**
  * The bullets in a brief's `## Key interfaces` whose second part starts with "break" (ADR 0026). The check is the
  * runner's last guard against a break no one accepted, so it reads loosely: any list marker, a name with or
- * without code font, "break" in any case and as the start of a longer word such as "breaking", and CRLF line
- * ends. A bullet with no colon counts as all second part. Lines in a fenced code block are neither headings nor
- * bullets. Only "break (accepted)" accepts.
+ * without code font, and "break" in any case and as the start of a longer word such as "breaking". A bullet with
+ * no colon counts as all second part. Lines in a fenced code block are neither headings nor bullets. Only
+ * "break (accepted)" accepts.
  */
 function keyInterfaceBreaks(brief: string): { contract: string; accepted: boolean }[] {
   const breaks: { contract: string; accepted: boolean }[] = [];
   let inSection = false;
-  for (const { line, code } of codeLines(brief.replaceAll("\r\n", "\n"))) {
+  for (const { line, code } of codeLines(brief)) {
     if (code) continue;
     if (/^#{1,2}[ \t]/.test(line)) {
       inSection = /^## Key interfaces[ \t]*$/.test(line);

@@ -159,6 +159,31 @@ describe("media", () => {
   });
 });
 
+describe("a brief with CRLF line ends", () => {
+  const crlf = (text: string) => text.replaceAll("\n", "\r\n");
+
+  test("with a Report fold line fails, and nothing is written", async () => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: crlf(`${BRIEF}\n\n+++ Report\n\nold\n\n+++`), version: VERSION }));
+    expect(await apply()).toEqual({
+      result: "failed",
+      rule: "brief.md holds a Report fold line, which the next re-plan would take for the report",
+      writes: [],
+    });
+    expect(tracker.writes).toEqual([]);
+  });
+
+  test("has its folds written as +++ in the description and flattened in the comment", async () => {
+    const notes = "\n\n>>> Agent notes\n\nUse the shared token.\n\n>>>";
+    await leave(outbox.brief({ summary: crlf(SUMMARY), brief: crlf(`${BRIEF}${notes}`), version: VERSION }));
+    expect(await apply()).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
+    const read = await tracker.issue({ id: issue.id, repo });
+    expect(read.description.startsWith(`${BRIEF}\n\n+++ Agent notes\n\nUse the shared token.\n\n+++\n\n+++ Report`)).toBe(true);
+    const comment = read.comments.at(-1)?.body ?? "";
+    expect(comment).toContain(`+++ Details\n\n${BRIEF}\n\n#### Agent notes\n\nUse the shared token.\n\n`);
+    expect(comment).not.toContain("\r");
+  });
+});
+
 describe("a break in Key interfaces", () => {
   const withBullets = (bullets: string) => BRIEF.replace("## Key interfaces\n\nNone.", `## Key interfaces\n\n${bullets}`);
 
