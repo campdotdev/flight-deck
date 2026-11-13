@@ -213,13 +213,12 @@ export class Poll {
     // Every open pause's replies go into issue memory before any move, so a move that fails, on this issue or
     // another, still leaves them as first seen.
     const open: { issue: SnapshotIssue; memory: IssueMemory; pause: OpenPause }[] = [];
-    const pending = await this.pendingPause();
     for (const issue of snapshot.issues) {
       if (issue.role !== "paused" && issue.role !== "planning") continue;
       const memory = await this.state.issueMemory(repo.name, issue.id);
       const pause = memory.pause;
       // A pause in Planning keeps its replies, and takes no answer yet, only while its move to Paused is pending.
-      if (pause === null || (issue.role === "planning" && !pending(pause))) continue;
+      if (pause === null || (issue.role === "planning" && !pause.pending)) continue;
       const known = new Set(pause.replies.map((reply) => reply.id));
       const fresh: Reply[] = snapshot.comments
         .filter((comment) => comment.issue === issue.id && comment.created_at > pause.comment_at && !known.has(comment.id))
@@ -255,7 +254,6 @@ export class Poll {
    * open pause, and keeps its assignee, because it's the maintainer's again. Adds each issue it clears to `handled`.
    */
   private async flags(now: Date, repo: TrackerRepo, snapshot: Snapshot, handled: Set<string>): Promise<void> {
-    const pending = await this.pendingPause();
     const inFlight = new Set(snapshot.issues.filter((issue) => FACTORY_ROLES.includes(issue.role)).map((issue) => issue.id));
     for (const { uuid, memory } of await this.state.issueMemories(repo.name)) {
       if ((memory.flag === null && memory.pause === null) || inFlight.has(uuid)) continue;
@@ -268,7 +266,7 @@ export class Poll {
       const memory = await this.state.issueMemory(repo.name, issue.id);
       let next = memory;
       // A pause closes when its issue leaves Paused, unless it waits in Planning for its pending move to Paused.
-      const waits = issue.role === "planning" && memory.pause !== null && pending(memory.pause);
+      const waits = issue.role === "planning" && memory.pause?.pending === true;
       if (memory.pause !== null && issue.role !== "paused" && !waits) next = { ...next, pause: null };
       if (memory.flag === null ? issue.assignee !== null : QUEUE_ROLES.includes(issue.role)) {
         await this.tracker.clearFlag(issue);
@@ -285,16 +283,6 @@ export class Poll {
       }
       if (next !== memory) await this.state.writeIssueMemory(repo.name, issue.id, next);
     }
-  }
-
-  /**
-   * Whether a pause's move to Paused is pending: its session's exit isn't handled yet, so it's still in the session
-   * list, as when the move failed and the exit waits for the next poll. A pause in Planning whose session left the
-   * list belongs to an issue that left Paused, such as one a hand run took back into Planning.
-   */
-  private async pendingPause(): Promise<(pause: OpenPause) => boolean> {
-    const running = new Set((await this.state.sessions()).map((entry) => entry.id));
-    return (pause) => running.has(pause.session);
   }
 
   // 7. Subscriptions.

@@ -78,6 +78,11 @@ export interface OpenPause {
   answers: Answer[];
   /** The session whose handoff opened the pause. Only that handoff's retries keep it. */
   session: string;
+  /**
+   * Whether the move to Paused is still to land. The Outbox opens the pause before its comment, and marks the
+   * move landed after it. A pending pause waits in Planning, whether a factory session or a hand run opened it.
+   */
+  pending: boolean;
   /** The pause comment's creation time. Only later comments can answer it. */
   comment_at: string;
   /** Every comment posted after the pause comment that a snapshot has returned so far. */

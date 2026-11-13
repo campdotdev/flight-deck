@@ -140,7 +140,7 @@ export class Outbox {
             const since = this.options.clock().toISOString();
             const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since };
             const memory = await state.issueMemory(session.repo, issue.id);
-            const pause = ownPause(memory.pause) ?? { answers, session: session.session, comment_at: since, replies: [] };
+            const pause = ownPause(memory.pause) ?? { answers, session: session.session, pending: true, comment_at: since, replies: [] };
             const flagged = { ...memory, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } };
             await state.writeIssueMemory(session.repo, issue.id, { ...flagged, pause });
             const at = posted?.created_at ?? (await tracker.post(ref, comment, { flag: true })).created_at;
@@ -158,6 +158,7 @@ export class Outbox {
             const pause = ownPause(memory.pause) ?? {
               answers,
               session: session.session,
+              pending: true,
               comment_at: memory.flag?.since ?? this.options.clock().toISOString(),
               replies: [],
             };
@@ -165,7 +166,7 @@ export class Outbox {
             const known = new Set(pause.replies.map((reply) => reply.id));
             const unseen = repliesAfter(await tracker.issue(ref), pause.comment_at).filter((reply) => !known.has(reply.id));
             const replies = [...pause.replies, ...unseen].sort((a, b) => a.created_at.localeCompare(b.created_at));
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { ...pause, replies } });
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { ...pause, pending: false, replies } });
             return null;
           },
         ],
