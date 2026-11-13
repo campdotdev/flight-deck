@@ -1,6 +1,8 @@
 // State keeps the runner's files in the data folder. Each kind has a typed read and write, every file is
 // JSON, and every write is one atomic rename (spec 1, "State").
 import { paths, type Folders } from "../folders/index.ts";
+import type { Role } from "../record/index.ts";
+import { readdir } from "node:fs/promises";
 import { appendLine, readJson, writeJson } from "./files.ts";
 import type { Status } from "./status.ts";
 
@@ -34,13 +36,70 @@ export interface SessionEntry {
   state: SessionState;
 }
 
-/** One issue's memory, keyed by Linear's UUID. Later tickets add the attempt, the flag, the pause, and more. */
+/** One answer a pause offers (ADR 0019). */
+export interface Answer {
+  /** One lowercase word. */
+  word: string;
+  /** What the answer does. */
+  does: string;
+  /** The role the answer moves the issue to. */
+  move: Role;
+}
+
+/** Why the runner flagged an issue. Later tickets add stale takes and trouble issues. */
+export type FlagCause = "pause";
+
+/** The runner's flag on an issue: it assigned the maintainer (ADR 0011). */
+export interface Flag {
+  cause: FlagCause;
+  /** The flag comment's status line, for `status.json`. */
+  status_line: string;
+  /** ISO time. */
+  since: string;
+  /** The issue's identifier, title, and URL when it was flagged, for `status.json`. */
+  issue: string;
+  title: string;
+  url: string;
+}
+
+/** A comment posted after a pause comment, with the body the first snapshot that saw it returned. */
+export interface Reply {
+  id: string;
+  /** The author's user ID. */
+  author: string;
+  created_at: string;
+  body: string;
+  /** Whether it came through the GitHub sync. */
+  synced: boolean;
+}
+
+/** An open pause: its answers and when its comment landed. */
+export interface OpenPause {
+  answers: Answer[];
+  /** The session whose handoff opened the pause. Only that handoff's retries keep it. */
+  session: string;
+  /**
+   * Whether the move to Paused is still to land. The Outbox opens the pause before its comment, and marks the
+   * move landed after it. A pending pause waits in Planning, whether a factory session or a hand run opened it.
+   */
+  pending: boolean;
+  /** The pause comment's creation time. Only later comments can answer it. */
+  comment_at: string;
+  /** Every comment posted after the pause comment that a snapshot has returned so far. */
+  replies: Reply[];
+}
+
+/** One issue's memory, keyed by Linear's UUID. Later tickets add the attempt and more. */
 export interface IssueMemory {
   /** The brief the runner last wrote for the issue, or `null`. */
   brief: string | null;
+  /** The current flag, or `null`. */
+  flag: Flag | null;
+  /** The open pause, or `null`. */
+  pause: OpenPause | null;
 }
 
-const EMPTY_MEMORY: IssueMemory = { brief: null };
+const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null };
 
 export class State {
   constructor(private readonly folders: Folders) {}
@@ -57,8 +116,27 @@ export class State {
     return { ...EMPTY_MEMORY, ...(await readJson<Partial<IssueMemory>>(paths.issueMemory(this.folders, repo, uuid), {})) };
   }
 
+  /** Every issue memory the repo holds, by issue UUID. */
+  async issueMemories(repo: string): Promise<{ uuid: string; memory: IssueMemory }[]> {
+    const names = await readdir(paths.issues(this.folders, repo)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    const uuids = names.filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -".json".length)).sort();
+    return Promise.all(uuids.map(async (uuid) => ({ uuid, memory: await this.issueMemory(repo, uuid) })));
+  }
+
   async writeIssueMemory(repo: string, uuid: string, memory: IssueMemory): Promise<void> {
     await writeJson(paths.issueMemory(this.folders, repo, uuid), memory);
+  }
+
+  /** Where the repo's last snapshot read comments to: an ISO creation time, or `null` before the first. */
+  async cursor(repo: string): Promise<string | null> {
+    return (await readJson<{ comments: string | null }>(paths.cursor(this.folders, repo), { comments: null })).comments;
+  }
+
+  async writeCursor(repo: string, comments: string): Promise<void> {
+    await writeJson(paths.cursor(this.folders, repo), { comments });
   }
 
   /** The time of the last poll, written every poll. */

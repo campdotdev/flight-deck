@@ -57,11 +57,17 @@ describe("a sent issue gets a brief", () => {
     world.send(issue);
     world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: SUMMARY, brief: BRIEF }), exit: { kind: "exited", code: 0 } });
 
+    // The poll unsubscribes the maintainer from the sent issue before it takes it.
     await world.tick();
-    expect(world.tracker.writes).toEqual([{ kind: "move", issue: issue.identifier, status: "Planning" }]);
+    expect(world.tracker.writes).toEqual([
+      { kind: "unsubscribe", issue: issue.identifier, user: world.maintainer.id },
+      { kind: "move", issue: issue.identifier, status: "Planning" },
+    ]);
     expect(world.harness.started.map((start) => start.session.issue)).toEqual([issue.identifier]);
     const session = world.harness.started[0]!.session.id;
 
+    // A comment while plan runs subscribes the maintainer again, so the handoff unsubscribes them before its comment.
+    world.reply(issue, "Thanks.");
     await world.tick();
     const description = `${BRIEF}\n\n+++ Report\n\n${REPORT}\n\n+++`;
     const comment = [
@@ -77,7 +83,7 @@ describe("a sent issue gets a brief", () => {
       "",
       "+++",
     ].join("\n");
-    expect(world.tracker.writes.slice(1)).toEqual([
+    expect(world.tracker.writes.slice(2)).toEqual([
       { kind: "description", issue: issue.identifier, description },
       { kind: "unsubscribe", issue: issue.identifier, user: world.maintainer.id },
       { kind: "comment", issue: issue.identifier, body: comment },
@@ -122,7 +128,7 @@ describe("issues the maintainer hasn't sent", () => {
     world.issue({ title: "In triage", status: "Triage" });
     world.issue({ title: "In the backlog", status: "Backlog" });
     world.issue({ title: "Already done", status: "Done" });
-    world.issue({ title: "Being built by hand", status: "Building" });
+    world.issue({ title: "In review", status: "In Review" });
     await world.tick();
     await world.tick();
     expect(world.tracker.writes).toEqual([]);
@@ -241,7 +247,10 @@ describe("an issue moved out while its session runs", () => {
     world.tracker.setStatus(issue.id, UNMAPPED_STATUS);
     world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 });
     await world.tick();
-    expect(world.tracker.writes).toEqual([{ kind: "move", issue: issue.identifier, status: "Planning" }]);
+    expect(world.tracker.writes).toEqual([
+      { kind: "unsubscribe", issue: issue.identifier, user: world.maintainer.id },
+      { kind: "move", issue: issue.identifier, status: "Planning" },
+    ]);
     expect((await world.status()).sessions).toEqual([]);
   });
 });
@@ -262,7 +271,7 @@ describe("the exit reads the issue's status with the statuses the take read", ()
     world.config.repos[0]!.tracker.statuses.planning = UNMAPPED_STATUS;
     await world.writeConfig();
     const issue = await exitAfterTake(async () => {});
-    expect(world.tracker.writes.map((write) => write.kind)).toEqual(["move", "description", "unsubscribe", "comment", "move"]);
+    expect(world.tracker.writes.map((write) => write.kind)).toEqual(["unsubscribe", "move", "description", "comment", "move"]);
     expect(world.tracker.writes.at(-1)).toEqual({ kind: "move", issue: issue.identifier, status: "Ready to build" });
   });
 
@@ -323,6 +332,27 @@ describe("a repo whose snapshot fails", () => {
     const status = await world.status();
     expect(status.polled_at).toBe(world.now.toISOString());
     expect(status.repos.map(({ name }) => name)).toEqual([first.name, second]);
+  });
+});
+
+describe("a repo whose answers, flags, or subscriptions step fails", () => {
+  test("skips only that repo's starts, as a failed snapshot does", async () => {
+    const first = world.config.repos[0]!;
+    const second = "campdotdev/shaders-docs";
+    world.config.repos.push({ ...first, name: second, checkout: join(world.root, "checkout-docs") });
+    await world.writeConfig();
+    // The first repo's step 7 fails on a Linear write, as a network error would on the real adapter.
+    const unsubscribe = world.tracker.unsubscribe.bind(world.tracker);
+    world.tracker.unsubscribe = async (ref) => {
+      if (ref.repo.name === first.name) throw new Error("fetch failed");
+      return unsubscribe(ref);
+    };
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    expect(world.harness.started.map(({ session }) => [session.repo, session.issue])).toEqual([[second, issue.identifier]]);
+    expect((await world.status()).polled_at).toBe(world.now.toISOString());
   });
 });
 
@@ -393,7 +423,10 @@ describe("a handoff the Outbox refuses", () => {
     world.harness.script(issue.identifier, { outbox: files(), exit: { kind: "exited", code: 0 } });
     await world.tick();
     await world.tick();
-    expect(world.tracker.writes).toEqual([{ kind: "move", issue: issue.identifier, status: "Planning" }]);
+    expect(world.tracker.writes).toEqual([
+      { kind: "unsubscribe", issue: issue.identifier, user: world.maintainer.id },
+      { kind: "move", issue: issue.identifier, status: "Planning" },
+    ]);
   });
 
   test("an accepted break passes", async () => {

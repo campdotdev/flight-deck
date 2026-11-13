@@ -27,6 +27,7 @@ let root: string;
 let sessionFolder: string;
 let tracker: InMemoryTracker;
 let issue: StoredIssue;
+let state: State;
 let apply: () => ReturnType<Outbox["apply"]>;
 
 beforeEach(async () => {
@@ -46,7 +47,8 @@ beforeEach(async () => {
     join(sessionFolder, "session.json"),
     JSON.stringify({ version: VERSION, session: "abc123", stage: "plan", mode: "issue", repo: repo.name, issue: issue.identifier }),
   );
-  const box = new Outbox({ version: VERSION, state: new State(folders), repo: () => repo });
+  state = new State(folders);
+  const box = new Outbox({ version: VERSION, state, clock: () => new Date("2026-11-10T09:00:00Z"), repo: () => repo });
   apply = () => box.apply(sessionFolder, { identity: tracker });
 });
 
@@ -134,6 +136,91 @@ describe("a retry after a move whose response was lost", () => {
     const writes = tracker.writes.length;
     expect(await apply()).toEqual({ result: "applied", writes: ["move"] });
     expect(tracker.writes.length).toBe(writes);
+  });
+});
+
+describe("a pause retried after a lost response", () => {
+  const PAUSE = "## Question\n\nWhich red: `danger` or `brand`?";
+  const ANSWERS = [{ word: "danger", does: "plan uses the danger red", move: "ready_to_plan" as const }];
+  const leavePause = () => leave(outbox.pause({ summary: "Which red should the Save button use?", pause: PAUSE, answers: ANSWERS, needs: "answer" }));
+
+  test("finds the pause comment by its footer, doesn't post it twice, and keeps its time", async () => {
+    await leavePause();
+    const post = tracker.post.bind(tracker);
+    tracker.post = async (...args) => {
+      await post(...args);
+      throw new Error("socket hang up");
+    };
+    await expect(apply()).rejects.toThrow("socket hang up");
+    tracker.post = post;
+    expect(await apply()).toMatchObject({ result: "paused", writes: ["post", "move", "pause"] });
+    const comments = (await tracker.issue({ id: issue.id, repo })).comments;
+    expect(comments).toHaveLength(1);
+    expect((await state.issueMemory(repo.name, issue.id)).pause?.comment_at).toBe(comments[0]!.created_at);
+  });
+
+  test("keeps the pause pending until the move to Paused lands, as a hand run's retry needs", async () => {
+    await leavePause();
+    const move = tracker.move.bind(tracker);
+    tracker.move = async () => {
+      throw new Error("fetch failed");
+    };
+    await expect(apply()).rejects.toThrow("fetch failed");
+    expect((await state.issueMemory(repo.name, issue.id)).pause).toMatchObject({ session: "abc123", pending: true });
+    tracker.move = move;
+    expect(await apply()).toMatchObject({ result: "paused", writes: ["move", "pause"] });
+    expect((await state.issueMemory(repo.name, issue.id)).pause).toMatchObject({ session: "abc123", pending: false });
+  });
+
+  test.each(["pause comment's post", "pause step's issue read"] as const)("keeps a reply a poll saved while the %s was on its way", async (call) => {
+    await leavePause();
+    const saved = { id: "reply-1", author: "maintainer", created_at: "2026-11-10T09:00:01.000Z", body: "Which red is the brand one?", synced: false };
+    const pollSavesReply = async () => {
+      const memory = await state.issueMemory(repo.name, issue.id);
+      if (memory.pause !== null) await state.writeIssueMemory(repo.name, issue.id, { ...memory, pause: { ...memory.pause, replies: [saved] } });
+    };
+    if (call === "pause comment's post") {
+      const post = tracker.post.bind(tracker);
+      tracker.post = async (...args) => {
+        const posted = await post(...args);
+        await pollSavesReply();
+        return posted;
+      };
+    } else {
+      // The first read is apply's own. The second is the pause step's.
+      const read = tracker.issue.bind(tracker);
+      let reads = 0;
+      tracker.issue = async (ref) => {
+        const got = await read(ref);
+        if (++reads === 2) await pollSavesReply();
+        return got;
+      };
+    }
+    expect(await apply()).toMatchObject({ result: "paused" });
+    expect((await state.issueMemory(repo.name, issue.id)).pause?.replies).toEqual([saved]);
+  });
+
+  test("a new handoff doesn't keep the answers of a pause an earlier session opened", async () => {
+    const stale = { answers: [{ word: "brand", does: "plan uses the brand red", move: "ready_to_plan" as const }], session: "old111", pending: false };
+    await state.writeIssueMemory(repo.name, issue.id, { brief: null, flag: null, pause: { ...stale, comment_at: "2026-11-09T09:00:00Z", replies: [] } });
+    await leavePause();
+    expect(await apply()).toMatchObject({ result: "paused", writes: ["post", "move", "pause"] });
+    expect((await state.issueMemory(repo.name, issue.id)).pause).toMatchObject({ answers: ANSWERS, session: "abc123" });
+  });
+
+  test("after a move whose response was lost finds the issue in Paused and doesn't move it again", async () => {
+    await leavePause();
+    const move = tracker.move.bind(tracker);
+    tracker.move = async (...args) => {
+      await move(...args);
+      throw new Error("socket hang up");
+    };
+    await expect(apply()).rejects.toThrow("socket hang up");
+    tracker.move = move;
+    const writes = tracker.writes.length;
+    expect(await apply()).toMatchObject({ result: "paused", writes: ["move", "pause"] });
+    expect(tracker.writes.length).toBe(writes);
+    expect((await state.issueMemory(repo.name, issue.id)).pause?.answers).toEqual(ANSWERS);
   });
 });
 

@@ -52,6 +52,20 @@ export const outbox = {
       "brief.md": input.brief,
     };
   },
+  /** A pause, with its answers and what it needs. */
+  pause(input: {
+    summary: string;
+    pause: string;
+    answers: { word: string; does: string; move: Role }[];
+    needs: "answer" | "help";
+    version?: string;
+  }): Record<string, string> {
+    return {
+      "outcome.json": JSON.stringify({ version: input.version ?? VERSION, stage: "plan", move: "paused", answers: input.answers, needs: input.needs }),
+      "summary.md": input.summary,
+      "pause.md": input.pause,
+    };
+  },
 };
 
 const VERSION = "0.1.0";
@@ -139,6 +153,12 @@ export class World {
   /** The maintainer sends the issue: a move to Ready to plan. */
   send(issue: StoredIssue): void {
     this.tracker.setStatus(issue.id, STATUSES.ready_to_plan[0]);
+  }
+
+  /** A comment the maintainer posts, a second after the clock's last reading. */
+  reply(issue: StoredIssue, body: string, options: { parent?: string; synced?: boolean; author?: string } = {}): string {
+    this.now = new Date(this.now.getTime() + 1000);
+    return this.tracker.addComment(issue.id, { author: this.maintainer.id, body, ...options }).id;
   }
 
   /** Advances the clock, by a minute unless told otherwise, and runs one poll. */

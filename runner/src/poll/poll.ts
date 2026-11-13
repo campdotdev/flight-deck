@@ -12,9 +12,10 @@ import { readConfig, type Config, type Registration } from "../install/index.ts"
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
 import { durationMs, readRecord, type RecordResult, type RepoRecord, type Role } from "../record/index.ts";
-import { State, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
-import type { Snapshot, SnapshotIssue, Tracker, TrackerRepo } from "../tracker/index.ts";
+import { State, type IssueMemory, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
+import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult, type SessionJson } from "../workspace/index.ts";
+import { answerOf } from "./answers.ts";
 
 export interface PollOptions {
   folders: Folders;
@@ -118,9 +119,12 @@ export class Poll {
 
     if (exit.kind === "exited" && repo !== null) {
       const issue = await this.tracker.issue({ id: entry.issue_id, repo });
-      if (issue.role === WORKING[entry.stage]) {
-        const outbox = new Outbox({ version: this.version, state: this.state, repo: (name) => (name === entry.repo ? repo : null) });
-        const result = await outbox.apply(paths.sessionFolder(this.folders, entry.id), { identity: this.tracker });
+      const folder = paths.sessionFolder(this.folders, entry.id);
+      // An apply whose move landed before a lost response or a failed write after it runs again, so a pause's
+      // answers still land. The Outbox's check refuses any other status the maintainer moved the issue to.
+      if (issue.role === WORKING[entry.stage] || (await Outbox.moved(folder, issue.role))) {
+        const outbox = new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => (name === entry.repo ? repo : null) });
+        const result = await outbox.apply(folder, { identity: this.tracker });
         await this.state.log(now, `${entry.id} ${entry.issue}: outbox ${JSON.stringify(result)}`);
       } else {
         // The issue moved out while the session ran, so its outbox is discarded.
@@ -168,18 +172,128 @@ export class Poll {
     }
     const repo = trackerRepo(config, registration, record?.ok === true ? record.record : null);
 
-    // 3. Snapshot. A failed Linear read, such as a network error or a 5xx, skips this repo's starts for this poll
-    // only. The other repos still poll, and the tick still publishes the heartbeat and `status.json`.
+    // 3. Snapshot, with the comments since the repo's cursor. A failed Linear call, such as a network error or a
+    // 5xx, in the snapshot or in steps 5 to 7 skips this repo's starts for this poll only. The other repos still
+    // poll, and the tick still publishes the heartbeat and `status.json`.
     let snapshot: Snapshot | null = null;
     if (repo !== null) {
       try {
-        snapshot = await this.tracker.snapshot(repo);
+        snapshot = await this.tracker.snapshot(repo, { since: await this.state.cursor(registration.name) });
       } catch (error) {
         await this.state.log(now, `${registration.name}: snapshot failed: ${(error as Error).message}`);
       }
     }
+    if (repo !== null && snapshot !== null) {
+      try {
+        // 5. Answers. FLD-104 adds step 4, moved out.
+        const handled = await this.answers(now, repo, snapshot);
+        // The cursor moves only once every comment it passes is in issue memory.
+        const latest = snapshot.comments.at(-1)?.created_at;
+        if (latest !== undefined) await this.state.writeCursor(registration.name, latest);
+        // 6. Flags, and 7. Subscriptions.
+        await this.flags(now, repo, snapshot, handled);
+        await this.subscriptions(repo, snapshot, handled);
+      } catch (error) {
+        await this.state.log(now, `${registration.name}: answers, flags, or subscriptions failed: ${(error as Error).message}`);
+        snapshot = null;
+      }
+    }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
     return { registration, tracker: repo, fetch, record, snapshot, waitingForSpecs };
+  }
+
+  // 5. Answers.
+
+  /**
+   * For each issue with an open pause, keeps each comment posted after the pause comment as the first snapshot
+   * that returned it saw it. Then it moves each paused issue when the oldest reply that names an answer does,
+   * and clears the flag (ADR 0019). Any other reply leaves the issue paused and flagged.
+   */
+  private async answers(now: Date, repo: TrackerRepo, snapshot: Snapshot): Promise<Set<string>> {
+    // Every open pause's replies go into issue memory before any move, so a move that fails, on this issue or
+    // another, still leaves them as first seen.
+    const open: { issue: SnapshotIssue; memory: IssueMemory; pause: OpenPause }[] = [];
+    for (const issue of snapshot.issues) {
+      if (issue.role !== "paused" && issue.role !== "planning") continue;
+      const memory = await this.state.issueMemory(repo.name, issue.id);
+      const pause = memory.pause;
+      // A pause in Planning keeps its replies, and takes no answer yet, only while its move to Paused is pending.
+      if (pause === null || (issue.role === "planning" && !pause.pending)) continue;
+      const known = new Set(pause.replies.map((reply) => reply.id));
+      const fresh: Reply[] = snapshot.comments
+        .filter((comment) => comment.issue === issue.id && comment.created_at > pause.comment_at && !known.has(comment.id))
+        .map(({ id, author, created_at, body, synced }) => ({ id, author, created_at, body, synced }));
+      const seen: OpenPause = { ...pause, replies: [...pause.replies, ...fresh] };
+      if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, issue.id, { ...memory, pause: seen });
+      if (issue.role === "paused") open.push({ issue, memory, pause: seen });
+    }
+
+    const handled = new Set<string>();
+    for (const { issue, memory, pause } of open) {
+      const answer = answerOf(pause, repo.maintainer);
+      if (answer === null) continue;
+      const moved = await this.lifecycle.move(issue, answer.move, "answer");
+      if (!moved.ok) {
+        await this.state.log(now, `${issue.identifier}: answer ${answer.word} refused: ${moved.violation}`);
+        continue;
+      }
+      await this.tracker.clearFlag(issue);
+      await this.state.writeIssueMemory(repo.name, issue.id, { ...memory, flag: null, pause: null });
+      await this.state.log(now, `${issue.identifier}: answered ${answer.word}`);
+      handled.add(issue.id);
+    }
+    return handled;
+  }
+
+  // 6. Flags.
+
+  /**
+   * The runner owns an in-flight issue's assignee (ADR 0011). A flagged issue back in a factory queue loses
+   * its flag. An assignee the runner didn't set goes. An assignee the maintainer cleared by hand, or set to
+   * someone else, clears the flag, and the runner doesn't assign again. A flagged or paused issue that leaves flight loses its flag and
+   * open pause, and keeps its assignee, because it's the maintainer's again. Adds each issue it clears to `handled`.
+   */
+  private async flags(now: Date, repo: TrackerRepo, snapshot: Snapshot, handled: Set<string>): Promise<void> {
+    const inFlight = new Set(snapshot.issues.filter((issue) => FACTORY_ROLES.includes(issue.role)).map((issue) => issue.id));
+    for (const { uuid, memory } of await this.state.issueMemories(repo.name)) {
+      if ((memory.flag === null && memory.pause === null) || inFlight.has(uuid)) continue;
+      await this.state.writeIssueMemory(repo.name, uuid, { ...memory, flag: null, pause: null });
+      await this.state.log(now, `${memory.flag?.issue ?? uuid}: left flight, flag and pause forgotten`);
+    }
+
+    for (const issue of ownedIssues(snapshot)) {
+      if (handled.has(issue.id)) continue;
+      const memory = await this.state.issueMemory(repo.name, issue.id);
+      let next = memory;
+      // A pause closes when its issue leaves Paused, unless it waits in Planning for its pending move to Paused.
+      const waits = issue.role === "planning" && memory.pause?.pending === true;
+      if (memory.pause !== null && issue.role !== "paused" && !waits) next = { ...next, pause: null };
+      if (memory.flag === null ? issue.assignee !== null : QUEUE_ROLES.includes(issue.role)) {
+        await this.tracker.clearFlag(issue);
+        next = { ...next, flag: null };
+        handled.add(issue.id);
+      } else if (memory.flag !== null && issue.assignee !== repo.maintainer) {
+        // An assignee cleared by hand, or set to someone else, clears the flag, and the runner doesn't assign again.
+        // It clears an assignee it didn't set, which unsubscribes the maintainer too.
+        if (issue.assignee !== null) {
+          await this.tracker.clearFlag(issue);
+          handled.add(issue.id);
+        }
+        next = { ...next, flag: null };
+      }
+      if (next !== memory) await this.state.writeIssueMemory(repo.name, issue.id, next);
+    }
+  }
+
+  // 7. Subscriptions.
+
+  /** Unsubscribes the maintainer from every unflagged issue in a factory status they're subscribed to (ADR 0011). */
+  private async subscriptions(repo: TrackerRepo, snapshot: Snapshot, handled: Set<string>): Promise<void> {
+    for (const issue of ownedIssues(snapshot)) {
+      if (handled.has(issue.id) || !issue.subscribers.includes(repo.maintainer)) continue;
+      if ((await this.state.issueMemory(repo.name, issue.id)).flag !== null) continue;
+      await this.tracker.unsubscribe(issue);
+    }
   }
 
   // Starts.
@@ -340,6 +454,20 @@ export class Poll {
 
   // Publish.
 
+  /** Each issue the runner flagged, for `status.json`, with the title the snapshot read when there is one. */
+  private async flagList(repos: RepoPoll[]): Promise<Status["flags"]> {
+    const flags: Status["flags"] = [];
+    for (const poll of repos) {
+      for (const { uuid, memory } of await this.state.issueMemories(poll.registration.name)) {
+        if (memory.flag === null) continue;
+        const read = poll.snapshot?.issues.find((issue) => issue.id === uuid);
+        const { issue, title, url, status_line, since } = memory.flag;
+        flags.push({ repo: poll.registration.name, issue: read?.identifier ?? issue, title: read?.title ?? title, url: read?.url ?? url, status_line, since });
+      }
+    }
+    return flags;
+  }
+
   private async publish(now: Date, config: Config, repos: RepoPoll[]): Promise<void> {
     const at = now.toISOString();
     await this.state.writeHeartbeat(now);
@@ -370,13 +498,21 @@ export class Poll {
               monthly_cap_usd: config.api?.monthly_cap_usd ?? 0,
             }
           : { auth: "subscription", five_hour: null, weekly: null },
-      flags: [],
+      flags: await this.flagList(repos),
       trouble: [],
       stale_takes: [],
       repos: repos.map(statusRepo),
     };
     await this.state.publish(status);
   }
+}
+
+/**
+ * The in-flight issues whose assignee and subscribers the runner owns: every issue in a factory status, except
+ * the sent issues spec 1 leaves in Ready to plan for spec 4, which stay the maintainer's (ADRs 0004 and 0011).
+ */
+function ownedIssues(snapshot: Snapshot): SnapshotIssue[] {
+  return snapshot.issues.filter((issue) => FACTORY_ROLES.includes(issue.role) && !(issue.role === "ready_to_plan" && hasSpec(issue)));
 }
 
 /** The repo as the Tracker needs it: the record's `[tracker]` when it's valid, or else the registration's copy. */

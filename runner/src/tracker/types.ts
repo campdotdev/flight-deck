@@ -50,6 +50,28 @@ export interface SnapshotIssue extends IssueRef {
 export interface Snapshot {
   /** Every issue in a factory status or in the `intake` role. */
   issues: SnapshotIssue[];
+  /**
+   * The comments on those issues created at or after the snapshot's `since`, top-level and replies alike,
+   * oldest first, each with its body as Linear returns it now.
+   */
+  comments: SnapshotComment[];
+}
+
+export interface SnapshotOptions {
+  /** The repo's snapshot cursor: an ISO creation time. `null` or absent returns every comment. */
+  since?: string | null;
+}
+
+export interface SnapshotComment extends TrackerComment {
+  /** The UUID of the issue the comment sits on. */
+  issue: string;
+}
+
+/** A comment `post` made. */
+export interface PostedComment {
+  id: string;
+  /** ISO time. */
+  created_at: string;
 }
 
 export interface TrackerComment {
@@ -94,11 +116,14 @@ export interface TokenSession {
 
 /**
  * The Tracker's operations. Spec 1 builds the overview's whole interface. This version holds the operations
- * the runner uses so far; later tickets add `clearFlag`, `flag`, `file`, `relate`, `detach`, and `upload`.
+ * the runner uses so far; later tickets add `flag`, `file`, `relate`, `detach`, and `upload`.
  */
 export interface Tracker {
-  /** Every issue in a factory status or in the `intake` role. One filtered query per repo. */
-  snapshot(repo: TrackerRepo): Promise<Snapshot>;
+  /**
+   * Every issue in a factory status or in the `intake` role, and the comments on them since the repo's
+   * snapshot cursor. One filtered query per repo.
+   */
+  snapshot(repo: TrackerRepo, options?: SnapshotOptions): Promise<Snapshot>;
   /** One issue with its description, comments, and sync state. */
   issue(issue: IssueRef): Promise<TrackerIssue>;
 
@@ -108,7 +133,12 @@ export interface Tracker {
    * A top-level comment. Flagged, it assigns the maintainer first. Unflagged on an issue the runner hasn't
    * flagged, it unsubscribes the maintainer first when they're subscribed. Fold lines become `+++`.
    */
-  post(issue: IssueRef, comment: string, options: PostOptions): Promise<void>;
+  post(issue: IssueRef, comment: string, options: PostOptions): Promise<PostedComment>;
+  /**
+   * Clears the assignee, then unsubscribes the maintainer when they're subscribed, because Linear keeps an
+   * assignee subscribed (ADR 0011).
+   */
+  clearFlag(issue: IssueRef): Promise<void>;
   /** Unsubscribes the maintainer, only when they're subscribed. */
   unsubscribe(issue: IssueRef): Promise<void>;
   /** Replaces the description with the brief, then a `+++ Report` fold that holds the report. */

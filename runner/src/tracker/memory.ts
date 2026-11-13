@@ -6,9 +6,12 @@ import { briefDescription, plusFolds } from "./folds.ts";
 import { FACTORY_ROLES, roleOf } from "./roles.ts";
 import type {
   IssueRef,
+  PostedComment,
   PostOptions,
   Snapshot,
+  SnapshotComment,
   SnapshotIssue,
+  SnapshotOptions,
   TokenSession,
   Tracker,
   TrackerComment,
@@ -24,6 +27,7 @@ export type StatusType = "triage" | "backlog" | "unstarted" | "started" | "compl
 export type TrackerWrite =
   | { kind: "move"; issue: string; status: string }
   | { kind: "assign"; issue: string; user: string }
+  | { kind: "unassign"; issue: string }
   | { kind: "unsubscribe"; issue: string; user: string }
   | { kind: "comment"; issue: string; body: string }
   | { kind: "description"; issue: string; description: string }
@@ -152,6 +156,20 @@ export class InMemoryTracker implements Tracker {
     return this.comment(this.stored(issueId), input.author, input.body, input.parent ?? null, input.synced ?? false);
   }
 
+  /** A user edits a comment's body. */
+  editComment(commentId: string, body: string): void {
+    const comment = [...this.issues.values()].flatMap((issue) => issue.comments).find((each) => each.id === commentId);
+    if (comment === undefined) throw new Error(`no comment ${commentId}`);
+    comment.body = body;
+  }
+
+  /** The maintainer sets or clears an assignee by hand. Assigning subscribes the assignee. */
+  setAssignee(issueId: string, user: string | null): void {
+    const issue = this.stored(issueId);
+    issue.assignee = user;
+    if (user !== null && !issue.subscribers.includes(user)) issue.subscribers.push(user);
+  }
+
   /** A move the maintainer makes by hand, such as sending an issue. */
   setStatus(issueId: string, status: string): void {
     const issue = this.stored(issueId);
@@ -169,12 +187,17 @@ export class InMemoryTracker implements Tracker {
 
   // Reads.
 
-  async snapshot(repo: TrackerRepo): Promise<Snapshot> {
+  async snapshot(repo: TrackerRepo, options: SnapshotOptions = {}): Promise<Snapshot> {
     const issues = [...this.issues.values()]
       .filter((issue) => issue.team === repo.team)
       .map((issue) => this.snapshotIssue(issue, repo))
       .filter((issue): issue is SnapshotIssue => issue !== null && SNAPSHOT_ROLES.has(issue.role));
-    return { issues };
+    const since = options.since ?? null;
+    const comments: SnapshotComment[] = issues
+      .flatMap((issue) => this.stored(issue.id).comments.map((comment) => ({ ...comment, issue: issue.id })))
+      .filter((comment) => since === null || comment.created_at >= since)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+    return { issues, comments };
   }
 
   async issue(ref: IssueRef): Promise<TrackerIssue> {
@@ -198,7 +221,7 @@ export class InMemoryTracker implements Tracker {
     this.writes.push({ kind: "move", issue: issue.identifier, status });
   }
 
-  async post(ref: IssueRef, comment: string, options: PostOptions): Promise<void> {
+  async post(ref: IssueRef, comment: string, options: PostOptions): Promise<PostedComment> {
     const issue = this.stored(ref.id);
     const maintainer = ref.repo.maintainer;
     if (options.flag) {
@@ -207,7 +230,17 @@ export class InMemoryTracker implements Tracker {
       // An issue the runner flagged keeps the maintainer assigned and subscribed, so the comment reaches them.
       await this.unsubscribe(ref);
     }
-    this.comment(issue, this.actor, plusFolds(comment), null, false);
+    const posted = this.comment(issue, this.actor, plusFolds(comment), null, false);
+    return { id: posted.id, created_at: posted.created_at };
+  }
+
+  async clearFlag(ref: IssueRef): Promise<void> {
+    const issue = this.stored(ref.id);
+    if (issue.assignee !== null) {
+      issue.assignee = null;
+      this.writes.push({ kind: "unassign", issue: issue.identifier });
+    }
+    await this.unsubscribe(ref);
   }
 
   async unsubscribe(ref: IssueRef): Promise<void> {
