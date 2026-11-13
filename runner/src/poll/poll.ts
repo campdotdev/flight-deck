@@ -109,10 +109,11 @@ export class Poll {
     if (repo !== null) {
       await this.tracker.revoke({ id: entry.id, repo });
     } else {
-      // With no registration or no `login linear` for the workspace, the runner has no credentials to revoke with.
-      // The token stays live until it expires, as one a crashed runner leaves does (ADR 0005). FLD-106's trouble
-      // issue for the login covers the rest.
-      await this.state.log(now, `${entry.id} ${entry.issue}: Reader token not revoked: ${registration === undefined ? `${entry.repo} isn't registered` : "no Linear login for its workspace"}`);
+      // Linear's revoke takes only the token, but `Tracker.revoke` takes a repo, and with no registration or no
+      // `login linear` for the workspace, Poll can't build one. The token stays live until it expires, as one a
+      // crashed runner leaves does (ADR 0005). FLD-109 revokes by session from the token the adapter holds.
+      const why = registration === undefined ? `${entry.repo} isn't registered` : "its workspace has no Linear login";
+      await this.state.log(now, `${entry.id} ${entry.issue}: Reader token not revoked, because ${why}`);
     }
 
     if (exit.kind === "exited" && repo !== null) {
