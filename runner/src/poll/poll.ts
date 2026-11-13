@@ -12,7 +12,7 @@ import { readConfig, type Config, type Registration } from "../install/index.ts"
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
 import { durationMs, readRecord, type RecordResult, type RepoRecord, type Role } from "../record/index.ts";
-import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
+import { State, type IssueMemory, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
 import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult, type SessionJson } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
@@ -210,7 +210,9 @@ export class Poll {
    * and clears the flag (ADR 0019). Any other reply leaves the issue paused and flagged.
    */
   private async answers(now: Date, repo: TrackerRepo, snapshot: Snapshot): Promise<Set<string>> {
-    const handled = new Set<string>();
+    // Every open pause's replies go into issue memory before any move, so a move that fails, on this issue or
+    // another, still leaves them as first seen.
+    const open: { issue: SnapshotIssue; memory: IssueMemory; pause: OpenPause }[] = [];
     for (const issue of snapshot.issues) {
       if (issue.role !== "paused") continue;
       const memory = await this.state.issueMemory(repo.name, issue.id);
@@ -220,10 +222,14 @@ export class Poll {
       const fresh: Reply[] = snapshot.comments
         .filter((comment) => comment.issue === issue.id && comment.created_at > pause.comment_at && !known.has(comment.id))
         .map(({ id, author, created_at, body, synced }) => ({ id, author, created_at, body, synced }));
-      const open: OpenPause = { ...pause, replies: [...pause.replies, ...fresh] };
-      // The replies go into issue memory before the move, so a move that fails still leaves them as first seen.
-      if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, issue.id, { ...memory, pause: open });
-      const answer = answerOf(open, repo.maintainer);
+      const seen: OpenPause = { ...pause, replies: [...pause.replies, ...fresh] };
+      if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, issue.id, { ...memory, pause: seen });
+      open.push({ issue, memory, pause: seen });
+    }
+
+    const handled = new Set<string>();
+    for (const { issue, memory, pause } of open) {
+      const answer = answerOf(pause, repo.maintainer);
       if (answer === null) continue;
       const moved = await this.lifecycle.move(issue, answer.move, "answer");
       if (!moved.ok) {
@@ -242,8 +248,8 @@ export class Poll {
 
   /**
    * The runner owns an in-flight issue's assignee (ADR 0011). A flagged issue back in a factory queue loses
-   * its flag. An assignee the runner didn't set goes. An assignee the maintainer cleared by hand clears the
-   * flag, and the runner doesn't assign again. A flagged or paused issue that leaves flight loses its flag and
+   * its flag. An assignee the runner didn't set goes. An assignee the maintainer cleared by hand, or set to
+   * someone else, clears the flag, and the runner doesn't assign again. A flagged or paused issue that leaves flight loses its flag and
    * open pause, and keeps its assignee, because it's the maintainer's again. Adds each issue it clears to `handled`.
    */
   private async flags(now: Date, repo: TrackerRepo, snapshot: Snapshot, handled: Set<string>): Promise<void> {
@@ -264,7 +270,13 @@ export class Poll {
         await this.tracker.clearFlag(issue);
         next = { ...next, flag: null };
         handled.add(issue.id);
-      } else if (memory.flag !== null && issue.assignee === null) {
+      } else if (memory.flag !== null && issue.assignee !== repo.maintainer) {
+        // An assignee cleared by hand, or set to someone else, clears the flag, and the runner doesn't assign again.
+        // It clears an assignee it didn't set, which unsubscribes the maintainer too.
+        if (issue.assignee !== null) {
+          await this.tracker.clearFlag(issue);
+          handled.add(issue.id);
+        }
         next = { ...next, flag: null };
       }
       if (next !== memory) await this.state.writeIssueMemory(repo.name, issue.id, next);

@@ -313,6 +313,21 @@ describe("a pause or answer whose Linear write fails", () => {
     expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
   });
 
+  test("an answer whose move fails doesn't stop another pause's replies from being kept as first seen", async () => {
+    const first = world.issue({ title: "Save button is blue", description: "It should be red." });
+    const second = world.issue({ title: "Cancel button is blue", description: "It should be red." });
+    await paused(first);
+    await paused(second);
+    failMoves("ready_to_plan", 1);
+    world.reply(first, "brand");
+    const question = world.reply(second, "Which red is the brand one?");
+    await world.tick();
+    world.tracker.editComment(question, "brand");
+    await world.tick();
+    expect(world.tracker.stored(first.id).status).toBe("Ready to plan");
+    expect(world.tracker.stored(second.id).status).toBe("Paused");
+  });
+
   test("an answer whose move fails keeps the reply as the first snapshot saw it", async () => {
     const issue = world.issue({ title: "Save button is blue", description: "It should be red." });
     await paused(issue);
