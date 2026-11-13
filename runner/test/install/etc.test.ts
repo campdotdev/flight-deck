@@ -83,7 +83,10 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
     url?: string;
     complete?: boolean;
     codes?: string[];
+    buffered?: number;
+    closed?: boolean;
     arrivals: number[];
+    tokens: boolean[];
   }
 
   beforeAll(async () => {
@@ -98,8 +101,12 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
     await rm(certs, { recursive: true, force: true });
   });
 
-  async function run(client: "fetch" | "request" | "get", method: string, where: "body" | "head", cuts: number, options: { load?: boolean } = {}): Promise<Run> {
-    const proc = Bun.spawn([node!, fixture, join(certs, "key.pem"), join(certs, "cert.pem"), client, method, where, String(cuts)], {
+  type Client = "fetch" | "request" | "get" | "header" | "cancel" | "paused";
+  type Served = "etag" | "date" | "none" | "changed";
+
+  async function run(client: Client, method: string, where: "body" | "head" | "large", cuts: number, options: { load?: boolean; served?: Served } = {}): Promise<Run> {
+    const args = [client, method, where, String(cuts), options.served ?? "etag"];
+    const proc = Bun.spawn([node!, fixture, join(certs, "key.pem"), join(certs, "cert.pem"), ...args], {
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
         NODE_TLS_REJECT_UNAUTHORIZED: "0",
@@ -132,6 +139,39 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
     }
     expect(runs[0]!.url).toMatch(/^https:\/\/127\.0\.0\.1:\d+\/font\.woff2$/);
     expect(runs[1]!.complete).toBe(true);
+  });
+
+  test("with no ETag, a retry continues the body when Last-Modified and Content-Length match", async () => {
+    const runs = await Promise.all([run("fetch", "GET", "body", 1, { served: "date" }), run("request", "GET", "body", 1, { served: "date" })]);
+    for (const each of runs) expect(each).toMatchObject({ ok: true, status: 200, body: "0123456789" });
+  });
+
+  test("a retry that answers with a different body, or with nothing to show it's the same, fails with the reset", async () => {
+    const runs = await Promise.all([
+      run("fetch", "GET", "body", 1, { served: "changed" }),
+      run("request", "GET", "body", 1, { served: "changed" }),
+      run("fetch", "GET", "body", 1, { served: "none" }),
+      run("request", "GET", "body", 1, { served: "none" }),
+    ]);
+    for (const each of runs) {
+      expect(each.ok).toBe(false);
+      expect(each.codes).toContain("ECONNRESET");
+      expect(each.arrivals).toHaveLength(2);
+    }
+  });
+
+  test("a retry sends the headers the caller set after https.request()", async () => {
+    expect(await run("header", "GET", "body", 1)).toMatchObject({ ok: true, body: "0123456789", tokens: [true, true] });
+  });
+
+  test("destroying the request while a retry waits stops the retry and closes the request", async () => {
+    expect(await run("cancel", "GET", "body", 1)).toMatchObject({ ok: true, closed: true, arrivals: [expect.any(Number)] });
+  });
+
+  test("a response nobody reads stops reading from the server once its buffer fills", async () => {
+    const paused = await run("paused", "GET", "large", 0);
+    expect(paused).toMatchObject({ ok: true, status: 200 });
+    expect(paused.buffered).toBeLessThan(256 * 1024);
   });
 
   test("a GET reset before any answer, and a HEAD, are retried too", async () => {
