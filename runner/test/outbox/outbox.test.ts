@@ -81,6 +81,22 @@ describe("a retry after a post whose response was lost", () => {
     expect(await apply()).toEqual({ result: "applied", writes: ["post", "move"] });
     expect((await tracker.issue({ id: issue.id, repo })).comments).toHaveLength(1);
   });
+
+  test.each([
+    ["came through the GitHub sync", (body: string) => tracker.addComment(issue.id, { author: "github-user", body, synced: true })],
+    [
+      "is a reply",
+      (body: string) => {
+        const question = tracker.addComment(issue.id, { author: "maintainer", body: "Which red?" });
+        tracker.addComment(issue.id, { author: "maintainer", body, parent: question.id });
+      },
+    ],
+  ])("still posts when the only comment with the session's footer %s", async (_, add) => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
+    add(`Copied from another issue:\n\nFlight Deck ${VERSION} · plan · session abc123`);
+    expect(await apply()).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
+    expect(tracker.writes.filter((write) => write.kind === "comment")).toHaveLength(1);
+  });
 });
 
 describe("a retry after a brief write whose response was lost", () => {

@@ -73,8 +73,13 @@ export class Outbox {
       footer,
     });
     // A post can land without reaching `applied.json`, when its response or the journal write is lost. The footer
-    // names the session, so a retry finds the comment it already posted and doesn't post it twice.
-    const posted = issue.comments.some(({ body }) => body.split("\n").some((line) => line.trim() === footer));
+    // names the session, so a retry finds the comment it already posted and doesn't post it twice. The post is
+    // always a top-level Linear comment, so a reply or a comment through the GitHub sync, which anyone who can
+    // comment on the GitHub issue can write, never counts. The author doesn't count either: the runner's post and
+    // a hand `flight-deck apply` of the same session go out as different users.
+    const posted = issue.comments.some(
+      ({ body, synced, parent }) => !synced && parent === null && body.split("\n").some((line) => line.trim() === footer),
+    );
 
     // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
     const steps: [WriteName, () => Promise<string | null>][] = [
