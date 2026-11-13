@@ -137,6 +137,49 @@ describe("media", () => {
   });
 });
 
+describe("a break in Key interfaces", () => {
+  const withBullets = (bullets: string) => BRIEF.replace("## Key interfaces\n\nNone.", `## Key interfaces\n\n${bullets}`);
+
+  test.each([
+    "- `Button`: break, drops the color prop",
+    "- `Button`: breaking, drops the color prop",
+    "- `Button`: breaks callers that pass a color",
+    "- `Button`: Break, drops the color prop",
+    "- `Button`: **break**, drops the color prop",
+    "* `Button`: break, drops the color prop",
+    "1. `Button`: break, drops the color prop",
+    "  - `Button`: break, drops the color prop",
+    "- `Button` : break, drops the color prop",
+    "- Button: break, drops the color prop",
+    "- Breaks `Button`'s color prop",
+  ])("isn't accepted, so %s fails the outbox and writes nothing", async (bullet) => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: withBullets(bullet), version: VERSION }));
+    const result = await apply();
+    expect(result.result).toBe("failed");
+    expect(result.result === "failed" ? result.rule : "").toEndWith("that isn't marked (accepted)");
+    expect(tracker.writes).toEqual([]);
+  });
+
+  test("isn't accepted in a brief with CRLF line ends", async () => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: withBullets("- `Button`: break, drops the color prop").replaceAll("\n", "\r\n"), version: VERSION }));
+    expect((await apply()).result).toBe("failed");
+  });
+
+  test("after a code block holding a ## line still counts, because the code block ends no section", async () => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: withBullets("```\n## not a heading\n```\n\n- `Button`: break, drops the color prop"), version: VERSION }));
+    expect((await apply()).result).toBe("failed");
+  });
+
+  test.each([
+    ["marked (accepted)", "- `Button`: break (accepted), drops the color prop"],
+    ["in a code block", "```\n- `Button`: break, drops the color prop\n```"],
+    ["a seam whose words mention breaking", "- `castIdleVote()`: seam, breaks the loop when both speeds are 0"],
+  ])("%s passes", async (_, bullets) => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: withBullets(bullets), version: VERSION }));
+    expect(await apply()).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
+  });
+});
+
 describe("an outbox file that isn't a regular file", () => {
   test.each(["outcome.json", "brief.md", "summary.md"])("%s as a symlink to a file outside the outbox writes nothing", async (name) => {
     const files = outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION });

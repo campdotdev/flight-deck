@@ -4,7 +4,7 @@ import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Cause, Lifecycle } from "../lifecycle/index.ts";
 import { ROLES, type Role } from "../record/index.ts";
-import { foldTitles } from "../tracker/index.ts";
+import { codeLines, foldTitles } from "../tracker/index.ts";
 import type { Stage } from "../state/index.ts";
 
 export interface Outcome {
@@ -142,10 +142,28 @@ function briefRule(brief: string): string | null {
   return null;
 }
 
-/** The bullets in a brief's `## Key interfaces` whose second part starts with "break" (ADR 0026). */
+/**
+ * The bullets in a brief's `## Key interfaces` whose second part starts with "break" (ADR 0026). The check is the
+ * runner's last guard against a break no one accepted, so it reads loosely: any list marker, a name with or
+ * without code font, "break" in any case and as the start of a longer word such as "breaking", and CRLF line
+ * ends. A bullet with no colon counts as all second part. Lines in a fenced code block are neither headings nor
+ * bullets. Only "break (accepted)" accepts.
+ */
 function keyInterfaceBreaks(brief: string): { contract: string; accepted: boolean }[] {
-  const section = /^## Key interfaces[ \t]*\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(brief)?.[1] ?? "";
-  return [...section.matchAll(/^- (`[^`]+`): (.*)$/gm)]
-    .filter(([, , second]) => /^break\b/.test(second ?? ""))
-    .map(([, contract, second]) => ({ contract: contract ?? "", accepted: /^break \(accepted\)/.test(second ?? "") }));
+  const breaks: { contract: string; accepted: boolean }[] = [];
+  let inSection = false;
+  for (const { line, code } of codeLines(brief.replaceAll("\r\n", "\n"))) {
+    if (code) continue;
+    if (/^#{1,2}[ \t]/.test(line)) {
+      inSection = /^## Key interfaces[ \t]*$/.test(line);
+      continue;
+    }
+    const item = inSection ? /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(.*)$/.exec(line)?.[1] : undefined;
+    if (item === undefined) continue;
+    const shaped = /^(`[^`]+`|[^:`]+?)[ \t]*:[ \t]*(.*)$/.exec(item);
+    const contract = (shaped?.[1] ?? item).trim();
+    const second = (shaped?.[2] ?? item).replace(/^[*_]+/, "");
+    if (/^break/i.test(second)) breaks.push({ contract, accepted: /^break \(accepted\)/.test(second) });
+  }
+  return breaks;
 }

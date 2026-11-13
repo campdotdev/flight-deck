@@ -14,21 +14,27 @@ function foldTitle(line: string): string | null {
 
 /**
  * Each line with its fold title, or `null` for a line that isn't a fold line or sits in a fenced code block, and
- * the fence of a code block still open at the end of the text, or `null`.
+ * whether it's code: a fence line or a line between fences. Also the fence of a code block still open at the end
+ * of the text, or `null`.
  */
-function scan(text: string): { lines: { line: string; title: string | null }[]; open: string | null } {
+function scan(text: string): { lines: { line: string; title: string | null; code: boolean }[]; open: string | null } {
   let fence: string | null = null;
   const lines = text.split("\n").map((line) => {
     const marker = FENCE.exec(line)?.[1];
     if (fence === null) {
       if (marker !== undefined) fence = marker;
-      return { line, title: marker === undefined ? foldTitle(line) : null };
+      return { line, title: marker === undefined ? foldTitle(line) : null, code: marker !== undefined };
     }
     // A closing fence is the opening fence's character, at least as many times, and nothing after.
     if (marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = null;
-    return { line, title: null };
+    return { line, title: null, code: true };
   });
   return { lines, open: fence };
+}
+
+/** Each line of the text, and whether it sits in a fenced code block, its fence lines included. */
+export function codeLines(text: string): { line: string; code: boolean }[] {
+  return scan(text).lines.map(({ line, code }) => ({ line, code }));
 }
 
 function foldLines(text: string): { line: string; title: string | null }[] {
