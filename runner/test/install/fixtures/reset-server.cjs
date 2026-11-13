@@ -4,7 +4,8 @@
 //
 // node reset-server.cjs <key.pem> <cert.pem> <client> <method> <where> <cuts> [served]
 //   client: fetch, request, or get; header, which sets a header after https.request(); cancel, which destroys
-//   the request 500 ms in; or paused, which reads nothing for 300 ms and reports what the response buffered.
+//   the request 500 ms in; destroy-response and cancel-body, which destroy the https response or cancel the
+//   fetch body 500 ms in; or paused, which reads nothing for 300 ms and reports what the response buffered.
 //   where: body (after 5 of 10 bytes), head (before any answer), or large (a 1 MiB body, never cut).
 //   served: etag (the default), date (Last-Modified and no ETag), none (neither), or changed (a new ETag and
 //   body after the first answer).
@@ -50,10 +51,26 @@ const server = net.createServer((raw) => {
 });
 
 function viaFetch(url) {
+  if (client === "cancel-body") {
+    return fetch(url, { method }).then(async (response) => {
+      const reader = response.body.getReader();
+      await reader.read();
+      await wait(500);
+      await reader.cancel();
+      // Long enough for the 1 second retry to have arrived, had it run.
+      await wait(1500);
+      return { status: response.status };
+    });
+  }
   return fetch(url, { method }).then(async (response) => ({ status: response.status, url: response.url, body: await response.text() }));
 }
 
+function wait(ms) {
+  return new Promise((done) => setTimeout(done, ms));
+}
+
 function viaRequest(url) {
+  let req;
   return new Promise((resolve, reject) => {
     const options = { method, rejectUnauthorized: false };
     if (client === "paused") {
@@ -64,13 +81,14 @@ function viaRequest(url) {
       req.on("error", reject);
       return req.end();
     }
-    if (client === "cancel") {
-      const req = https.request(url, options, (res) => res.on("error", () => {}).resume());
+    if (client === "cancel" || client === "destroy-response") {
+      let response = null;
+      const req = https.request(url, options, (res) => (response = res.on("error", () => {}).resume()));
       let closed = false;
       req.on("error", () => {});
       req.on("close", () => (closed = true));
       req.end();
-      setTimeout(() => req.destroy(), 500);
+      setTimeout(() => (client === "cancel" ? req.destroy() : response.destroy()), 500);
       // Long enough for the 1 second retry to have arrived, had it run.
       return setTimeout(() => resolve({ closed }), 2000);
     }
@@ -78,10 +96,10 @@ function viaRequest(url) {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => (body += chunk));
-      res.on("end", () => resolve({ status: res.statusCode, body, complete: res.complete }));
+      res.on("end", () => resolve({ status: res.statusCode, body, complete: res.complete, ownRequest: res.req === req }));
       res.on("error", reject);
     };
-    const req = client === "get" ? https.get(url, options, onResponse) : https.request(url, options, onResponse);
+    req = client === "get" ? https.get(url, options, onResponse) : https.request(url, options, onResponse);
     if (client === "header") req.setHeader("X-Token", "t");
     req.on("error", reject);
     if (client !== "get") req.end();
@@ -92,7 +110,7 @@ server.listen(0, "127.0.0.1", async () => {
   const url = `https://127.0.0.1:${server.address().port}/font.woff2`;
   let result;
   try {
-    result = { ok: true, ...(await (client === "fetch" ? viaFetch(url) : viaRequest(url))) };
+    result = { ok: true, ...(await (client === "fetch" || client === "cancel-body" ? viaFetch(url) : viaRequest(url))) };
   } catch (error) {
     let codes = [];
     for (let each = error; each; each = each.cause) codes.push(each.code ?? each.message);

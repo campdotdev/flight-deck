@@ -66,6 +66,7 @@ async function fetchWithRetries(self, input, init) {
   let reader = first.body.getReader();
   let skip = 0;
   let delivered = 0;
+  let canceled = false;
   const body = new ReadableStream({
     async pull(controller) {
       for (;;) {
@@ -75,12 +76,18 @@ async function fetchWithRetries(self, input, init) {
         } catch (error) {
           if (!isReset(error) || attempts >= DELAYS_MS.length) throw error;
           await sleep(DELAYS_MS[attempts++]);
+          // The caller canceled the body while the retry waited, or while it was on its way.
+          if (canceled) return;
           let next;
           try {
             next = await originalFetch.call(self, input, init);
           } catch (again) {
             if (isReset(again)) continue;
             throw again;
+          }
+          if (canceled) {
+            if (next.body !== null) await next.body.cancel().catch(() => {});
+            return;
           }
           // A different answer can't continue the body the caller already holds part of.
           const header = (response) => (name) => response.headers.get(name);
@@ -106,7 +113,9 @@ async function fetchWithRetries(self, input, init) {
       }
     },
     cancel(reason) {
-      return reader.cancel(reason);
+      canceled = true;
+      // A reader a reset errored has nothing left to cancel.
+      return reader.cancel(reason).catch(() => {});
     },
   });
   const wrapped = new Response(body, { status: first.status, statusText: first.statusText, headers: first.headers });
@@ -170,20 +179,30 @@ function retryResets(self, req, args) {
   /** Ends the caller's request and response with an attempt's error, as the first request would have. */
   function fail(error) {
     retrying = false;
+    // Nothing after this reaches the caller.
+    canceled = true;
     forward("error", error);
     if (proxy !== null) proxy.destroy(error);
     close();
   }
 
-  // Before a retry, the first request is the attempt in flight, and destroying it is enough. After one, the
-  // first request is already gone, so this stops the retry and ends the caller's request as destroy would.
-  req.destroy = function (error) {
+  /** Stops a pending retry and any replacement in flight, whose later events are then ignored. */
+  function cancel() {
     canceled = true;
-    if (active === req && !retrying) return destroy.call(this, error);
-    if (closed) return this;
     clearTimeout(timer);
     retrying = false;
     if (active !== req) active.destroy();
+  }
+
+  // Before a retry, the first request is the attempt in flight, and destroying it is enough. After one, the
+  // first request is already gone, so this stops the retry and ends the caller's request as destroy would.
+  req.destroy = function (error) {
+    if (active === req && !retrying) {
+      canceled = true;
+      return destroy.call(this, error);
+    }
+    if (closed) return this;
+    cancel();
     if (error) forward("error", error);
     if (proxy !== null) proxy.destroy(error);
     close();
@@ -222,7 +241,21 @@ function retryResets(self, req, args) {
         for (const key of ["httpVersion", "httpVersionMajor", "httpVersionMinor", "statusCode", "statusMessage", "headers", "rawHeaders", "url", "method"]) {
           proxy[key] = res[key];
         }
+        proxy.req = req;
         statusCode = res.statusCode;
+        // Destroying the caller's response cancels the request it belongs to. Before a retry, destroying the
+        // response's socket is enough; after one, the request closes here, as a destroyed response's would.
+        const destroyResponse = proxy._destroy;
+        proxy._destroy = function (error, callback) {
+          if (!canceled && !closed) {
+            if (active === req && !retrying) canceled = true;
+            else {
+              cancel();
+              close();
+            }
+          }
+          return destroyResponse.call(this, error, callback);
+        };
         // The caller reading again resumes whichever response feeds it.
         proxy._read = () => {
           if (current !== null) current.resume();

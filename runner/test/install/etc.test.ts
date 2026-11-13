@@ -85,6 +85,7 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
     codes?: string[];
     buffered?: number;
     closed?: boolean;
+    ownRequest?: boolean;
     arrivals: number[];
     tokens: boolean[];
   }
@@ -101,7 +102,7 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
     await rm(certs, { recursive: true, force: true });
   });
 
-  type Client = "fetch" | "request" | "get" | "header" | "cancel" | "paused";
+  type Client = "fetch" | "request" | "get" | "header" | "cancel" | "destroy-response" | "cancel-body" | "paused";
   type Served = "etag" | "date" | "none" | "changed";
 
   async function run(client: Client, method: string, where: "body" | "head" | "large", cuts: number, options: { load?: boolean; served?: Served } = {}): Promise<Run> {
@@ -139,6 +140,7 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
     }
     expect(runs[0]!.url).toMatch(/^https:\/\/127\.0\.0\.1:\d+\/font\.woff2$/);
     expect(runs[1]!.complete).toBe(true);
+    expect(runs[1]!.ownRequest).toBe(true);
   });
 
   test("with no ETag, a retry continues the body when Last-Modified and Content-Length match", async () => {
@@ -164,8 +166,13 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
     expect(await run("header", "GET", "body", 1)).toMatchObject({ ok: true, body: "0123456789", tokens: [true, true] });
   });
 
-  test("destroying the request while a retry waits stops the retry and closes the request", async () => {
-    expect(await run("cancel", "GET", "body", 1)).toMatchObject({ ok: true, closed: true, arrivals: [expect.any(Number)] });
+  test("destroying the request or its response while a retry waits stops the retry and closes the request", async () => {
+    const runs = await Promise.all([run("cancel", "GET", "body", 1), run("destroy-response", "GET", "body", 1)]);
+    for (const each of runs) expect(each).toMatchObject({ ok: true, closed: true, arrivals: [expect.any(Number)] });
+  });
+
+  test("canceling a fetch body while a retry waits stops the retry", async () => {
+    expect(await run("cancel-body", "GET", "body", 1)).toMatchObject({ ok: true, status: 200, arrivals: [expect.any(Number)] });
   });
 
   test("a response nobody reads stops reading from the server once its buffer fills", async () => {
