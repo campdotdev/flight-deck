@@ -160,8 +160,16 @@ export class Poll {
     }
     const repo = trackerRepo(config, registration, record?.ok === true ? record.record : null);
 
-    // 3. Snapshot.
-    const snapshot = repo === null ? null : await this.tracker.snapshot(repo);
+    // 3. Snapshot. A failed Linear read, such as a network error or a 5xx, skips this repo's starts for this poll
+    // only. The other repos still poll, and the tick still publishes the heartbeat and `status.json`.
+    let snapshot: Snapshot | null = null;
+    if (repo !== null) {
+      try {
+        snapshot = await this.tracker.snapshot(repo);
+      } catch (error) {
+        await this.state.log(now, `${registration.name}: snapshot failed: ${(error as Error).message}`);
+      }
+    }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
     return { registration, tracker: repo, fetch, record, snapshot, waitingForSpecs };
   }
