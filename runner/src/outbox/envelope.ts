@@ -104,10 +104,12 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
     const rule = briefRule(text);
     if (rule !== null) return fail(rule);
   }
+  if (namesImage(text)) return fail(`${handoffName} names an image, and the Outbox can't upload media yet`);
   let summary: string | null = null;
   if (names.includes("summary.md")) {
     summary = await readRegularFile(join(outbox, "summary.md"));
     if (summary === null) return fail("summary.md isn't a regular file");
+    if (namesImage(summary)) return fail("summary.md names an image, and the Outbox can't upload media yet");
   }
   return { ok: true, envelope: { outcome: { version: context.version, stage: context.stage, move: role }, summary, handoff: { name: handoffName, text } } };
 }
@@ -133,6 +135,19 @@ async function readRegularFile(path: string): Promise<string | null> {
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * Whether the text shows an image: Markdown's `![alt](target)` or `![alt][ref]`, or an HTML `<img>`, outside code.
+ * Until FLD-97 uploads media, an image's target is a URL or a path, which `session.md` forbids, or a `media/`
+ * file the post would lose, so the Outbox refuses every image.
+ */
+function namesImage(text: string): boolean {
+  return codeLines(text).some(({ line, code }) => {
+    if (code) return false;
+    const prose = line.replace(/(`+)[^`]*?\1/g, "");
+    return /!\[[^\]]*\][([]/.test(prose) || /<img\b/i.test(prose);
+  });
 }
 
 /** The broken rule in a brief, or `null`. */

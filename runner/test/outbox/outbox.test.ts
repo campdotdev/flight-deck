@@ -157,6 +157,27 @@ describe("media", () => {
     await mkdir(join(sessionFolder, "outbox", "media"));
     expect(await apply()).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
   });
+
+  test.each([
+    ["brief.md", "a URL", "![Before](https://example.com/before.png)"],
+    ["brief.md", "a path", "![Before](/Users/maintainer/before.png)"],
+    ["brief.md", "a media file the folder doesn't hold", "![Before](before.png)"],
+    ["brief.md", "a reference", "![Before][before]\n\n[before]: https://example.com/before.png"],
+    ["brief.md", "an HTML tag", '<img src="https://example.com/before.png">'],
+    ["summary.md", "a URL", "![Before](https://example.com/before.png)"],
+  ])("%s that shows an image by %s fails the outbox, and nothing is written", async (name, _, image) => {
+    const brief = name === "brief.md" ? `${BRIEF}\n\n${image}` : BRIEF;
+    const summary = name === "summary.md" ? `${SUMMARY}\n\n${image}` : SUMMARY;
+    await leave(outbox.brief({ summary, brief, version: VERSION }));
+    expect(await apply()).toEqual({ result: "failed", rule: `${name} names an image, and the Outbox can't upload media yet`, writes: [] });
+    expect(tracker.writes).toEqual([]);
+  });
+
+  test("image syntax in a code block or a code span passes", async () => {
+    const brief = `${BRIEF}\n\n\`\`\`md\n![Before](before.png)\n\`\`\`\n\nThe docs write \`![alt](before.png)\`.`;
+    await leave(outbox.brief({ summary: SUMMARY, brief, version: VERSION }));
+    expect(await apply()).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
+  });
 });
 
 describe("a brief with CRLF line ends", () => {
