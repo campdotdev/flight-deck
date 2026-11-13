@@ -273,6 +273,20 @@ describe("a one-word answer", () => {
   });
 });
 
+describe("a paused issue a hand run takes back into Planning", () => {
+  test("closes its pause, so a comment from that time doesn't answer once the issue is back in Paused", async () => {
+    const issue = world.issue({ title: "Save button is blue", description: "It should be red." });
+    await paused(issue);
+    world.tracker.setStatus(issue.id, "Planning");
+    await world.tick();
+    world.reply(issue, "brand red is what the design file uses");
+    await world.tick();
+    world.tracker.setStatus(issue.id, "Paused");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+  });
+});
+
 describe("a pause or answer whose Linear write fails", () => {
   /** Makes `tracker.move` to `role` fail `times` times, before the move lands or, with `after`, after it. */
   function failMoves(role: string, times: number, after = false) {
