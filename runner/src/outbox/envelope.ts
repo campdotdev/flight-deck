@@ -4,7 +4,7 @@ import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Cause, Lifecycle } from "../lifecycle/index.ts";
 import { ROLES, type Role } from "../record/index.ts";
-import { codeLines, foldTitles } from "../tracker/index.ts";
+import { codeLines, foldTitles, opensAsBrief } from "../tracker/index.ts";
 import type { Stage } from "../state/index.ts";
 
 export interface Outcome {
@@ -136,6 +136,9 @@ async function readRegularFile(path: string): Promise<string | null> {
 
 /** The broken rule in a brief, or `null`. */
 function briefRule(brief: string): string | null {
+  // A re-plan finds the brief above the Report fold by this heading, even when issue memory doesn't record that
+  // the runner wrote it, such as after a brief write whose response was lost.
+  if (!opensAsBrief(brief)) return "brief.md doesn't open with ## Summary, the heading a re-plan finds the brief by";
   if (foldTitles(brief).includes("Report")) return "brief.md holds a Report fold line, which the next re-plan would take for the report";
   const unaccepted = keyInterfaceBreaks(brief).find((bullet) => !bullet.accepted);
   if (unaccepted !== undefined) return `brief.md's Key interfaces lists a break of ${unaccepted.contract} that isn't marked (accepted)`;

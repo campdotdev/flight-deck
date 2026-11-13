@@ -13,7 +13,7 @@ import { outbox, STATUSES } from "../scenario/world.ts";
 
 const VERSION = "0.1.0";
 const SUMMARY = "Brief ready: the Save button turns green\n\nThe brief names the theme token.";
-const BRIEF = "## Problem\n\nThe Save button is blue.\n\n## Key interfaces\n\nNone.";
+const BRIEF = "## Summary\n\nThe Save button turns green.\n\n## Current behavior\n\nThe Save button is blue.\n\n## Key interfaces\n\nNone.";
 
 const repo: TrackerRepo = {
   name: "campdotdev/shaders",
@@ -80,6 +80,28 @@ describe("a retry after a post whose response was lost", () => {
     tracker.post = post;
     expect(await apply()).toEqual({ result: "applied", writes: ["post", "move"] });
     expect((await tracker.issue({ id: issue.id, repo })).comments).toHaveLength(1);
+  });
+});
+
+describe("a retry after a brief write whose response was lost", () => {
+  test("keeps only the report in the fold, though issue memory doesn't record the brief", async () => {
+    tracker.stored(issue.id).description = "The Save button is blue.";
+    await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
+    const writeBrief = tracker.writeBrief.bind(tracker);
+    tracker.writeBrief = async (...args) => {
+      await writeBrief(...args);
+      throw new Error("socket hang up");
+    };
+    await expect(apply()).rejects.toThrow("socket hang up");
+    tracker.writeBrief = writeBrief;
+    expect(await apply()).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
+    expect((await tracker.issue({ id: issue.id, repo })).description).toBe(`${BRIEF}\n\n+++ Report\n\nThe Save button is blue.\n\n+++`);
+  });
+
+  test("can't happen to a brief that doesn't open with ## Summary, because the Outbox refuses it", async () => {
+    await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF.replace("## Summary", "## Problem"), version: VERSION }));
+    expect(await apply()).toEqual({ result: "failed", rule: "brief.md doesn't open with ## Summary, the heading a re-plan finds the brief by", writes: [] });
+    expect(tracker.writes).toEqual([]);
   });
 });
 

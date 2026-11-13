@@ -101,6 +101,11 @@ function trailingReport(description: string): string | null {
   return null;
 }
 
+/** Whether the text opens with the brief template's first heading, `## Summary`. */
+export function opensAsBrief(text: string): boolean {
+  return /^## Summary[ \t]*(?:\r?\n|$)/.test(text.trimStart());
+}
+
 /**
  * The report to keep beneath a new brief (ADR 0026). The description is a brief when it ends with a
  * `+++ Report` fold, and either the runner wrote a brief for the issue or the description opens with the
@@ -108,7 +113,7 @@ function trailingReport(description: string): string | null {
  */
 export function reportOf(description: string, runnerWroteBrief: boolean): string {
   const inFold = trailingReport(description);
-  const isBrief = inFold !== null && (runnerWroteBrief || /^## Summary[ \t]*(?:\n|$)/.test(description.trimStart()));
+  const isBrief = inFold !== null && (runnerWroteBrief || opensAsBrief(description));
   return isBrief ? inFold : flattenFolds(description.trim());
 }
 
