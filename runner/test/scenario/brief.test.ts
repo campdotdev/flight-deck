@@ -349,6 +349,19 @@ describe("a start that fails after the take", () => {
     expect(world.harness.started.map((start) => start.session.issue)).toEqual([three!.identifier]);
   });
 
+  test("revokes a Reader token whose mint landed without its response", async () => {
+    const mint = world.tracker.sessionToken.bind(world.tracker);
+    world.tracker.sessionToken = async (session) => {
+      await mint(session);
+      throw new Error("socket hang up");
+    };
+    const issue = world.issue({ title: "Save button is blue", description: REPORT });
+    world.send(issue);
+    await world.tick();
+    expect(world.tracker.tokens.map(({ revoked }) => revoked)).toEqual([true]);
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
   test("revokes the Reader token when the Harness can't start the session", async () => {
     world.harness.start = async () => {
       throw new Error("claude not found");

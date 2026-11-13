@@ -106,7 +106,14 @@ export class Poll {
     if (entry === undefined) return;
     const registration = config.repos.find((repo) => repo.name === entry.repo);
     const repo = registration === undefined ? null : await this.sessionRepo(config, registration, entry.id, workspace);
-    if (repo !== null) await this.tracker.revoke({ id: entry.id, repo });
+    if (repo !== null) {
+      await this.tracker.revoke({ id: entry.id, repo });
+    } else {
+      // With no registration or no `login linear` for the workspace, the runner has no credentials to revoke with.
+      // The token stays live until it expires, as one a crashed runner leaves does (ADR 0005). FLD-106's trouble
+      // issue for the login covers the rest.
+      await this.state.log(now, `${entry.id} ${entry.issue}: Reader token not revoked: ${registration === undefined ? `${entry.repo} isn't registered` : "no Linear login for its workspace"}`);
+    }
 
     if (exit.kind === "exited" && repo !== null) {
       const issue = await this.tracker.issue({ id: entry.issue_id, repo });
@@ -268,9 +275,10 @@ export class Poll {
         },
       });
 
-      // 4. The Reader token, then the session.
-      await this.tracker.sessionToken({ id, repo });
+      // 4. The Reader token, then the session. A mint can land without its response, so a failed start revokes
+      // from the moment the mint is sent. Revoking a session with no token does nothing.
       minted = true;
+      await this.tracker.sessionToken({ id, repo });
       const session: HarnessSession = {
         id,
         stage,
