@@ -172,6 +172,34 @@ describe("a pause retried after a lost response", () => {
     expect((await state.issueMemory(repo.name, issue.id)).pause).toMatchObject({ session: "abc123", pending: false });
   });
 
+  test.each(["pause comment's post", "pause step's issue read"] as const)("keeps a reply a poll saved while the %s was on its way", async (call) => {
+    await leavePause();
+    const saved = { id: "reply-1", author: "maintainer", created_at: "2026-11-10T09:00:01.000Z", body: "Which red is the brand one?", synced: false };
+    const pollSavesReply = async () => {
+      const memory = await state.issueMemory(repo.name, issue.id);
+      if (memory.pause !== null) await state.writeIssueMemory(repo.name, issue.id, { ...memory, pause: { ...memory.pause, replies: [saved] } });
+    };
+    if (call === "pause comment's post") {
+      const post = tracker.post.bind(tracker);
+      tracker.post = async (...args) => {
+        const posted = await post(...args);
+        await pollSavesReply();
+        return posted;
+      };
+    } else {
+      // The first read is apply's own. The second is the pause step's.
+      const read = tracker.issue.bind(tracker);
+      let reads = 0;
+      tracker.issue = async (ref) => {
+        const got = await read(ref);
+        if (++reads === 2) await pollSavesReply();
+        return got;
+      };
+    }
+    expect(await apply()).toMatchObject({ result: "paused" });
+    expect((await state.issueMemory(repo.name, issue.id)).pause?.replies).toEqual([saved]);
+  });
+
   test("a new handoff doesn't keep the answers of a pause an earlier session opened", async () => {
     const stale = { answers: [{ word: "brand", does: "plan uses the brand red", move: "ready_to_plan" as const }], session: "old111", pending: false };
     await state.writeIssueMemory(repo.name, issue.id, { brief: null, flag: null, pause: { ...stale, comment_at: "2026-11-09T09:00:00Z", replies: [] } });

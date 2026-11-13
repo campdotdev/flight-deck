@@ -139,14 +139,17 @@ export class Outbox {
             // it first saw it, even while the move to Paused keeps failing. A retry keeps the replies saved so far.
             const since = this.options.clock().toISOString();
             const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since };
-            const memory = await state.issueMemory(session.repo, issue.id);
-            const pause = ownPause(memory.pause) ?? { answers, session: session.session, pending: true, comment_at: since, replies: [] };
-            const flagged = { ...memory, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } };
+            const opened = await state.issueMemory(session.repo, issue.id);
+            const pause = ownPause(opened.pause) ?? { answers, session: session.session, pending: true, comment_at: since, replies: [] };
+            const flagged = { ...opened, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } };
             await state.writeIssueMemory(session.repo, issue.id, { ...flagged, pause });
             const at = posted?.created_at ?? (await tracker.post(ref, comment, { flag: true })).created_at;
-            // Only a comment after the pause comment is a reply.
-            const replies = pause.replies.filter((reply) => reply.created_at > at);
-            await state.writeIssueMemory(session.repo, issue.id, { ...flagged, pause: { ...pause, comment_at: at, replies } });
+            // A poll can save a reply while the post's response is on its way, as during a hand run, so this write
+            // reads issue memory again. Only a comment after the pause comment is a reply.
+            const memory = await state.issueMemory(session.repo, issue.id);
+            const current = ownPause(memory.pause) ?? pause;
+            const replies = current.replies.filter((reply) => reply.created_at > at);
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { ...current, comment_at: at, replies } });
             return null;
           },
         ],
@@ -154,6 +157,8 @@ export class Outbox {
         [
           "pause",
           async () => {
+            // The issue first, so issue memory is read just before the write, with any reply a poll saved meanwhile.
+            const read = await tracker.issue(ref);
             const memory = await state.issueMemory(session.repo, issue.id);
             const pause = ownPause(memory.pause) ?? {
               answers,
@@ -164,7 +169,7 @@ export class Outbox {
             };
             // A reply no snapshot has returned yet counts too. A reply a snapshot saw keeps the body it saw then.
             const known = new Set(pause.replies.map((reply) => reply.id));
-            const unseen = repliesAfter(await tracker.issue(ref), pause.comment_at).filter((reply) => !known.has(reply.id));
+            const unseen = repliesAfter(read, pause.comment_at).filter((reply) => !known.has(reply.id));
             const replies = [...pause.replies, ...unseen].sort((a, b) => a.created_at.localeCompare(b.created_at));
             await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { ...pause, pending: false, replies } });
             return null;
