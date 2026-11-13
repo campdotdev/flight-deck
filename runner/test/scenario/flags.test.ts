@@ -89,6 +89,24 @@ describe("flags", () => {
     ]);
   });
 
+  test("assigning a flagged issue to someone else clears the flag and that assignee, and the pause still takes an answer", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    await paused(issue);
+    world.tracker.setAssignee(issue.id, "someone");
+    expect(await nextTick()).toEqual([
+      { kind: "unassign", issue: issue.identifier },
+      { kind: "unsubscribe", issue: issue.identifier, user: world.maintainer.id },
+    ]);
+    expect(await nextTick()).toEqual([]);
+    expect((await world.status()).flags).toEqual([]);
+
+    world.reply(issue, "brand");
+    expect(await nextTick()).toEqual([
+      { kind: "move", issue: issue.identifier, status: "Ready to plan" },
+      { kind: "unsubscribe", issue: issue.identifier, user: world.maintainer.id },
+    ]);
+  });
+
   test("an issue that leaves flight loses its flag and open pause, and keeps its assignee", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     await paused(issue);

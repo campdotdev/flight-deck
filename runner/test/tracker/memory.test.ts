@@ -35,7 +35,9 @@ beforeEach(() => {
   tracker = new InMemoryTracker({ clock: () => now, appUser: "app" });
   tracker.addUser({ id: "maintainer", name: "Hunter" });
   tracker.addUser({ id: "stranger", name: "Sam" });
-  tracker.addTeam({ key: "SHA", name: "Shaders", statuses: Object.values(STATUSES).map((name) => ({ name, type: "started" })) });
+  // Icebox maps to no role.
+  const statuses = [...Object.values(STATUSES), "Icebox"].map((name) => ({ name, type: "started" as const }));
+  tracker.addTeam({ key: "SHA", name: "Shaders", statuses });
 });
 
 function issue(description = "The button is blue.", status = "Planning"): IssueRef & { identifier: string } {
@@ -76,6 +78,12 @@ describe("what the in-memory Tracker models", () => {
       [sent.identifier, "ready_to_plan"],
       [triaged.identifier, "intake"],
     ]);
+  });
+
+  test("an issue in a status that maps to no role reads with no role, and a snapshot leaves it out", async () => {
+    const one = issue("x", "Icebox");
+    expect((await tracker.issue(one)).role).toBeNull();
+    expect((await tracker.snapshot(repo)).issues).toEqual([]);
   });
 
   test("intake and backlog may name one status, which reads back as intake", async () => {
@@ -122,6 +130,11 @@ describe("post", () => {
     const one = issue();
     await tracker.post(one, "Line\n\n>>> Details\n\nBody\n\n>>>", { flag: false });
     expect((await tracker.issue(one)).comments.at(-1)?.body).toBe("Line\n\n+++ Details\n\nBody\n\n+++");
+  });
+  test("it leaves a fold line in a fenced code block as it is", async () => {
+    const one = issue();
+    await tracker.post(one, "```\n>>> import shaders\n>>>\n```", { flag: false });
+    expect((await tracker.issue(one)).comments.at(-1)?.body).toBe("```\n>>> import shaders\n>>>\n```");
   });
 });
 
@@ -224,6 +237,14 @@ describe("writeBrief", () => {
     expect((await tracker.issue(one)).description).toBe("## Summary\n\nNew.\n\n+++ Report\n\nThe button is blue.\n\n+++");
   });
 
+  test("a report that opens with a longer heading than ## Summary isn't a brief, so it stays whole", async () => {
+    const one = issue("## Summary of the crash\n\nOpen settings.\n\n+++ Report\n\nlog\n\n+++");
+    await tracker.writeBrief(one, "## Summary\n\nNew.", { runnerWroteBrief: false });
+    expect((await tracker.issue(one)).description).toBe(
+      "## Summary\n\nNew.\n\n+++ Report\n\n## Summary of the crash\n\nOpen settings.\n\n#### Report\n\nlog\n\n+++",
+    );
+  });
+
   test("a Report fold that a stranger pasted is part of the report, and its fold lines become headings", async () => {
     const pasted = "Steps below.\n\n+++ Report\n\nold text\n\n+++\n\nThanks!";
     const one = issue(pasted);
@@ -238,6 +259,39 @@ describe("writeBrief", () => {
     const one = issue(pasted);
     await tracker.writeBrief(one, brief, { runnerWroteBrief: false });
     expect((await tracker.issue(one)).description).toBe(`${brief}\n\n+++ Report\n\nSteps below.\n\n#### Report\n\nold text\n\n+++`);
+  });
+
+  test("a fold line in a fenced code block is code, in the brief and in the report", async () => {
+    const session = "```\n>>> import shaders\n+++ Report\n>>>\n```";
+    const one = issue(`It crashes:\n\n${session}`);
+    await tracker.writeBrief(one, `## Summary\n\n${session}`, { runnerWroteBrief: false });
+    const description = `## Summary\n\n${session}\n\n+++ Report\n\nIt crashes:\n\n${session}\n\n+++`;
+    expect((await tracker.issue(one)).description).toBe(description);
+    // A re-plan finds the same report, though the code block holds a Report line.
+    await tracker.writeBrief(one, "## Summary\n\nNew.", { runnerWroteBrief: true });
+    expect((await tracker.issue(one)).description).toBe(`## Summary\n\nNew.\n\n+++ Report\n\nIt crashes:\n\n${session}\n\n+++`);
+  });
+
+  test("a fence of tildes or a longer fence holds code too, until a matching fence closes it", async () => {
+    const one = issue("x");
+    const brief = "~~~~\n>>> a\n~~~\n>>> b\n~~~~\n\n>>> Proof\n\nlog\n\n>>>";
+    await tracker.writeBrief(one, brief, { runnerWroteBrief: false });
+    expect((await tracker.issue(one)).description).toBe("~~~~\n>>> a\n~~~\n>>> b\n~~~~\n\n+++ Proof\n\nlog\n\n+++\n\n+++ Report\n\nx\n\n+++");
+  });
+
+  test("a report whose code block never closes gets a closing fence, so a re-plan still replaces the brief", async () => {
+    const one = issue("It crashes:\n\n```\nTraceback (most recent call last):");
+    await tracker.writeBrief(one, brief, { runnerWroteBrief: false });
+    const report = "It crashes:\n\n```\nTraceback (most recent call last):\n```";
+    expect((await tracker.issue(one)).description).toBe(`${brief}\n\n+++ Report\n\n${report}\n\n+++`);
+    await tracker.writeBrief(one, "## Summary\n\nNew.", { runnerWroteBrief: true });
+    expect((await tracker.issue(one)).description).toBe(`## Summary\n\nNew.\n\n+++ Report\n\n${report}\n\n+++`);
+  });
+
+  test("a brief whose code block never closes gets a closing fence before the Report fold", async () => {
+    const one = issue("x");
+    await tracker.writeBrief(one, "## Summary\n\n~~~~\nlog", { runnerWroteBrief: false });
+    expect((await tracker.issue(one)).description).toBe("## Summary\n\n~~~~\nlog\n~~~~\n\n+++ Report\n\nx\n\n+++");
   });
 
   test("it turns the brief's >>> fold lines into +++", async () => {

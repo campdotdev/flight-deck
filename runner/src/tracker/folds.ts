@@ -1,7 +1,9 @@
 // Linear's fold syntax, which every Tracker adapter writes the same way (ADR 0019). A fold opens with
-// `+++ <title>` and closes with a `+++` line. `>>>` is the older spelling of the same lines.
+// `+++ <title>` and closes with a `+++` line. `>>>` is the older spelling of the same lines. A line inside a
+// fenced code block is code, never a fold line, so a Python prompt such as `>>> import shaders` stays as it is.
 
 const FOLD_LINE = /^(?:\+\+\+|>>>)(?:[ \t]+(.*?))?[ \t]*$/;
+const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 
 /** The fold's title for an opening line, `""` for a closing line, or `null` for any other line. */
 function foldTitle(line: string): string | null {
@@ -10,12 +12,50 @@ function foldTitle(line: string): string | null {
   return match[1] ?? "";
 }
 
+/**
+ * Each line with its fold title, or `null` for a line that isn't a fold line or sits in a fenced code block, and
+ * whether it's code: a fence line or a line between fences. Also the fence of a code block still open at the end
+ * of the text, or `null`.
+ */
+function scan(text: string): { lines: { line: string; title: string | null; code: boolean }[]; open: string | null } {
+  let fence: string | null = null;
+  const lines = text.split("\n").map((line) => {
+    const marker = FENCE.exec(line)?.[1];
+    if (fence === null) {
+      if (marker !== undefined) fence = marker;
+      return { line, title: marker === undefined ? foldTitle(line) : null, code: marker !== undefined };
+    }
+    // A closing fence is the opening fence's character, at least as many times, and nothing after.
+    if (marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = null;
+    return { line, title: null, code: true };
+  });
+  return { lines, open: fence };
+}
+
+/** Each line of the text, and whether it sits in a fenced code block, its fence lines included. */
+export function codeLines(text: string): { line: string; code: boolean }[] {
+  return scan(text).lines.map(({ line, code }) => ({ line, code }));
+}
+
+function foldLines(text: string): { line: string; title: string | null }[] {
+  return scan(text).lines;
+}
+
+/** Closes a code block that runs to the end of the text, such as a pasted crash log, so the line after it isn't code. */
+function closeFence(text: string): string {
+  const { open } = scan(text);
+  return open === null ? text : `${text}\n${open}`;
+}
+
+/** The titles of the text's opening fold lines, outside fenced code blocks. */
+export function foldTitles(text: string): string[] {
+  return foldLines(text).flatMap(({ title }) => (title === null || title === "" ? [] : [title]));
+}
+
 /** Writes every `>>>` fold line as `+++`. */
 export function plusFolds(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => {
-      const title = foldTitle(line);
+  return foldLines(text)
+    .map(({ line, title }) => {
       if (title === null) return line;
       return title === "" ? "+++" : `+++ ${title}`;
     })
@@ -29,8 +69,7 @@ export function plusFolds(text: string): string {
 export function flattenFolds(text: string): string {
   const out: string[] = [];
   let dropped = false;
-  for (const line of text.split("\n")) {
-    const title = foldTitle(line);
+  for (const { line, title } of foldLines(text)) {
     if (title === "") {
       dropped = true;
       continue;
@@ -45,21 +84,26 @@ export function flattenFolds(text: string): string {
 
 /** A fold of text, written the way every adapter writes one. */
 export function fold(title: string, body: string): string {
-  return `+++ ${title}\n\n${body}\n\n+++`;
+  return `+++ ${title}\n\n${closeFence(body)}\n\n+++`;
 }
 
 /** The text inside the description's last fold when that fold is `+++ Report` and ends the description, else `null`. */
 function trailingReport(description: string): string | null {
-  const lines = description.trimEnd().split("\n");
+  const lines = foldLines(description.trimEnd());
   const close = lines.length - 1;
-  if (foldTitle(lines[close] ?? "") !== "") return null;
+  if (lines[close]?.title !== "") return null;
   for (let open = close - 1; open >= 0; open--) {
-    const title = foldTitle(lines[open] ?? "");
+    const title = lines[open]?.title ?? null;
     if (title === null) continue;
     if (title !== "Report") return null;
-    return lines.slice(open + 1, close).join("\n").trim();
+    return lines.slice(open + 1, close).map(({ line }) => line).join("\n").trim();
   }
   return null;
+}
+
+/** Whether the text opens with the brief template's first heading, `## Summary`. */
+export function opensAsBrief(text: string): boolean {
+  return /^## Summary[ \t]*(?:\r?\n|$)/.test(text.trimStart());
 }
 
 /**
@@ -69,11 +113,11 @@ function trailingReport(description: string): string | null {
  */
 export function reportOf(description: string, runnerWroteBrief: boolean): string {
   const inFold = trailingReport(description);
-  const isBrief = inFold !== null && (runnerWroteBrief || description.trimStart().startsWith("## Summary"));
+  const isBrief = inFold !== null && (runnerWroteBrief || opensAsBrief(description));
   return isBrief ? inFold : flattenFolds(description.trim());
 }
 
 /** The description `writeBrief` writes: the brief, then a `+++ Report` fold that holds the report. */
 export function briefDescription(brief: string, description: string, runnerWroteBrief: boolean): string {
-  return `${plusFolds(brief.trim())}\n\n${fold("Report", reportOf(description, runnerWroteBrief))}`;
+  return `${closeFence(plusFolds(brief.trim()))}\n\n${fold("Report", reportOf(description, runnerWroteBrief))}`;
 }

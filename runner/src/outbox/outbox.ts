@@ -4,11 +4,13 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
-import { readJson, writeJson, type State } from "../state/index.ts";
+import type { Role } from "../record/index.ts";
+import { readJson, writeJson, type OpenPause, type State } from "../state/index.ts";
 import type { IssueRef, Tracker, TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
 import { handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope } from "./envelope.ts";
+import { repliesAfter } from "./replies.ts";
 
 export type ApplyResult =
   /** Every write landed. */
@@ -40,8 +42,33 @@ export interface OutboxOptions {
 /** The name `applied.json` records for each write. */
 type WriteName = "writeBrief" | "post" | "move" | "pause";
 
+/**
+ * Whether the move to `to` landed: `applied.json` records it, or records the writes before it while the issue
+ * already sits in `to`. A move can land without reaching `applied.json`, when its response or the journal write
+ * is lost.
+ */
+function moveLanded(applied: readonly WriteName[], role: Role | null, to: Role): boolean {
+  const before: WriteName[] = to === "paused" ? ["post"] : ["writeBrief", "post"];
+  return applied.includes("move") || (before.every((name) => applied.includes(name)) && role === to);
+}
+
 export class Outbox {
   constructor(private readonly options: OutboxOptions) {}
+
+  /**
+   * Whether an earlier apply of the session's outbox moved its issue, which now has `role`. Poll applies such an
+   * outbox again, though the issue left the working status, so the writes after the move still land.
+   */
+  static async moved(sessionFolder: string, role: Role | null): Promise<boolean> {
+    try {
+      const applied = await readJson<WriteName[]>(join(sessionFolder, "applied.json"), []);
+      if (applied.length === 0) return false;
+      const outcome = await readJson<{ move?: unknown }>(join(sessionParts(sessionFolder).outbox, "outcome.json"), {});
+      return typeof outcome.move === "string" && moveLanded(applied, role, outcome.move as Role);
+    } catch {
+      return false;
+    }
+  }
 
   async apply(sessionFolder: string, options: ApplyOptions): Promise<ApplyResult> {
     const session = JSON.parse(await readFile(sessionParts(sessionFolder).sessionJson, "utf8")) as SessionJson;
@@ -51,11 +78,17 @@ export class Outbox {
     const lifecycle = new Lifecycle(tracker);
     const issue = await tracker.issue({ id: session.issue, repo });
 
+    // A second apply skips the writes already recorded, so once the move has landed, the issue's status no longer
+    // has to allow it.
+    const appliedFile = join(sessionFolder, "applied.json");
+    const applied = await readJson<WriteName[]>(appliedFile, []);
+    const landed = (to: Role): boolean => moveLanded(applied, issue.role, to);
     const checked = await readEnvelope(sessionParts(sessionFolder).outbox, {
       version: this.options.version,
       stage: session.stage,
       role: issue.role,
       lifecycle,
+      moved: landed,
     });
     if (!checked.ok) return { result: "failed", rule: checked.rule, writes: [] };
     const { envelope } = checked;
@@ -64,16 +97,28 @@ export class Outbox {
     const state = this.options.state;
     const { move, answers = [], needs } = envelope.outcome;
     const phrase = statusPhrase(move, needs);
+    const footer = sessionFooter(this.options.version, session.stage, session.session);
     const comment = handoffComment({
       phrase,
       summary: envelope.summary,
       answers: answers.map((answer) => ({ word: answer.word, does: answer.does, status: repo.statuses[answer.move] })),
       handoff: envelope.handoff.text,
-      footer: sessionFooter(this.options.version, session.stage, session.session),
+      footer,
     });
+    // A post can land without reaching `applied.json`, when its response or the journal write is lost. The footer
+    // names the session, so a retry finds the comment it already posted and doesn't post it twice. The post is
+    // always a top-level Linear comment, so a reply or a comment through the GitHub sync, which anyone who can
+    // comment on the GitHub issue can write, never counts. The author doesn't count either: the runner's post and
+    // a hand `flight-deck apply` of the same session go out as different users.
+    const posted = issue.comments.find(
+      ({ body, synced, parent }) => !synced && parent === null && body.split("\n").some((line) => line.trim() === footer),
+    );
     const moveStep: [WriteName, () => Promise<string | null>] = [
       "move",
       async () => {
+        if (landed(move)) return null;
+        // The check refuses an issue with no role before any write, unless the move already landed.
+        if (issue.role === null) return `${issue.identifier}'s status ${issue.status} maps to no role`;
         const moved = await lifecycle.move({ ...ref, role: issue.role }, move, move === "paused" ? "pause" : "handoff");
         return moved.ok ? null : moved.violation;
       },
@@ -82,16 +127,29 @@ export class Outbox {
     // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
     let steps: [WriteName, () => Promise<string | null>][];
     if (move === "paused") {
-      let commentAt: string | null = null;
+      // A pause an earlier handoff opened, such as before a hand run took the paused issue back into Planning,
+      // offered other answers, so this handoff starts a fresh one.
+      const ownPause = (pause: OpenPause | null): OpenPause | null => (pause?.session === session.session ? pause : null);
       steps = [
         [
           "post",
           async () => {
-            // The flag goes into issue memory first, so the next poll never takes the assignee for one the runner didn't set.
-            const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since: this.options.clock().toISOString() };
+            // The flag and the pause go into issue memory before the comment. The flag keeps the next poll from
+            // taking the assignee for one the runner didn't set. The open pause lets each snapshot keep a reply as
+            // it first saw it, even while the move to Paused keeps failing. A retry keeps the replies saved so far.
+            const since = this.options.clock().toISOString();
+            const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since };
+            const opened = await state.issueMemory(session.repo, issue.id);
+            const pause = ownPause(opened.pause) ?? { answers, session: session.session, pending: true, comment_at: since, replies: [] };
+            const flagged = { ...opened, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } };
+            await state.writeIssueMemory(session.repo, issue.id, { ...flagged, pause });
+            const at = posted?.created_at ?? (await tracker.post(ref, comment, { flag: true })).created_at;
+            // A poll can save a reply while the post's response is on its way, as during a hand run, so this write
+            // reads issue memory again. Only a comment after the pause comment is a reply.
             const memory = await state.issueMemory(session.repo, issue.id);
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } });
-            commentAt = (await tracker.post(ref, comment, { flag: true })).created_at;
+            const current = ownPause(memory.pause) ?? pause;
+            const replies = current.replies.filter((reply) => reply.created_at > at);
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { ...current, comment_at: at, replies } });
             return null;
           },
         ],
@@ -99,10 +157,21 @@ export class Outbox {
         [
           "pause",
           async () => {
+            // The issue first, so issue memory is read just before the write, with any reply a poll saved meanwhile.
+            const read = await tracker.issue(ref);
             const memory = await state.issueMemory(session.repo, issue.id);
-            // A resumed apply lost the comment's time, and the flag's start comes just before it.
-            const at = commentAt ?? memory.flag?.since ?? this.options.clock().toISOString();
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { answers, comment_at: at, replies: [] } });
+            const pause = ownPause(memory.pause) ?? {
+              answers,
+              session: session.session,
+              pending: true,
+              comment_at: memory.flag?.since ?? this.options.clock().toISOString(),
+              replies: [],
+            };
+            // A reply no snapshot has returned yet counts too. A reply a snapshot saw keeps the body it saw then.
+            const known = new Set(pause.replies.map((reply) => reply.id));
+            const unseen = repliesAfter(read, pause.comment_at).filter((reply) => !known.has(reply.id));
+            const replies = [...pause.replies, ...unseen].sort((a, b) => a.created_at.localeCompare(b.created_at));
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { ...pause, pending: false, replies } });
             return null;
           },
         ],
@@ -118,13 +187,17 @@ export class Outbox {
             return null;
           },
         ],
-        ["post", async () => (await tracker.post(ref, comment, { flag: false }), null)],
+        [
+          "post",
+          async () => {
+            if (posted === undefined) await tracker.post(ref, comment, { flag: false });
+            return null;
+          },
+        ],
         moveStep,
       ];
     }
 
-    const appliedFile = join(sessionFolder, "applied.json");
-    const applied = await readJson<WriteName[]>(appliedFile, []);
     const writes: string[] = [];
     for (const [name, write] of steps) {
       if (applied.includes(name)) continue;
