@@ -1,0 +1,243 @@
+// Workspace: Flight Deck's clone of each repo, the worktrees and session folders under the session root
+// (spec 1, "Workspace"). It's local and has no port, so its tests use real git in a temporary root.
+// Later tickets add the dependency cache, copied files, ports, the temp-folder check, and the sweep.
+import { randomInt } from "node:crypto";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { paths, sessionParts, type Folders } from "../folders/index.ts";
+import type { Registration } from "../install/index.ts";
+import type { RepoRecord } from "../record/index.ts";
+import type { Mode, Stage } from "../state/index.ts";
+import type { SessionJson } from "./session.ts";
+
+export interface PreparePlan {
+  session: string;
+  stage: Stage;
+  mode: Mode;
+  repo: Registration;
+  /** The record at `commit`. */
+  record: RepoRecord;
+  /** The issue's identifier. */
+  issue: string;
+  /** The record's team key. */
+  team: string;
+  branch: string;
+  base: string;
+  /** The commit the worktree starts from: plan's is the default branch's tip at the take. */
+  commit: string;
+  /** ISO time. */
+  deadline: string;
+  attempt: number;
+  maintainer: { id: string; name: string };
+  appUser: string;
+  version: string;
+  versionFolder: string;
+  inbox: {
+    /** The brief the runner last wrote for the issue, or `null`. */
+    previousBrief: string | null;
+    /** The IDs of the issue's comments that came through the GitHub sync. */
+    syncedComments: string[];
+  };
+}
+
+/** What `prepare` returns, and what `dispose` takes. */
+export interface PreparedWorkspace {
+  session: string;
+  sessionFolder: string;
+  sessionJson: string;
+  inbox: string;
+  outbox: string;
+  tmp: string;
+  deps: string;
+  worktree: string;
+  port: number | null;
+  appUrl: string | null;
+}
+
+export type FetchResult = { ok: true; branch: string; head: string } | { ok: false; error: string };
+
+export interface WorkspaceOptions {
+  folders: Folders;
+  /** The absolute path of git, from `config.toml`'s `[paths]`. */
+  git: string;
+}
+
+export class Workspace {
+  private readonly folders: Folders;
+  private readonly gitPath: string;
+
+  constructor(options: WorkspaceOptions) {
+    this.folders = options.folders;
+    this.gitPath = options.git;
+  }
+
+  /**
+   * Fetches the default branch and tags from the registration's remote into the clone, making the clone
+   * first if there is none. A failed fetch keeps the last fetched commit.
+   */
+  async fetch(repo: Registration): Promise<FetchResult> {
+    const clone = paths.clone(this.folders, repo.name);
+    const symref = await this.git(null, "ls-remote", "--symref", repo.remote, "HEAD");
+    if (!symref.ok) return { ok: false, error: symref.error };
+    const branch = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(symref.out)?.[1];
+    if (branch === undefined) return { ok: false, error: `${repo.remote} names no default branch` };
+    if (!existsSync(join(clone, ".git"))) {
+      await mkdir(dirname(clone), { recursive: true });
+      const made = await this.git(null, "clone", "--quiet", "--no-checkout", repo.remote, clone);
+      if (!made.ok) return { ok: false, error: made.error };
+    }
+    const ref = `refs/heads/${branch}`;
+    const fetched = await this.git(clone, "fetch", "--quiet", "--tags", "--update-head-ok", repo.remote, `+${ref}:${ref}`);
+    if (!fetched.ok) return { ok: false, error: fetched.error };
+    await this.git(clone, "symbolic-ref", "HEAD", ref);
+    return { ok: true, branch, head: await this.head(repo) };
+  }
+
+  /** The default branch's name, as the last fetch read it. */
+  async branch(repo: Registration): Promise<string> {
+    return this.must(paths.clone(this.folders, repo.name), "symbolic-ref", "--short", "HEAD");
+  }
+
+  /** The default branch's tip, as the last fetch left it. */
+  async head(repo: Registration): Promise<string> {
+    return this.must(paths.clone(this.folders, repo.name), "rev-parse", "HEAD");
+  }
+
+  /** A file's text at a commit in the clone, or `null` when the commit doesn't hold it. */
+  async show(repo: Registration, commit: string, path: string): Promise<string | null> {
+    const shown = await this.git(paths.clone(this.folders, repo.name), "show", `${commit}:${path}`);
+    return shown.ok ? shown.out : null;
+  }
+
+  /** A new session ID: 6 lowercase base-36 characters that no session folder, worktree, transcript, or hand run has. */
+  async newSessionId(): Promise<string> {
+    const taken = await this.takenIds();
+    for (;;) {
+      const id = randomInt(36 ** 6).toString(36).padStart(6, "0");
+      if (!taken.has(id)) return id;
+    }
+  }
+
+  /** Makes one session's folder and worktree. */
+  async prepare(plan: PreparePlan): Promise<PreparedWorkspace> {
+    // The session root has mode 0700 (spec 1, "Folders and files"), so no other user on the Mac can read a
+    // checkout or a brief under /Users/Shared. A root made with the umask's mode, or loosened since, is tightened.
+    await mkdir(this.folders.sessionRoot, { recursive: true });
+    await chmod(this.folders.sessionRoot, 0o700);
+    const sessionFolder = paths.sessionFolder(this.folders, plan.session);
+    const parts = sessionParts(sessionFolder);
+    const worktree = paths.worktree(this.folders, plan.session);
+    for (const folder of [parts.inbox, join(parts.outbox, "media"), parts.tmp, parts.deps]) await mkdir(folder, { recursive: true });
+    if (plan.inbox.previousBrief !== null) await writeFile(join(parts.inbox, "previous-brief.md"), plan.inbox.previousBrief);
+    await writeFile(join(parts.inbox, "synced-comments.json"), JSON.stringify(plan.inbox.syncedComments));
+
+    // A repo of its own, not a `git worktree`: it borrows the clone's objects and copies its branches and tags (ADR 0007).
+    await mkdir(paths.worktrees(this.folders), { recursive: true });
+    await this.must(null, "clone", "--quiet", "--shared", "--no-checkout", paths.clone(this.folders, plan.repo.name), worktree);
+    await this.must(worktree, "checkout", "--quiet", "--detach", plan.commit);
+
+    const json: SessionJson = {
+      version: plan.version,
+      session: plan.session,
+      stage: plan.stage,
+      mode: plan.mode,
+      repo: plan.repo.name,
+      issue: plan.issue,
+      branch: plan.branch,
+      base: plan.base,
+      commit: plan.commit,
+      worktree,
+      deadline: plan.deadline,
+      port: null,
+      app_url: null,
+      inbox: parts.inbox,
+      outbox: parts.outbox,
+      skills: join(plan.versionFolder, "skills"),
+      slots: slotPaths(plan, worktree),
+      maintainer: plan.maintainer,
+      app_user: plan.appUser,
+      team: plan.team,
+      plugin: join(plan.versionFolder, "plugin"),
+      attempt: plan.attempt,
+      // The Harness sets this when it appends AGENTS.md (FLD-96 and FLD-110).
+      agents_md: null,
+    };
+    await writeFile(parts.sessionJson, `${JSON.stringify(json, null, 2)}\n`);
+    return { session: plan.session, sessionFolder, ...parts, worktree, port: null, appUrl: null };
+  }
+
+  /**
+   * Deletes the worktree, the session folder, and the session's folder under `~/.claude/projects/`. With
+   * `keepFolder`, it leaves the session folder, which an `apply_waiting` entry still needs. The transcript stays.
+   */
+  async dispose(workspace: Pick<PreparedWorkspace, "session" | "worktree">, options: { keepFolder?: boolean } = {}): Promise<void> {
+    await rm(workspace.worktree, { recursive: true, force: true });
+    await rm(paths.claudeProject(this.folders, workspace.worktree), { recursive: true, force: true });
+    if (options.keepFolder !== true) await rm(paths.sessionFolder(this.folders, workspace.session), { recursive: true, force: true });
+  }
+
+  private async takenIds(): Promise<Set<string>> {
+    const taken = new Set<string>([...(await list(paths.sessions(this.folders))), ...(await list(paths.worktrees(this.folders)))]);
+    for (const owner of await list(join(this.folders.data, "repos"))) {
+      for (const repo of await list(join(this.folders.data, "repos", owner))) {
+        for (const file of await list(paths.transcripts(this.folders, `${owner}/${repo}`))) taken.add(file.replace(/\.jsonl$/, ""));
+      }
+    }
+    for (const run of await list(paths.handRuns(this.folders))) {
+      try {
+        const json = JSON.parse(await readFile(join(paths.handRuns(this.folders), run, "session.json"), "utf8")) as { session?: string };
+        if (typeof json.session === "string") taken.add(json.session);
+      } catch {
+        // A hand-run folder without a readable session.json holds no ID.
+      }
+    }
+    return taken;
+  }
+
+  /** Runs git with hooks off and none of the maintainer's own git config (ADR 0007). */
+  private async git(cwd: string | null, ...args: string[]): Promise<{ ok: true; out: string } | { ok: false; error: string }> {
+    const proc = Bun.spawn([this.gitPath, "-c", "core.hooksPath=/dev/null", ...args], {
+      cwd: cwd ?? "/",
+      env: {
+        HOME: process.env.HOME ?? this.folders.home,
+        PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
+        GIT_CONFIG_GLOBAL: paths.runnerGitconfig(this.folders),
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    if (code !== 0) return { ok: false, error: `git ${args[0]}: ${err.trim() || `exit ${code}`}` };
+    return { ok: true, out };
+  }
+
+  private async must(cwd: string | null, ...args: string[]): Promise<string> {
+    const result = await this.git(cwd, ...args);
+    if (!result.ok) throw new Error(result.error);
+    return result.out.trim();
+  }
+}
+
+/** Each of the stage's slots, by name, as the absolute paths of its skills' `SKILL.md` files (ADR 0014). */
+function slotPaths(plan: PreparePlan, worktree: string): Record<string, string[]> {
+  if (plan.stage === "trial" || plan.stage === "debrief") return {};
+  const slots: Record<string, string[]> = plan.record.slots[plan.stage];
+  return Object.fromEntries(
+    Object.entries(slots).map(([slot, entries]) => [
+      slot,
+      // A shipped skill resolves under the version folder, and a `.claude/skills/` path inside the worktree.
+      entries.map((entry) => join(entry.includes("/") ? join(worktree, entry) : join(plan.versionFolder, "skills", entry), "SKILL.md")),
+    ]),
+  );
+}
+
+async function list(folder: string): Promise<string[]> {
+  try {
+    return await readdir(folder);
+  } catch {
+    return [];
+  }
+}
