@@ -60,12 +60,22 @@ function showsOtherImage(text: string): boolean {
 }
 
 /**
+ * Whether the text holds an `![` and a later `]` outside code that `IMAGE` doesn't match, such as an image whose
+ * alt text holds brackets. Markdown can render it as an image, but the runner couldn't check or upload it. An `![`
+ * whose `]` sits in a code span starts no image.
+ */
+function showsUnreadImage(text: string): boolean {
+  return prose(text).some((stretch) => /!\[[\s\S]*\]/.test(stretch.replace(IMAGE, "")));
+}
+
+/**
  * The broken rule when a file names an image whose target isn't a bare file name in `media/`, else `null`.
  * `files` holds each posted file by its name in the outbox.
  */
 export function mediaRule(files: { name: string; text: string }[], media: ReadonlySet<string>): string | null {
   for (const { name, text } of files) {
     if (showsOtherImage(text)) return `${name} shows an image by reference or HTML, so it names no file in media/: use ![alt](file)`;
+    if (showsUnreadImage(text)) return `${name} shows an image whose alt text the runner can't read, such as one with brackets: use ![alt](file) with plain alt text`;
     for (const target of imageTargets(text)) {
       if (!isBareName(target)) return `${name} names the image ${target}, which isn't a bare file name in media/`;
       if (!media.has(target)) return `${name} names the image ${target}, which media/ doesn't hold`;

@@ -115,9 +115,10 @@ export class Outbox {
     const { move, answers = [], needs } = envelope.outcome;
 
     let original: TrackerIssue | null = null;
-    if (move === "duplicate") {
-      // Once the mark landed, the original may close, and the writes after the mark still land.
-      const of = await originalOf(tracker, repo, issue, envelope.outcome.of ?? "", !landed("duplicate"));
+    if (move === "duplicate" && !landed("duplicate")) {
+      // Once the mark landed, the writes after it don't need the original, which may since have closed, moved to
+      // another team, or been deleted, so the writes after the mark still land.
+      const of = await originalOf(tracker, repo, issue, envelope.outcome.of ?? "");
       if (typeof of === "string") return { result: "failed", rule: of, writes: [] };
       original = of;
     }
@@ -305,10 +306,10 @@ export class Outbox {
 }
 
 /**
- * The issue a duplicate's `of` names, or the broken rule: it must exist, sit on the same team, and not be the
- * issue itself. Before the mark, it must be open too: its status type is backlog, unstarted, started, or triage.
+ * The issue a duplicate's `of` names, or the broken rule: it must exist, sit on the same team, not be the issue
+ * itself, and be open: its status type is backlog, unstarted, started, or triage.
  */
-async function originalOf(tracker: Tracker, repo: TrackerRepo, issue: TrackerIssue, of: string, open: boolean): Promise<TrackerIssue | string> {
+async function originalOf(tracker: Tracker, repo: TrackerRepo, issue: TrackerIssue, of: string): Promise<TrackerIssue | string> {
   let original: TrackerIssue;
   try {
     original = await tracker.issue({ id: of, repo });
@@ -318,6 +319,6 @@ async function originalOf(tracker: Tracker, repo: TrackerRepo, issue: TrackerIss
   }
   if (original.id === issue.id) return `outcome.json's of ${of} is the issue itself`;
   if (original.team !== repo.team) return `outcome.json's of ${of} is on team ${original.team}, not ${repo.team}`;
-  if (open && !OPEN_TYPES.has(original.status_type)) return `outcome.json's of ${of} is in ${original.status}, which isn't open`;
+  if (!OPEN_TYPES.has(original.status_type)) return `outcome.json's of ${of} is in ${original.status}, which isn't open`;
   return original;
 }

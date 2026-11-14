@@ -145,6 +145,16 @@ describe("a refused outbox names the rule", () => {
     ],
     ["a reference image with code in its alt text", () => brief({ "brief.md": `${BRIEF}\n\n![Save \`button\`][before]` }), "brief.md shows an image by reference or HTML, so it names no file in media/: use ![alt](file)"],
     [
+      "an image with brackets in its alt text",
+      () => brief({ "brief.md": `${BRIEF}\n\n![Save [before]](before.png)`, "media/before.png": "png" }),
+      "brief.md shows an image whose alt text the runner can't read, such as one with brackets: use ![alt](file) with plain alt text",
+    ],
+    [
+      "an image URL with brackets in its alt text",
+      () => brief({ "summary.md": `${SUMMARY}\n\n![Save [before]](https://example.com/before.png)` }),
+      "summary.md shows an image whose alt text the runner can't read, such as one with brackets: use ![alt](file) with plain alt text",
+    ],
+    [
       "an image URL",
       () => brief({ "summary.md": `${SUMMARY}\n\n![Before](https://uploads.linear.app/x/before.png)` }),
       "summary.md names the image https://uploads.linear.app/x/before.png, which isn't a bare file name in media/",
@@ -287,6 +297,24 @@ describe("a second apply on the same folder", () => {
     const result = await outbox.apply(folder, { identity: tracker });
     expect(result).toEqual({ result: "applied", writes: ["file follow-ups/1.md", "relate follow-ups/1.md"] });
     expect(tracker.writes.slice(landed)).toEqual([{ kind: "relate", issue: "SHA-2", other: issue.identifier, relation: "related" }]);
+  });
+
+  test.each<[string, (id: string) => void]>([
+    ["deleted", (id) => tracker.deleteIssue(id)],
+    [
+      "moved to another team",
+      (id) => {
+        tracker.addTeam({ key: "OTH", name: "Other", statuses: [{ name: "Todo", type: "unstarted" }] });
+        tracker.moveToTeam(id, "OTH", "Todo");
+      },
+    ],
+  ])("a duplicate whose mark landed finishes its follow-ups, though the original was %s since", async (_, change) => {
+    const original = tracker.addIssue({ team: "SHA", title: "Save is blue", status: "Backlog", creator: "maintainer" });
+    const folder = await session(duplicate(original.identifier, { "follow-ups/1.md": "# Cancel is blue too\n\nx" }));
+    await expect(outbox.apply(folder, { identity: tracker })).rejects.toThrow("socket hang up");
+    change(original.id);
+    const result = await outbox.apply(folder, { identity: tracker });
+    expect(result).toEqual({ result: "applied", writes: ["relate follow-ups/1.md"] });
   });
 
   test("a dry run makes no write and lists each one", async () => {

@@ -203,6 +203,22 @@ export class InMemoryTracker implements Tracker {
     issue.status_since = this.now();
   }
 
+  /** An issue the maintainer deletes. */
+  deleteIssue(issueId: string): void {
+    this.issues.delete(this.stored(issueId).id);
+  }
+
+  /** An issue the maintainer moves to another team, which gives it that team's next identifier. */
+  moveToTeam(issueId: string, key: string, status: string): void {
+    const issue = this.stored(issueId);
+    const team = this.team(key);
+    this.statusOf(team, status);
+    issue.team = team.key;
+    issue.identifier = `${team.key}-${team.next++}`;
+    issue.status = status;
+    issue.status_since = this.now();
+  }
+
   /** The stored issue, by UUID or identifier. */
   stored(id: string): StoredIssue {
     const issue = this.issues.get(id) ?? [...this.issues.values()].find((each) => each.identifier === id);
