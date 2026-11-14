@@ -18,11 +18,19 @@ function isBareName(target: string): boolean {
  */
 const OTHER_IMAGE = /!\[[^\]]*\][([]|<img\b/i;
 
+/**
+ * A code span, or an image's `![alt]` and its `(target)` when it has one. Alt text can hold code spans and the
+ * image stays an image, as Markdown renders it, so the image is matched whole and stays prose. A code span that
+ * holds the alt's `]` makes it no image, so the alt matches only whole code spans.
+ */
+const CODE_SPAN_OR_IMAGE = /(`+)[^`]*?\1|!\[(?:[^\]`]|(`+)[^`]*?\2)*\](?:\(\s*<?[^)\s>]+>?(?:\s+"[^"]*")?\s*\))?/g;
+
 /** The line split at its code spans: the even parts are prose, the odd parts code spans. */
 function spans(line: string): string[] {
   const parts: string[] = [];
   let last = 0;
-  for (const span of line.matchAll(/(`+)[^`]*?\1/g)) {
+  for (const span of line.matchAll(CODE_SPAN_OR_IMAGE)) {
+    if (span[0].startsWith("!")) continue;
     parts.push(line.slice(last, span.index), span[0]);
     last = span.index + span[0].length;
   }

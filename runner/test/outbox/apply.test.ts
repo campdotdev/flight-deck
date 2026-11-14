@@ -137,6 +137,13 @@ describe("a refused outbox names the rule", () => {
     ["a duplicate with a handoff file", () => duplicate("SHA-2", { "brief.md": BRIEF }), "a move to duplicate holds no handoff file, but the outbox holds brief.md"],
     ["a duplicate with no of", () => ({ "outcome.json": JSON.stringify({ version: VERSION, stage: "plan", move: "duplicate" }) }), "a move to duplicate needs of, an issue identifier"],
     ["an image not in media/", () => brief({ "brief.md": `${BRIEF}\n\n![Before](before.png)` }), "brief.md names the image before.png, which media/ doesn't hold"],
+    ["an image with code in its alt text not in media/", () => brief({ "brief.md": `${BRIEF}\n\n![Save \`button\`](before.png)` }), "brief.md names the image before.png, which media/ doesn't hold"],
+    [
+      "an image URL with code in its alt text",
+      () => brief({ "summary.md": `${SUMMARY}\n\n![Save \`button\`](https://example.com/before.png)` }),
+      "summary.md names the image https://example.com/before.png, which isn't a bare file name in media/",
+    ],
+    ["a reference image with code in its alt text", () => brief({ "brief.md": `${BRIEF}\n\n![Save \`button\`][before]` }), "brief.md shows an image by reference or HTML, so it names no file in media/: use ![alt](file)"],
     [
       "an image URL",
       () => brief({ "summary.md": `${SUMMARY}\n\n![Before](https://uploads.linear.app/x/before.png)` }),
@@ -207,6 +214,20 @@ describe("an image", () => {
 });
 
 describe("image syntax in code", () => {
+  test("in an image's alt text leaves the image an image, uploaded and embedded", async () => {
+    const folder = await session(brief({ "brief.md": `${BRIEF}\n\n![Save \`button\`](before.png)`, "media/before.png": "png" }));
+    await outbox.apply(folder, { identity: tracker });
+    const [url] = tracker.uploads.keys();
+    expect(tracker.stored(issue.id).description).toContain(`![Save \`button\`](${url})`);
+  });
+
+  test("a code span holding an image's closing bracket makes it no image", async () => {
+    const text = "Not an image: ![Save `button](before.png)`.";
+    const result = await outbox.apply(await session(brief({ "brief.md": `${BRIEF}\n\n${text}` })), { identity: tracker });
+    expect(result).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
+    expect(tracker.stored(issue.id).description).toContain(text);
+  });
+
   test("needs no file in media/, and the description and comment keep it as written", async () => {
     const code = "```md\n![Before](before.png)\n```\n\nThe docs write `![alt](before.png)`.";
     const result = await outbox.apply(await session(brief({ "brief.md": `${BRIEF}\n\n${code}` })), { identity: tracker });
