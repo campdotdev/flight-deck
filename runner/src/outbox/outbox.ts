@@ -115,7 +115,8 @@ export class Outbox {
 
     let original: TrackerIssue | null = null;
     if (move === "duplicate") {
-      const of = await originalOf(tracker, repo, issue, envelope.outcome.of ?? "");
+      // Once the mark landed, the original may close, and the writes after the mark still land.
+      const of = await originalOf(tracker, repo, issue, envelope.outcome.of ?? "", !landed("duplicate"));
       if (typeof of === "string") return { result: "failed", rule: of, writes: [] };
       original = of;
     }
@@ -289,10 +290,10 @@ export class Outbox {
 }
 
 /**
- * The open issue a duplicate's `of` names, or the broken rule: it must exist, sit on the same team, be open
- * (its status type is backlog, unstarted, started, or triage), and not be the issue itself.
+ * The issue a duplicate's `of` names, or the broken rule: it must exist, sit on the same team, and not be the
+ * issue itself. Before the mark, it must be open too: its status type is backlog, unstarted, started, or triage.
  */
-async function originalOf(tracker: Tracker, repo: TrackerRepo, issue: TrackerIssue, of: string): Promise<TrackerIssue | string> {
+async function originalOf(tracker: Tracker, repo: TrackerRepo, issue: TrackerIssue, of: string, open: boolean): Promise<TrackerIssue | string> {
   let original: TrackerIssue;
   try {
     original = await tracker.issue({ id: of, repo });
@@ -302,6 +303,6 @@ async function originalOf(tracker: Tracker, repo: TrackerRepo, issue: TrackerIss
   }
   if (original.id === issue.id) return `outcome.json's of ${of} is the issue itself`;
   if (original.team !== repo.team) return `outcome.json's of ${of} is on team ${original.team}, not ${repo.team}`;
-  if (!OPEN_TYPES.has(original.status_type)) return `outcome.json's of ${of} is in ${original.status}, which isn't open`;
+  if (open && !OPEN_TYPES.has(original.status_type)) return `outcome.json's of ${of} is in ${original.status}, which isn't open`;
   return original;
 }

@@ -1,7 +1,7 @@
 // Outbox.apply at its own interface: the rule a refused outbox names, which a scenario sees only once a
 // second failed session posts it (FLD-98), and a second apply on the same folder.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Outbox } from "../../src/outbox/index.ts";
@@ -117,9 +117,26 @@ describe("a refused outbox names the rule", () => {
     ],
     ["a follow-up's file name", () => brief({ "follow-ups/one.md": "# One\n\nx" }), "follow-ups/one.md isn't named follow-ups/<n>.md"],
     ["a follow-up with no title", () => brief({ "follow-ups/1.md": "One\n\nx" }), "follow-ups/1.md doesn't open with # <title>"],
+    [
+      "a follow-up's HTML image",
+      () => brief({ "follow-ups/1.md": '# One\n\n<img src="https://example.com/x.png">' }),
+      "follow-ups/1.md shows an image by reference or HTML, so it names no file in media/: use ![alt](file)",
+    ],
   ])("%s", async (_, files, rule) => {
     const result = await outbox.apply(await session(files()), { identity: tracker });
     expect(result).toEqual({ result: "failed", rule, writes: [] });
+    expect(tracker.writes).toEqual([]);
+  });
+
+  test.each(["media", "follow-ups"])("a %s symlink to a folder outside the outbox", async (folder) => {
+    const outside = join(root, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, folder === "media" ? "before.png" : "1.md"), folder === "media" ? "png" : "# Secret\n\nx");
+    const files = folder === "media" ? brief({ "brief.md": `${BRIEF}\n\n![Before](before.png)` }) : brief();
+    const sessionFolder = await session(files);
+    await symlink(outside, join(sessionFolder, "outbox", folder));
+    const result = await outbox.apply(sessionFolder, { identity: tracker });
+    expect(result).toEqual({ result: "failed", rule: `${folder} isn't a folder`, writes: [] });
     expect(tracker.writes).toEqual([]);
   });
 
@@ -138,6 +155,17 @@ describe("a refused outbox names the rule", () => {
   ])("a duplicate of %s", async (_, of, rule) => {
     const result = await outbox.apply(await session(duplicate(of())), { identity: tracker });
     expect(result).toEqual({ result: "failed", rule, writes: [] });
+  });
+});
+
+describe("image syntax in code", () => {
+  test("needs no file in media/, and the description and comment keep it as written", async () => {
+    const code = "```md\n![Before](before.png)\n```\n\nThe docs write `![alt](before.png)`.";
+    const result = await outbox.apply(await session(brief({ "brief.md": `${BRIEF}\n\n${code}` })), { identity: tracker });
+    expect(result).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
+    expect(tracker.stored(issue.id).description).toContain(code);
+    const comment = tracker.writes.find((write) => write.kind === "comment");
+    expect(comment?.kind === "comment" && comment.body).toContain(code);
   });
 });
 
@@ -169,6 +197,15 @@ describe("a second apply on the same folder", () => {
     const result = await outbox.apply(folder, { identity: tracker });
     expect(result).toEqual({ result: "applied", writes: ["relate follow-ups/1.md"] });
     expect(tracker.writes.slice(landed.length)).toEqual([{ kind: "relate", issue: "SHA-2", other: issue.identifier, relation: "related" }]);
+  });
+
+  test("a duplicate whose mark landed finishes its follow-ups, though the original closed since", async () => {
+    const original = tracker.addIssue({ team: "SHA", title: "Save is blue", status: "Backlog", creator: "maintainer" });
+    const folder = await session(duplicate(original.identifier, { "follow-ups/1.md": "# Cancel is blue too\n\nx" }));
+    await expect(outbox.apply(folder, { identity: tracker })).rejects.toThrow("socket hang up");
+    tracker.setStatus(original.id, "Done");
+    const result = await outbox.apply(folder, { identity: tracker });
+    expect(result).toEqual({ result: "applied", writes: ["relate follow-ups/1.md"] });
   });
 
   test("a dry run makes no write and lists each one", async () => {

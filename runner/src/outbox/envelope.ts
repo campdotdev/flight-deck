@@ -1,6 +1,6 @@
 // The envelope every outbox shares (overview, spec 1's "The envelope"), and the checks `apply` makes on it.
 import { constants } from "node:fs";
-import { open, readdir, readFile } from "node:fs/promises";
+import { lstat, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Cause, Lifecycle } from "../lifecycle/index.ts";
 import { ROLES, type Role } from "../record/index.ts";
@@ -122,6 +122,10 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   if (handoffs.length > 1) return fail(`the outbox holds ${handoffs.length} handoff files: ${handoffs.join(", ")}`);
   const stray = names.find((name) => !["outcome.json", "summary.md", "media", "follow-ups", ...handoffs].includes(name));
   if (stray !== undefined) return fail(`${stray} isn't part of the outbox's envelope`);
+  // The runner reads and posts what the folders hold, so neither may be a symlink to a folder the session can't read.
+  for (const folder of ["media", "follow-ups"]) {
+    if (names.includes(folder) && !(await lstat(join(outbox, folder)).catch(() => null))?.isDirectory()) return fail(`${folder} isn't a folder`);
+  }
 
   let handoff: Envelope["handoff"] = null;
   if (handoffName !== null) {
@@ -164,7 +168,9 @@ async function readFollowUps(folder: string): Promise<FollowUp[] | string> {
     const name = `follow-ups/${entry.name}`;
     const match = /^([1-9]\d*)\.md$/.exec(entry.name);
     if (match === null || !entry.isFile()) return `${name} isn't named follow-ups/<n>.md`;
-    const [first = "", ...rest] = (await readFile(join(folder, entry.name), "utf8")).split("\n");
+    const text = await readRegularFile(join(folder, entry.name));
+    if (text === null) return `${name} isn't a regular file`;
+    const [first = "", ...rest] = text.split("\n");
     const title = /^# (.*)$/.exec(first)?.[1]?.trim() ?? "";
     if (title === "") return `${name} doesn't open with # <title>`;
     numbered.push([Number(match[1]), { name, title, description: rest.join("\n").trim() }]);

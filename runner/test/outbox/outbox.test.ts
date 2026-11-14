@@ -261,18 +261,20 @@ describe("media", () => {
     expect(await apply()).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
   });
 
+  const other = "shows an image by reference or HTML, so it names no file in media/: use ![alt](file)";
   test.each([
-    ["brief.md", "a URL", "![Before](https://example.com/before.png)"],
-    ["brief.md", "a path", "![Before](/Users/maintainer/before.png)"],
-    ["brief.md", "a media file the folder doesn't hold", "![Before](before.png)"],
-    ["brief.md", "a reference", "![Before][before]\n\n[before]: https://example.com/before.png"],
-    ["brief.md", "an HTML tag", '<img src="https://example.com/before.png">'],
-    ["summary.md", "a URL", "![Before](https://example.com/before.png)"],
-  ])("%s that shows an image by %s fails the outbox, and nothing is written", async (name, _, image) => {
+    ["brief.md", "a URL", "![Before](https://example.com/before.png)", "names the image https://example.com/before.png, which isn't a bare file name in media/"],
+    ["brief.md", "a path", "![Before](/Users/maintainer/before.png)", "names the image /Users/maintainer/before.png, which isn't a bare file name in media/"],
+    ["brief.md", "a media file the folder doesn't hold", "![Before](before.png)", "names the image before.png, which media/ doesn't hold"],
+    ["brief.md", "a reference", "![Before][before]\n\n[before]: https://example.com/before.png", other],
+    ["brief.md", "an HTML tag", '<img src="https://example.com/before.png">', other],
+    ["brief.md", "a target with a space", "![Before](https://example.com/before one.png)", other],
+    ["summary.md", "a URL", "![Before](https://example.com/before.png)", "names the image https://example.com/before.png, which isn't a bare file name in media/"],
+  ])("%s that shows an image by %s fails the outbox, and nothing is written", async (name, _, image, rule) => {
     const brief = name === "brief.md" ? `${BRIEF}\n\n${image}` : BRIEF;
     const summary = name === "summary.md" ? `${SUMMARY}\n\n${image}` : SUMMARY;
     await leave(outbox.brief({ summary, brief, version: VERSION }));
-    expect(await apply()).toEqual({ result: "failed", rule: `${name} names an image, and the Outbox can't upload media yet`, writes: [] });
+    expect(await apply()).toEqual({ result: "failed", rule: `${name} ${rule}`, writes: [] });
     expect(tracker.writes).toEqual([]);
   });
 
