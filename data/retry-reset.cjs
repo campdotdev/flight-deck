@@ -20,8 +20,21 @@ function isReset(error) {
   return false;
 }
 
-function sleep(ms) {
-  return new Promise((done) => setTimeout(done, ms));
+/** Waits, unless the signal aborts first, which rejects with its reason as fetch does. */
+function sleep(ms, signal) {
+  if (!signal) return new Promise((done) => setTimeout(done, ms));
+  return new Promise((done, fail) => {
+    if (signal.aborted) return fail(signal.reason);
+    const abort = () => {
+      clearTimeout(timer);
+      fail(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      done();
+    }, ms);
+    signal.addEventListener("abort", abort, { once: true });
+  });
 }
 
 /**
@@ -49,6 +62,8 @@ if (typeof originalFetch === "function") {
 }
 
 async function fetchWithRetries(self, input, init) {
+  // fetch takes init's signal over the Request's.
+  const signal = (init && init.signal) || (typeof Request === "function" && input instanceof Request ? input.signal : undefined);
   let attempts = 0;
   let response;
   for (;;) {
@@ -57,7 +72,7 @@ async function fetchWithRetries(self, input, init) {
       break;
     } catch (error) {
       if (!isReset(error) || attempts >= DELAYS_MS.length) throw error;
-      await sleep(DELAYS_MS[attempts++]);
+      await sleep(DELAYS_MS[attempts++], signal);
     }
   }
   if (response.body === null) return response;
@@ -75,7 +90,7 @@ async function fetchWithRetries(self, input, init) {
           chunk = await reader.read();
         } catch (error) {
           if (!isReset(error) || attempts >= DELAYS_MS.length) throw error;
-          await sleep(DELAYS_MS[attempts++]);
+          await sleep(DELAYS_MS[attempts++], signal);
           // The caller canceled the body while the retry waited, or while it was on its way.
           if (canceled) return;
           let next;
@@ -121,10 +136,15 @@ async function fetchWithRetries(self, input, init) {
       return reader.cancel(reason).catch(() => {});
     },
   });
-  const wrapped = new Response(body, { status: first.status, statusText: first.statusText, headers: first.headers });
-  // A Response built from a stream has no url, and isn't redirected, so it keeps the first one's.
-  for (const key of ["url", "redirected", "type"]) Object.defineProperty(wrapped, key, { value: first[key], enumerable: true });
-  return wrapped;
+  return keepOrigin(new Response(body, { status: first.status, statusText: first.statusText, headers: first.headers }), first);
+}
+
+/** A Response built from a stream has no url, and isn't redirected, so it and its clones keep the first one's. */
+function keepOrigin(response, first) {
+  for (const key of ["url", "redirected", "type"]) Object.defineProperty(response, key, { value: first[key], enumerable: true });
+  const clone = response.clone;
+  Object.defineProperty(response, "clone", { value: () => keepOrigin(clone.call(response), first) });
+  return response;
 }
 
 // https.request, and https.get, which calls Node's own request rather than the module's.

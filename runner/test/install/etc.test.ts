@@ -81,6 +81,7 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
     status?: number;
     body?: string;
     url?: string;
+    cloneUrl?: string;
     complete?: boolean;
     codes?: string[];
     buffered?: number;
@@ -88,6 +89,8 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
     ownRequest?: boolean;
     arrivals: number[];
     tokens: boolean[];
+    abortedAt?: number;
+    ended: number;
   }
 
   beforeAll(async () => {
@@ -102,7 +105,7 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
     await rm(certs, { recursive: true, force: true });
   });
 
-  type Client = "fetch" | "request" | "get" | "header" | "cancel" | "destroy-response" | "cancel-body" | "paused" | "body" | "timeout";
+  type Client = "fetch" | "request" | "get" | "header" | "cancel" | "destroy-response" | "cancel-body" | "paused" | "body" | "timeout" | "abort";
   type Served = "etag" | "date" | "none" | "changed";
 
   async function run(client: Client, method: string, where: "body" | "head" | "large" | "stall", cuts: number, options: { load?: boolean; served?: Served } = {}): Promise<Run> {
@@ -139,6 +142,7 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
       expect(gaps(each.arrivals)).toEqual([1]);
     }
     expect(runs[0]!.url).toMatch(/^https:\/\/127\.0\.0\.1:\d+\/font\.woff2$/);
+    expect(runs[0]!.cloneUrl).toBe(runs[0]!.url);
     expect(runs[1]!.complete).toBe(true);
     expect(runs[1]!.ownRequest).toBe(true);
   });
@@ -169,6 +173,15 @@ describe("retry-reset.cjs under NODE_OPTIONS", () => {
   test("destroying the request or its response while a retry waits stops the retry and closes the request", async () => {
     const runs = await Promise.all([run("cancel", "GET", "body", 1), run("destroy-response", "GET", "body", 1)]);
     for (const each of runs) expect(each).toMatchObject({ ok: true, closed: true, arrivals: [expect.any(Number)] });
+  });
+
+  test("aborting a fetch while a retry waits rejects at once with the abort", async () => {
+    const runs = await Promise.all([run("abort", "GET", "head", 1), run("abort", "GET", "body", 1)]);
+    for (const each of runs) {
+      expect(each).toMatchObject({ ok: false, codes: ["AbortError"], arrivals: [expect.any(Number)] });
+      // The rest of the 1 second wait would be 650 ms.
+      expect(each.ended - each.abortedAt!).toBeLessThan(400);
+    }
   });
 
   test("canceling a fetch body while a retry waits stops the retry", async () => {

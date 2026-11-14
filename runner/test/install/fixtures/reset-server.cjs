@@ -6,7 +6,8 @@
 //   client: fetch, request, or get; header, which sets a header after https.request(); cancel, which destroys
 //   the request 500 ms in; destroy-response and cancel-body, which destroy the https response or cancel the
 //   fetch body 500 ms in; paused, which reads nothing for 300 ms and reports what the response buffered; body,
-//   which sends a one-byte body; or timeout, which sets a 300 ms timeout that destroys the request.
+//   which sends a one-byte body; timeout, which sets a 300 ms timeout that destroys the request; or abort,
+//   which aborts the fetch 300 ms after the first reset, and reports when.
 //   where: body (after 5 of 10 bytes), head (before any answer), large (a 1 MiB body, never cut), or stall
 //   (cut like head, then never answer).
 //   served: etag (the default), date (Last-Modified and no ETag), none (neither), or changed (a new ETag and
@@ -27,8 +28,11 @@ const CHANGED = "abcdefghij";
 const LARGE = "x".repeat(1 << 20);
 const start = Date.now();
 const arrivals = [];
+let abortedAt;
 // Whether each request carried the header the header client sets.
 const tokens = [];
+// Runs after each reset.
+let afterReset = () => {};
 
 const server = net.createServer((raw) => {
   const socket = new tls.TLSSocket(raw, { isServer: true, key, cert });
@@ -46,7 +50,11 @@ const server = net.createServer((raw) => {
     const body = method === "HEAD" ? "" : cut && where === "body" ? full.slice(0, 5) : full;
     const validator =
       served === "date" ? "Last-Modified: Wed, 11 May 2022 19:24:48 GMT\r\n" : served === "none" ? "" : `ETag: "${changed ? "v2" : "v1"}"\r\n`;
-    const reset = () => setTimeout(() => raw.resetAndDestroy(), 50);
+    const reset = () =>
+      setTimeout(() => {
+        raw.resetAndDestroy();
+        afterReset();
+      }, 50);
     if (cut && (where === "head" || where === "stall")) return reset();
     if (where === "stall") return;
     socket.write(`HTTP/1.1 200 OK\r\nContent-Length: ${full.length}\r\n${validator}\r\n${body}`, cut ? reset : undefined);
@@ -54,6 +62,17 @@ const server = net.createServer((raw) => {
 });
 
 function viaFetch(url) {
+  if (client === "abort") {
+    const controller = new AbortController();
+    afterReset = () => {
+      afterReset = () => {};
+      setTimeout(() => {
+        abortedAt = Date.now() - start;
+        controller.abort();
+      }, 300);
+    };
+    return fetch(url, { method, signal: controller.signal }).then((response) => response.text());
+  }
   if (client === "cancel-body") {
     return fetch(url, { method }).then(async (response) => {
       const reader = response.body.getReader();
@@ -65,7 +84,12 @@ function viaFetch(url) {
       return { status: response.status };
     });
   }
-  return fetch(url, { method }).then(async (response) => ({ status: response.status, url: response.url, body: await response.text() }));
+  return fetch(url, { method }).then(async (response) => ({
+    status: response.status,
+    url: response.url,
+    cloneUrl: response.clone().url,
+    body: await response.text(),
+  }));
 }
 
 function wait(ms) {
@@ -115,12 +139,12 @@ server.listen(0, "127.0.0.1", async () => {
   const url = `https://127.0.0.1:${server.address().port}/font.woff2`;
   let result;
   try {
-    result = { ok: true, ...(await (client === "fetch" || client === "cancel-body" ? viaFetch(url) : viaRequest(url))) };
+    result = { ok: true, ...(await (["fetch", "cancel-body", "abort"].includes(client) ? viaFetch(url) : viaRequest(url))) };
   } catch (error) {
     let codes = [];
-    for (let each = error; each; each = each.cause) codes.push(each.code ?? each.message);
+    for (let each = error; each; each = each.cause) codes.push(each.name === "AbortError" ? "AbortError" : (each.code ?? each.message));
     result = { ok: false, codes };
   }
   // Exit at once: a kept-alive socket would hold the server open for seconds.
-  process.stdout.write(JSON.stringify({ ...result, arrivals, tokens }), () => process.exit(0));
+  process.stdout.write(JSON.stringify({ ...result, arrivals, tokens, abortedAt, ended: Date.now() - start }), () => process.exit(0));
 });
