@@ -9,6 +9,7 @@ import { paths, sessionParts, type Folders } from "../folders/index.ts";
 import type { Registration } from "../install/index.ts";
 import type { RepoRecord } from "../record/index.ts";
 import type { Mode, Stage } from "../state/index.ts";
+import { emptyConfigFolders, sessionEnv } from "./env.ts";
 import type { SessionJson } from "./session.ts";
 
 export interface PreparePlan {
@@ -50,9 +51,12 @@ export interface PreparedWorkspace {
   outbox: string;
   tmp: string;
   deps: string;
+  home: string;
   worktree: string;
   port: number | null;
   appUrl: string | null;
+  /** The session's `env` block, which the Harness puts in `settings.json`. */
+  env: Record<string, string>;
 }
 
 export type FetchResult = { ok: true; branch: string; head: string } | { ok: false; error: string };
@@ -128,7 +132,10 @@ export class Workspace {
     const sessionFolder = paths.sessionFolder(this.folders, plan.session);
     const parts = sessionParts(sessionFolder);
     const worktree = paths.worktree(this.folders, plan.session);
-    for (const folder of [parts.inbox, join(parts.outbox, "media"), parts.tmp, parts.deps]) await mkdir(folder, { recursive: true });
+    // FLD-99 clones the cache's `home/` here. The `env` block's empty config folders exist either way.
+    for (const folder of [parts.inbox, join(parts.outbox, "media"), parts.tmp, parts.deps, ...emptyConfigFolders(sessionFolder)]) {
+      await mkdir(folder, { recursive: true });
+    }
     if (plan.inbox.previousBrief !== null) await writeFile(join(parts.inbox, "previous-brief.md"), plan.inbox.previousBrief);
     await writeFile(join(parts.inbox, "synced-comments.json"), JSON.stringify(plan.inbox.syncedComments));
 
@@ -160,11 +167,13 @@ export class Workspace {
       team: plan.team,
       plugin: join(plan.versionFolder, "plugin"),
       attempt: plan.attempt,
-      // The Harness sets this when it appends AGENTS.md (FLD-96 and FLD-110).
+      // The Harness sets this when it appends AGENTS.md.
       agents_md: null,
     };
     await writeFile(parts.sessionJson, `${JSON.stringify(json, null, 2)}\n`);
-    return { session: plan.session, sessionFolder, ...parts, worktree, port: null, appUrl: null };
+    const env = sessionEnv({ folders: this.folders, sessionFolder, path: plan.repo.path });
+    const { sessionJson, inbox, outbox, tmp, deps, home } = parts;
+    return { session: plan.session, sessionFolder, sessionJson, inbox, outbox, tmp, deps, home, worktree, port: null, appUrl: null, env };
   }
 
   /**

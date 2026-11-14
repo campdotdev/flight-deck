@@ -5,7 +5,7 @@ import { chmod, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { paths } from "../../src/folders/index.ts";
 import { readRecord, type RepoRecord } from "../../src/record/index.ts";
-import { Workspace, type PreparePlan } from "../../src/workspace/index.ts";
+import { sessionEnv, Workspace, type PreparePlan } from "../../src/workspace/index.ts";
 import { SHADERS_RECORD, World } from "../scenario/world.ts";
 
 let world: World;
@@ -95,11 +95,15 @@ describe("prepare", () => {
       outbox: join(folder, "outbox"),
       tmp: join(folder, "tmp"),
       deps: join(folder, "deps"),
+      home: join(folder, "home"),
       worktree: paths.worktree(world.folders, id),
       port: null,
       appUrl: null,
+      env: sessionEnv({ folders: world.folders, sessionFolder: folder, path: registration().path }),
     });
-    expect((await readdir(folder)).sort()).toEqual(["deps", "inbox", "outbox", "session.json", "tmp"]);
+    expect((await readdir(folder)).sort()).toEqual(["deps", "home", "inbox", "outbox", "session.json", "tmp"]);
+    // The env block's empty config folders for turbo and Vercel.
+    expect((await readdir(join(folder, "home", "config"))).sort()).toEqual(["turborepo", "vercel"]);
     expect(await readdir(join(folder, "outbox"))).toEqual(["media"]);
     expect(await readFile(join(folder, "inbox", "previous-brief.md"), "utf8")).toBe("## Summary\n\nOld.");
     expect(await readFile(join(folder, "inbox", "synced-comments.json"), "utf8")).toBe('["comment-1"]');
