@@ -352,6 +352,7 @@ export class InMemoryTracker implements Tracker {
     return comment;
   }
 
+  /** A snapshot leaves out an issue whose status maps to no role. */
   private snapshotIssue(issue: StoredIssue, repo: TrackerRepo): SnapshotIssue | null {
     const read = this.read(issue, repo);
     return read.role === null ? null : { ...read, role: read.role };

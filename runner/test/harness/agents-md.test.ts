@@ -78,6 +78,8 @@ describe("importPaths", () => {
     ["@docs/a.md#section", ["docs/a.md"]],
     ["mail me@example.com", []],
     ["`@AGENTS.md` and ``@a.md``", []],
+    ["`a ``` @AGENTS.md`", []],
+    ["a `` stray @AGENTS.md", ["AGENTS.md"]],
     ["~~~\n@AGENTS.md\n~~~", []],
     ['"@AGENTS.md"', []],
     ["@@twice and @/", []],
