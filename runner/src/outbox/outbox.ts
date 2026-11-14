@@ -1,5 +1,6 @@
 // The Outbox checks a session's outbox and makes its writes in order (spec 1, "Outbox"). The runner calls
 // `apply` after each session with the Flight Deck app's identity, and `flight-deck apply` with the maintainer's.
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
@@ -47,7 +48,7 @@ export interface OutboxOptions {
  */
 interface Applied {
   writes: string[];
-  /** Each follow-up's filed issue UUID, by its path in the outbox. */
+  /** Each follow-up's issue UUID, by its path in the outbox, saved before the create that uses it. */
   filed: Record<string, string>;
   /** Each image's upload URL, by its file name in `media/`, so each image is uploaded once. */
   uploads: Record<string, string>;
@@ -167,10 +168,10 @@ export class Outbox {
       },
     ];
     // Every image goes up first, so each write that names one can embed its URL.
-    const uploadSteps: Step[] = envelope.images.map((name): Step => [
+    // The bytes are the ones the check read, so the upload never opens the session's path again.
+    const uploadSteps: Step[] = envelope.images.map(({ name, data }): Step => [
       `upload ${name}`,
       async (applied) => {
-        const data = new Uint8Array(await readFile(join(sessionParts(sessionFolder).outbox, "media", name)));
         applied.uploads[name] = await tracker.upload({ name, contentType: contentType(name), data });
         return null;
       },
@@ -184,7 +185,18 @@ export class Outbox {
           const footer = followUpFooter(this.options.version, session.stage);
           const text = embedImages(followUp.description, applied.uploads);
           const description = text === "" ? footer : `${text}\n\n${footer}`;
-          applied.filed[followUp.name] = (await tracker.file({ repo, title: followUp.title, description }, "intake")).id;
+          // A create can land without reaching `applied.json`, when its response or the journal write is lost. The
+          // issue's UUID is chosen and saved first, so a retry finds the issue it filed and doesn't file it twice.
+          const id = applied.filed[followUp.name] ?? randomUUID();
+          if (applied.filed[followUp.name] === undefined) {
+            applied.filed[followUp.name] = id;
+            await writeJson(appliedFile, applied);
+          }
+          const filed = await tracker.issue({ id, repo }).catch((error: unknown) => {
+            if (error instanceof IssueNotFoundError) return null;
+            throw error;
+          });
+          if (filed === null) await tracker.file({ id, repo, title: followUp.title, description }, "intake");
           return null;
         },
       ],
@@ -261,9 +273,12 @@ export class Outbox {
         [
           "writeBrief",
           async (applied) => {
+            // Issue memory keeps the brief as the description holds it, upload URLs and all, so a re-plan's
+            // `previous-brief.md` differs from the description only where the maintainer edited it.
             const memory = await state.issueMemory(session.repo, issue.id);
-            await tracker.writeBrief(ref, embedImages(brief, applied.uploads), { runnerWroteBrief: memory.brief !== null });
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, brief });
+            const embedded = embedImages(brief, applied.uploads);
+            await tracker.writeBrief(ref, embedded, { runnerWroteBrief: memory.brief !== null });
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, brief: embedded });
             return null;
           },
         ],

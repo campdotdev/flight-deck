@@ -28,8 +28,8 @@ export interface Envelope {
   handoff: { name: string; text: string } | null;
   /** `follow-ups/<n>.md`, in the order of their numbers. */
   followUps: FollowUp[];
-  /** Each image file name the posted files name, once, in order. Each one sits in `media/`. */
-  images: string[];
+  /** Each image the posted files name, once, in order: its file name in `media/` and the bytes the check read. */
+  images: { name: string; data: Uint8Array }[];
 }
 
 /** One follow-up issue: `follow-ups/<n>.md`, with `# <title>` on its first line and the description after. */
@@ -155,7 +155,12 @@ export async function readEnvelope(outbox: string, context: CheckContext): Promi
   const media = names.includes("media") ? await readdir(join(outbox, "media"), { withFileTypes: true }).catch(() => []) : [];
   const mediaRuleBroken = mediaRule(posted, new Set(media.filter((entry) => entry.isFile()).map((entry) => entry.name)));
   if (mediaRuleBroken !== null) return fail(mediaRuleBroken);
-  const images = [...new Set(posted.flatMap((file) => imageTargets(file.text)))];
+  const images: Envelope["images"] = [];
+  for (const name of new Set(posted.flatMap((file) => imageTargets(file.text)))) {
+    const data = await readRegularBytes(join(outbox, "media", name));
+    if (data === null) return fail(`media/${name} isn't a regular file`);
+    images.push({ name, data });
+  }
   return { ok: true, envelope: { outcome: checkedOutcome, summary, handoff, followUps, images } };
 }
 
@@ -203,12 +208,21 @@ function pauseRule(outcome: Record<string, unknown>, context: CheckContext): { a
 }
 
 /**
- * The file's text with LF line ends, or `null` when it isn't a regular file or can't be read. A session could
- * leave a symlink to a file it can't read itself, and the runner would post that file to Linear, so the open never
- * follows one (ADR 0007). `O_NONBLOCK` keeps a named pipe from holding the open. Fold lines and headings are
- * found line by line, and a CRLF file's `\r` would hide each one from the checks and from `flattenFolds`.
+ * The file's text with LF line ends, or `null` when it isn't a regular file or can't be read. Fold lines and
+ * headings are found line by line, and a CRLF file's `\r` would hide each one from the checks and from `flattenFolds`.
  */
 async function readRegularFile(path: string): Promise<string | null> {
+  const data = await readRegularBytes(path);
+  return data === null ? null : Buffer.from(data).toString("utf8").replaceAll("\r\n", "\n");
+}
+
+/**
+ * The file's bytes, or `null` when it isn't a regular file or can't be read. A session could leave a symlink to a
+ * file it can't read itself, and the runner would post that file to Linear, so the open never follows one (ADR
+ * 0007). `O_NONBLOCK` keeps a named pipe from holding the open. The Outbox posts and uploads these bytes, and never
+ * opens the path again, so a file the session swaps in after the check never reaches Linear.
+ */
+async function readRegularBytes(path: string): Promise<Uint8Array | null> {
   let handle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -217,7 +231,7 @@ async function readRegularFile(path: string): Promise<string | null> {
   }
   try {
     if (!(await handle.stat()).isFile()) return null;
-    return (await handle.readFile("utf8")).replaceAll("\r\n", "\n");
+    return new Uint8Array(await handle.readFile());
   } catch {
     return null;
   } finally {
