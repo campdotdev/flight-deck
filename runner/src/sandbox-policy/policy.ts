@@ -83,11 +83,12 @@ export function sandboxPolicy(target: SessionTarget | RefreshTarget): SessionSan
   }
 
   // `sandbox-runtime` doesn't make the working folder writable on its own, and the refresh writes into
-  // the cache, which is the one folder under the session root it may read beyond the session's rules.
+  // the cache, which is the one folder under the session root it may read beyond the session's rules. The
+  // refresh gets the session's `env` block, which puts the package manager's folders under `home/`.
   const cache = paths.cache(folders, target.repo);
   return {
     network: { ...network, allowLocalBinding: false },
-    filesystem: { denyRead, allowRead: [...allowRead, cache], allowWrite: [worktree, parts.deps, parts.tmp, cache], denyWrite },
+    filesystem: { denyRead, allowRead: [...allowRead, cache], allowWrite: [worktree, parts.deps, parts.tmp, parts.home, cache], denyWrite },
   };
 }
 

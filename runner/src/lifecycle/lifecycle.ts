@@ -46,15 +46,15 @@ export interface MoveOptions {
 export class Lifecycle {
   constructor(private readonly tracker: Tracker) {}
 
-  /** Whether any cause allows the move. */
-  allows(from: Role, to: Role): boolean {
-    return MOVES.some((row) => row.from === from && row.to === to);
+  /** Whether the table allows the move for this cause. */
+  allows(from: Role, to: Role, cause: Cause): boolean {
+    return MOVES.some((row) => row.from === from && row.to === to && row.cause === cause);
   }
 
   /** Makes the move when the table allows it, and returns a violation otherwise. */
   async move(issue: IssueRef & { role: Role }, to: Role, cause: Cause, options: MoveOptions = {}): Promise<MoveResult> {
     const from = issue.role;
-    if (!MOVES.some((row) => row.from === from && row.to === to && row.cause === cause)) {
+    if (!this.allows(from, to, cause)) {
       return { ok: false, violation: `${from} to ${to} is not a move for ${cause}` };
     }
     if (to === "duplicate") {

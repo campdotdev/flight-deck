@@ -76,6 +76,16 @@ export interface Reply {
 /** An open pause: its answers and when its comment landed. */
 export interface OpenPause {
   answers: Answer[];
+  /**
+   * The session whose handoff opened the pause. Only that handoff's retries keep it. A runner comment's pause
+   * has `""`, because no handoff opened it.
+   */
+  session: string;
+  /**
+   * Whether the move to Paused is still to land. The Outbox opens the pause before its comment, and marks the
+   * move landed after it. A pending pause waits in Planning, whether a factory session or a hand run opened it.
+   */
+  pending: boolean;
   /** The pause comment's creation time. Only later comments can answer it. */
   comment_at: string;
   /** Every comment posted after the pause comment that a snapshot has returned so far. */
@@ -98,8 +108,16 @@ export interface PendingComment {
   landed: ("post" | "move")[];
   /** The comment's creation time, once `post` landed. */
   comment_at: string | null;
+  /** ISO time the runner recorded the comment, before its first try. Only a comment from then on can be its post. */
+  since: string;
   /** ISO time of the last try. */
   tried_at: string;
+  /**
+   * For a pause: each comment posted after the runner's comment, or after `since` while the comment's creation
+   * time is unknown, that a snapshot returned while it waited, with the body the first snapshot that returned it
+   * saw. The landing keeps only those after the comment.
+   */
+  replies: Reply[];
   /** The issue's identifier, title, and URL, for the flag. */
   issue: string;
   title: string;
