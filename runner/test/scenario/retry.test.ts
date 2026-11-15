@@ -465,6 +465,29 @@ describe("a runner comment Linear refuses with a 5xx", () => {
     expect(world.tracker.stored(issue.id).status).toBe(status);
   });
 
+  test.each([
+    ["a question edited into retry doesn't answer", "Which prompt was it?", "retry", "Paused"],
+    ["retry edited into a question still answers", "retry", "Which prompt was it?", "Ready to plan"],
+  ])("whose move lands keeps a reply as the snapshot of that poll saw it: %s", async (_, first, edited, status) => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "no_init" } });
+    await world.tick();
+    world.tracker.refuse("move");
+    await world.tick();
+    const reply = world.reply(issue, first);
+    // The maintainer edits the reply while the poll that read it lands the move.
+    const move = world.tracker.move.bind(world.tracker);
+    world.tracker.move = async (ref, to) => {
+      await move(ref, to);
+      if (to === "paused") world.tracker.editComment(reply, edited);
+    };
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe(status);
+  });
+
   test("is dropped when the maintainer moves the issue before it lands", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     world.tracker.refuse("post");

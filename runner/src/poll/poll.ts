@@ -285,8 +285,9 @@ export class Poll {
   }
 
   /**
-   * Tries each runner comment Linear didn't take at an earlier poll again (spec 1, "The runner's own comments").
-   * Returns every issue that had one, landed or not, so nothing else happens to it this poll.
+   * Tries each runner comment Linear didn't take at an earlier poll again (spec 1, "The runner's own comments"),
+   * once a pause has kept this snapshot's replies. Returns every issue that had one, landed or not, so nothing
+   * else happens to it this poll.
    */
   private async pendingComments(now: Date, repo: TrackerRepo, snapshot: Snapshot): Promise<string[]> {
     const pending: string[] = [];
@@ -294,6 +295,8 @@ export class Poll {
     for (const { uuid, memory } of await this.state.issueMemories(repo.name)) {
       if (memory.pending === null) continue;
       pending.push(uuid);
+      // The snapshot's replies go in first, so the read that lands the pause can't replace a body this poll saw.
+      await this.keepPendingReplies(repo, snapshot, uuid);
       const result = await comments.retry(repo, uuid, snapshot.issues.find((issue) => issue.id === uuid) ?? null);
       await this.state.log(now, `${memory.pending.issue}: runner comment ${result}`);
     }
@@ -304,20 +307,15 @@ export class Poll {
 
   /**
    * For each issue with an open pause, keeps each comment posted after the pause comment as the first snapshot
-   * that returned it saw it, and so does a `blocked` issue's runner pause. Then it moves each paused issue when
-   * the oldest reply that names an answer does, and clears the flag (ADR 0019). Any other reply leaves the issue
-   * paused and flagged.
+   * that returned it saw it. Then it moves each paused issue when the oldest reply that names an answer does,
+   * and clears the flag (ADR 0019). Any other reply leaves the issue paused and flagged.
    */
   private async answers(now: Date, repo: TrackerRepo, snapshot: Snapshot, blocked: Set<string>): Promise<Set<string>> {
     // Every open pause's replies go into issue memory before any move, so a move that fails, on this issue or
     // another, still leaves them as first seen.
     const open: { issue: SnapshotIssue; memory: IssueMemory; pause: OpenPause }[] = [];
     for (const issue of snapshot.issues) {
-      if (blocked.has(issue.id)) {
-        await this.keepPendingReplies(repo, snapshot, issue.id);
-        continue;
-      }
-      if (issue.role !== "paused" && issue.role !== "planning") continue;
+      if ((issue.role !== "paused" && issue.role !== "planning") || blocked.has(issue.id)) continue;
       const memory = await this.state.issueMemory(repo.name, issue.id);
       const pause = memory.pause;
       // A pause in Planning keeps its replies, and takes no answer yet, only while its move to Paused is pending.
