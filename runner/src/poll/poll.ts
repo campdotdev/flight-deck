@@ -215,8 +215,9 @@ export class Poll {
    * working status, the maintainer moved it, and nothing is posted.
    */
   private async runnerPause(now: Date, repo: TrackerRepo, entry: SessionEntry, text: RunnerText, facts: RunnerFacts, workspace: Workspace): Promise<void> {
-    await this.finish(entry, workspace);
+    // Linear first: a read that fails leaves the entry, so the exit runs again at the next poll.
     const issue = await this.tracker.issue({ id: entry.issue_id, repo });
+    await this.finish(entry, workspace);
     const working = WORKING[entry.stage];
     if (working === undefined || issue.role !== working) {
       await this.state.log(now, `${entry.id} ${entry.issue}: left ${working}, no pause posted`);
@@ -463,8 +464,8 @@ export class Poll {
     if (retry === undefined) await this.state.writeSessions([...(await this.state.sessions()), entry]);
     else await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
     // A throw from here until the Harness holds the session, such as a failed Linear read, ends the start: the
-    // workspace and the entry go, so a `starting` entry with no session never holds a slot. A failed prepare or
-    // launch is a failed session instead.
+    // workspace and the entry go, so a `starting` entry with no session never holds a slot. A retry's entry
+    // waits as `retry_waiting` again. A failed prepare or launch is a failed session instead.
     let preparing = false;
     let minted = false;
     let handle: Handle;
@@ -557,7 +558,7 @@ export class Poll {
         await this.fail(now, repo, entry, { kind: "prepare", message }, { session: id, attempt: entry.attempt, prepare: message }, workspace);
       } else {
         await this.state.log(now, `${id} ${issue.identifier}: start failed: ${message}`);
-        await this.endStart(now, workspace, id, worktree, minted ? repo : null);
+        await this.endStart(now, workspace, id, worktree, minted ? repo : null, retry);
       }
       return;
     }
@@ -575,12 +576,17 @@ export class Poll {
     await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === id ? running : each)));
   }
 
-  /** Undoes a start that failed before the Harness held its session. Each step runs even when one before it fails. */
-  private async endStart(now: Date, workspace: Workspace, id: string, worktree: string, minted: TrackerRepo | null): Promise<void> {
+  /**
+   * Undoes a start that failed before the Harness held its session. Each step runs even when one before it fails.
+   * A retry's waiting entry takes its place back, with the attempt it had, so the next poll starts it again.
+   */
+  private async endStart(now: Date, workspace: Workspace, id: string, worktree: string, minted: TrackerRepo | null, retry?: SessionEntry): Promise<void> {
     const steps: [string, () => Promise<void>][] = [
       ["revoke", async () => (minted === null ? undefined : await this.tracker.revoke({ id, repo: minted }))],
       ["dispose", () => workspace.dispose({ session: id, worktree })],
-      ["drop", () => this.dropEntry(id)],
+      retry === undefined
+        ? ["drop", () => this.dropEntry(id)]
+        : ["requeue", async () => this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === id ? retry : each)))],
     ];
     for (const [name, step] of steps) {
       try {

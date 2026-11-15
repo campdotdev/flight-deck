@@ -260,6 +260,29 @@ describe("a retry", () => {
   });
 });
 
+describe("a retry whose start fails before its session runs", () => {
+  test("waits as retry_waiting again with the attempt it had, and the next poll starts it", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "timed_out" } });
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    // The retry's issue read fails once, as a network error would on the real adapter.
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 1;
+    world.tracker.issue = async (ref) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+    expect((await world.status()).sessions.map(({ state }) => state)).toEqual(["retry_waiting"]);
+    await world.tick();
+    expect(world.harness.started.map(({ sessionJson }) => sessionJson.attempt)).toEqual([1, 2]);
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
+  });
+});
+
 describe("no_init", () => {
   test("pauses without using the retry, flags the maintainer, and offers retry", async () => {
     const issue = world.issue({ title: "Save button is blue" });
@@ -299,6 +322,25 @@ describe("no_init", () => {
       { kind: "move", issue: issue.identifier, status: "Paused" },
     ]);
     expect(body).not.toContain("sk_live_transcript");
+  });
+
+  test("whose issue read fails stays queued, and the next poll posts the pause", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "no_init" } });
+    await world.tick();
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 1;
+    world.tracker.issue = async (ref) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    await world.tick();
+    expect(afterTake(issue)).toEqual([]);
+    await world.tick();
+    expect(afterTake(issue).map((write) => write.kind)).toEqual(["assign", "comment", "move"]);
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    expect(world.harness.started).toHaveLength(1);
   });
 
   test("on a retry pauses too, and its retry's next take has attempt 1", async () => {
@@ -357,6 +399,24 @@ describe("a runner comment Linear refuses with a 5xx", () => {
     expect(afterTake(issue).map((write) => write.kind)).toEqual(["assign", "comment", "move"]);
     expect(world.tracker.stored(issue.id).status).toBe("Paused");
     world.reply(issue, "retry");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+  });
+
+  test("whose move lands late still takes a reply posted after the comment, though the cursor passed it", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "no_init" } });
+    await world.tick();
+    world.tracker.refuse("move");
+    await world.tick();
+    expect(afterTake(issue).map((write) => write.kind)).toEqual(["assign", "comment"]);
+    // The maintainer answers before the move lands, and the poll that lands it skips the issue. A newer comment
+    // moves the repo's cursor past the answer.
+    world.reply(issue, "retry");
+    world.reply(issue, "The hover state should match.");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
     await world.tick();
     expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
   });
