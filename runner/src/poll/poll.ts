@@ -205,7 +205,8 @@ export class Poll {
         deadline: null,
         state: "retry_waiting",
       };
-      await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? waiting : each)));
+      // The entry moves to the end of the list, so retries start in the order they began waiting.
+      await this.state.writeSessions([...(await this.state.sessions()).filter((each) => each.id !== entry.id), waiting]);
       await this.state.log(now, `${entry.id} ${entry.issue}: failed (${failure.kind}), attempt ${waiting.attempt} waits for a place`);
       return;
     }

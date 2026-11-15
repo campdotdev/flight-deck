@@ -244,10 +244,10 @@ describe("a retry", () => {
     expect(world.harness.started).toHaveLength(2);
     const status = await world.status();
     expect(status.sessions.map(({ issue, state }) => ({ issue, state }))).toEqual([
-      { issue: first.identifier, state: "retry_waiting" },
       { issue: second.identifier, state: "running" },
+      { issue: first.identifier, state: "retry_waiting" },
     ]);
-    expect(status.sessions[0]).toMatchObject({ started_at: null, deadline: null });
+    expect(status.sessions[1]).toMatchObject({ started_at: null, deadline: null });
 
     // The second session fails too. The place it frees goes to the retry that waited longest.
     world.harness.finish(world.harness.started[1]!.session.id, { kind: "exited", code: 1 });
@@ -257,6 +257,33 @@ describe("a retry", () => {
       [second.identifier, 1],
       [first.identifier, 2],
     ]);
+  });
+
+  test("starts in the order the retries began waiting, not the order the sessions started", async () => {
+    world.config.concurrency_cap = 3;
+    await world.writeConfig();
+    const issues = [world.issue({ title: "Save button is blue" }), world.issue({ title: "Checkout crashes" }), world.issue({ title: "Search is slow" })];
+    for (const issue of issues) {
+      world.send(issue);
+      world.harness.script(issue.identifier, {});
+    }
+    await world.tick();
+    expect(world.harness.started).toHaveLength(3);
+    const [first, second, third] = issues as [StoredIssue, StoredIssue, StoredIssue];
+    const session = (issue: StoredIssue) => world.harness.started.find((each) => each.session.issue === issue.identifier)!.session.id;
+    // The maintainer lowers the cap, and the sessions fail in reverse start order while the third keeps its place.
+    world.config.concurrency_cap = 1;
+    await world.writeConfig();
+    world.harness.finish(session(second), { kind: "timed_out" });
+    await world.tick();
+    world.harness.finish(session(first), { kind: "timed_out" });
+    await world.tick();
+    expect(world.harness.started).toHaveLength(3);
+
+    // The third session fails too. The place it frees goes to the second, which began waiting first.
+    world.harness.finish(session(third), { kind: "exited", code: 1 });
+    await world.tick();
+    expect(world.harness.started.slice(3).map(({ session, sessionJson }) => [session.issue, sessionJson.attempt])).toEqual([[second.identifier, 2]]);
   });
 });
 
