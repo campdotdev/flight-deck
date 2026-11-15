@@ -44,7 +44,10 @@ interface RepoPoll {
   record: RecordResult | null;
   snapshot: Snapshot | null;
   waitingForSpecs: SnapshotIssue[];
-  /** The issues with a runner comment that hadn't landed at the start of this poll. Nothing else happens to them. */
+  /**
+   * The issues with a runner comment that hadn't landed at the start of this poll. Nothing else happens to them,
+   * except that a runner pause keeps its replies.
+   */
   blocked: Set<string>;
 }
 
@@ -301,23 +304,25 @@ export class Poll {
 
   /**
    * For each issue with an open pause, keeps each comment posted after the pause comment as the first snapshot
-   * that returned it saw it. Then it moves each paused issue when the oldest reply that names an answer does,
-   * and clears the flag (ADR 0019). Any other reply leaves the issue paused and flagged.
+   * that returned it saw it, and so does a `blocked` issue's runner pause. Then it moves each paused issue when
+   * the oldest reply that names an answer does, and clears the flag (ADR 0019). Any other reply leaves the issue
+   * paused and flagged.
    */
   private async answers(now: Date, repo: TrackerRepo, snapshot: Snapshot, blocked: Set<string>): Promise<Set<string>> {
     // Every open pause's replies go into issue memory before any move, so a move that fails, on this issue or
     // another, still leaves them as first seen.
     const open: { issue: SnapshotIssue; memory: IssueMemory; pause: OpenPause }[] = [];
     for (const issue of snapshot.issues) {
-      if ((issue.role !== "paused" && issue.role !== "planning") || blocked.has(issue.id)) continue;
+      if (blocked.has(issue.id)) {
+        await this.keepPendingReplies(repo, snapshot, issue.id);
+        continue;
+      }
+      if (issue.role !== "paused" && issue.role !== "planning") continue;
       const memory = await this.state.issueMemory(repo.name, issue.id);
       const pause = memory.pause;
       // A pause in Planning keeps its replies, and takes no answer yet, only while its move to Paused is pending.
       if (pause === null || (issue.role === "planning" && !pause.pending)) continue;
-      const known = new Set(pause.replies.map((reply) => reply.id));
-      const fresh: Reply[] = snapshot.comments
-        .filter((comment) => comment.issue === issue.id && comment.created_at > pause.comment_at && !known.has(comment.id))
-        .map(({ id, author, created_at, body, synced }) => ({ id, author, created_at, body, synced }));
+      const fresh = freshReplies(snapshot, issue.id, pause.comment_at, pause.replies);
       const seen: OpenPause = { ...pause, replies: [...pause.replies, ...fresh] };
       if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, issue.id, { ...memory, pause: seen });
       if (issue.role === "paused") open.push({ issue, memory, pause: seen });
@@ -338,6 +343,18 @@ export class Poll {
       handled.add(issue.id);
     }
     return handled;
+  }
+
+  /**
+   * A runner pause whose comment landed and whose other writes wait keeps each reply as the first snapshot that
+   * returned it saw it, though it takes no answer until it lands.
+   */
+  private async keepPendingReplies(repo: TrackerRepo, snapshot: Snapshot, uuid: string): Promise<void> {
+    const memory = await this.state.issueMemory(repo.name, uuid);
+    const pending = memory.pending;
+    if (pending === null || pending.pause === null || pending.comment_at === null) return;
+    const fresh = freshReplies(snapshot, uuid, pending.comment_at, pending.replies);
+    if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, uuid, { ...memory, pending: { ...pending, replies: [...pending.replies, ...fresh] } });
   }
 
   // 6. Flags.
@@ -662,6 +679,14 @@ export class Poll {
  */
 function ownedIssues(snapshot: Snapshot): SnapshotIssue[] {
   return snapshot.issues.filter((issue) => FACTORY_ROLES.includes(issue.role) && !(issue.role === "ready_to_plan" && hasSpec(issue)));
+}
+
+/** The snapshot's comments on the issue after `after` that `known` doesn't hold yet, as replies. */
+function freshReplies(snapshot: Snapshot, uuid: string, after: string, known: readonly Reply[]): Reply[] {
+  const ids = new Set(known.map((reply) => reply.id));
+  return snapshot.comments
+    .filter((comment) => comment.issue === uuid && comment.created_at > after && !ids.has(comment.id))
+    .map(({ id, author, created_at, body, synced }) => ({ id, author, created_at, body, synced }));
 }
 
 /** The repo as the Tracker needs it: the record's `[tracker]` when it's valid, or else the registration's copy. */

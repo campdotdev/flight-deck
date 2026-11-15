@@ -108,8 +108,15 @@ export interface PendingComment {
   landed: ("post" | "move")[];
   /** The comment's creation time, once `post` landed. */
   comment_at: string | null;
+  /** ISO time the runner recorded the comment, before its first try. Only a comment from then on can be its post. */
+  since: string;
   /** ISO time of the last try. */
   tried_at: string;
+  /**
+   * For a pause: each comment posted after the runner's comment that a snapshot returned while it waited, with
+   * the body the first snapshot that returned it saw.
+   */
+  replies: Reply[];
   /** The issue's identifier, title, and URL, for the flag. */
   issue: string;
   title: string;

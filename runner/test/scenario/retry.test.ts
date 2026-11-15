@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { SessionScript } from "../../src/harness/index.ts";
-import type { StoredIssue } from "../../src/tracker/index.ts";
+import { TrackerUnavailable, type StoredIssue } from "../../src/tracker/index.ts";
 import { outbox, World } from "./world.ts";
 
 let world: World;
@@ -421,6 +421,26 @@ describe("a runner comment Linear refuses with a 5xx", () => {
     expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
   });
 
+  test.each([
+    ["a question edited into retry doesn't answer", "Which prompt was it?", "retry", "Paused"],
+    ["retry edited into a question still answers", "retry", "Which prompt was it?", "Ready to plan"],
+  ])("whose move keeps failing keeps each reply as the first snapshot saw it: %s", async (_, first, edited, status) => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "no_init" } });
+    await world.tick();
+    world.tracker.refuse("move", { times: 2 });
+    await world.tick();
+    const reply = world.reply(issue, first);
+    // The move fails again, and the snapshot reads the reply while the comment waits.
+    await world.tick();
+    world.tracker.editComment(reply, edited);
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe(status);
+  });
+
   test("is dropped when the maintainer moves the issue before it lands", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     world.tracker.refuse("post");
@@ -433,5 +453,49 @@ describe("a runner comment Linear refuses with a 5xx", () => {
     await world.tick();
     expect(afterTake(issue)).toEqual([]);
     expect((await world.status()).flags).toEqual([]);
+  });
+});
+
+describe("a runner comment whose write lands without its response", () => {
+  test("finds the comment it posted, so it posts once and a reply to it still answers", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const post = world.tracker.post.bind(world.tracker);
+    let lost = 1;
+    world.tracker.post = async (ref, body, options) => {
+      const posted = await post(ref, body, options);
+      if (lost-- > 0) throw new TrackerUnavailable("network");
+      return posted;
+    };
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "no_init" } });
+    await world.tick();
+    await world.tick();
+    expect(afterTake(issue).map((write) => write.kind)).toEqual(["assign", "comment"]);
+    world.reply(issue, "retry");
+    await world.tick();
+    expect(afterTake(issue).map((write) => write.kind)).toEqual(["assign", "comment", "move"]);
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+  });
+
+  test("takes a move that landed as landed, and opens the pause", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const move = world.tracker.move.bind(world.tracker);
+    let lost = 1;
+    world.tracker.move = async (ref, to) => {
+      await move(ref, to);
+      if (to === "paused" && lost-- > 0) throw new TrackerUnavailable("network");
+    };
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "no_init" } });
+    await world.tick();
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    await world.tick();
+    world.reply(issue, "retry");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+    expect(afterTake(issue).filter((write) => write.kind === "move" && write.status === "Paused")).toHaveLength(1);
   });
 });
