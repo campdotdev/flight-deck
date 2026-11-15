@@ -113,8 +113,9 @@ export interface PendingComment {
   /** ISO time of the last try. */
   tried_at: string;
   /**
-   * For a pause: each comment posted after the runner's comment that a snapshot returned while it waited, with
-   * the body the first snapshot that returned it saw.
+   * For a pause: each comment posted after the runner's comment, or after `since` while the comment's creation
+   * time is unknown, that a snapshot returned while it waited, with the body the first snapshot that returned it
+   * saw. The landing keeps only those after the comment.
    */
   replies: Reply[];
   /** The issue's identifier, title, and URL, for the flag. */

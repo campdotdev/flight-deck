@@ -346,14 +346,15 @@ export class Poll {
   }
 
   /**
-   * A runner pause whose comment landed and whose other writes wait keeps each reply as the first snapshot that
-   * returned it saw it, though it takes no answer until it lands.
+   * A runner pause whose writes wait keeps each reply as the first snapshot that returned it saw it, though it
+   * takes no answer until it lands. Until its post's creation time is known, as after a lost response, every
+   * comment since the runner recorded it is kept, and the landing keeps only those after the comment.
    */
   private async keepPendingReplies(repo: TrackerRepo, snapshot: Snapshot, uuid: string): Promise<void> {
     const memory = await this.state.issueMemory(repo.name, uuid);
     const pending = memory.pending;
-    if (pending === null || pending.pause === null || pending.comment_at === null) return;
-    const fresh = freshReplies(snapshot, uuid, pending.comment_at, pending.replies);
+    if (pending === null || pending.pause === null) return;
+    const fresh = freshReplies(snapshot, uuid, pending.comment_at ?? pending.since, pending.replies);
     if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, uuid, { ...memory, pending: { ...pending, replies: [...pending.replies, ...fresh] } });
   }
 
@@ -572,7 +573,14 @@ export class Poll {
       const message = (error as Error).message;
       if (preparing) {
         await this.state.log(now, `${id} ${issue.identifier}: prepare failed: ${message}`);
-        await this.fail(now, repo, entry, { kind: "prepare", message }, { session: id, attempt: entry.attempt, prepare: message }, workspace);
+        try {
+          await this.fail(now, repo, entry, { kind: "prepare", message }, { session: id, attempt: entry.attempt, prepare: message }, workspace);
+        } catch (failError) {
+          // A second failure's pause reads Linear first, and no exit queues it again, so a read that throws ends
+          // the start as any other throw does: the retry waits again with its attempt, and the next poll starts it.
+          await this.state.log(now, `${id} ${issue.identifier}: failed start not handled: ${(failError as Error).message}`);
+          await this.endStart(now, workspace, id, worktree, null, retry);
+        }
       } else {
         await this.state.log(now, `${id} ${issue.identifier}: start failed: ${message}`);
         await this.endStart(now, workspace, id, worktree, minted ? repo : null, retry);

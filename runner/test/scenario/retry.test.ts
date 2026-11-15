@@ -281,6 +281,30 @@ describe("a retry whose start fails before its session runs", () => {
     expect(world.harness.started.map(({ sessionJson }) => sessionJson.attempt)).toEqual([1, 2]);
     expect(world.tracker.stored(issue.id).status).toBe("Planning");
   });
+
+  test("in prepare, whose pause can't read the issue, waits as retry_waiting again, and the next poll pauses", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    // A session folder can't be made under a read-only sessions folder, so prepare fails.
+    const sessions = join(world.folders.sessionRoot, "sessions");
+    await mkdir(sessions, { recursive: true });
+    await chmod(sessions, 0o500);
+    world.send(issue);
+    await world.tick();
+    // The start reads the issue, and then the pause's read fails, as a network error would on the real adapter.
+    const read = world.tracker.issue.bind(world.tracker);
+    let calls = 0;
+    world.tracker.issue = async (ref) => {
+      if (++calls === 2) throw new Error("fetch failed");
+      return read(ref);
+    };
+    await world.tick();
+    expect((await world.status()).sessions.map(({ state }) => state)).toEqual(["retry_waiting"]);
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    await chmod(sessions, 0o700);
+  });
 });
 
 describe("no_init", () => {
@@ -477,6 +501,33 @@ describe("a runner comment whose write lands without its response", () => {
     expect(world.tracker.stored(issue.id).status).toBe("Paused");
     await world.tick();
     expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+  });
+
+  test.each([
+    ["a question edited into retry doesn't answer", "Which prompt was it?", "retry", "Paused"],
+    ["retry edited into a question still answers", "retry", "Which prompt was it?", "Ready to plan"],
+  ])("keeps each reply the snapshot saw before it found the comment: %s", async (_, first, edited, status) => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const post = world.tracker.post.bind(world.tracker);
+    let reply = "";
+    world.tracker.post = async (ref, body, options) => {
+      const posted = await post(ref, body, options);
+      // The maintainer replies before the lost response would have come back, so this poll's snapshot reads it.
+      if (reply === "") {
+        reply = world.reply(issue, first);
+        throw new TrackerUnavailable("network");
+      }
+      return posted;
+    };
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "no_init" } });
+    await world.tick();
+    await world.tick();
+    world.tracker.editComment(reply, edited);
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe(status);
   });
 
   test("takes a move that landed as landed, and opens the pause", async () => {
