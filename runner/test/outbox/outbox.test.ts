@@ -247,14 +247,6 @@ describe("an issue in a status that maps to no role", () => {
 });
 
 describe("follow-up issues", () => {
-  test("fail the outbox until the Outbox can file them, and nothing is written", async () => {
-    await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
-    await mkdir(join(sessionFolder, "outbox", "follow-ups"));
-    await writeFile(join(sessionFolder, "outbox", "follow-ups", "1.md"), "# Theme tokens drift\n\nThe theme has two greens.");
-    expect(await apply()).toEqual({ result: "failed", rule: "the Outbox can't file follow-up issues yet", writes: [] });
-    expect(tracker.writes).toEqual([]);
-  });
-
   test("an empty follow-ups folder files nothing and fails nothing", async () => {
     await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
     await mkdir(join(sessionFolder, "outbox", "follow-ups"));
@@ -263,32 +255,26 @@ describe("follow-up issues", () => {
 });
 
 describe("media", () => {
-  test("fails the outbox until the Outbox can upload it, and nothing is written", async () => {
-    await leave(outbox.brief({ summary: SUMMARY, brief: `${BRIEF}\n\n![Before](before.png)`, version: VERSION }));
-    await mkdir(join(sessionFolder, "outbox", "media"));
-    await writeFile(join(sessionFolder, "outbox", "media", "before.png"), "png");
-    expect(await apply()).toEqual({ result: "failed", rule: "the Outbox can't upload media yet", writes: [] });
-    expect(tracker.writes).toEqual([]);
-  });
-
   test("an empty media folder, which prepare makes for every session, fails nothing", async () => {
     await leave(outbox.brief({ summary: SUMMARY, brief: BRIEF, version: VERSION }));
     await mkdir(join(sessionFolder, "outbox", "media"));
     expect(await apply()).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
   });
 
+  const other = "shows an image by reference or HTML, so it names no file in media/: use ![alt](file)";
   test.each([
-    ["brief.md", "a URL", "![Before](https://example.com/before.png)"],
-    ["brief.md", "a path", "![Before](/Users/maintainer/before.png)"],
-    ["brief.md", "a media file the folder doesn't hold", "![Before](before.png)"],
-    ["brief.md", "a reference", "![Before][before]\n\n[before]: https://example.com/before.png"],
-    ["brief.md", "an HTML tag", '<img src="https://example.com/before.png">'],
-    ["summary.md", "a URL", "![Before](https://example.com/before.png)"],
-  ])("%s that shows an image by %s fails the outbox, and nothing is written", async (name, _, image) => {
+    ["brief.md", "a URL", "![Before](https://example.com/before.png)", "names the image https://example.com/before.png, which isn't a bare file name in media/"],
+    ["brief.md", "a path", "![Before](/Users/maintainer/before.png)", "names the image /Users/maintainer/before.png, which isn't a bare file name in media/"],
+    ["brief.md", "a media file the folder doesn't hold", "![Before](before.png)", "names the image before.png, which media/ doesn't hold"],
+    ["brief.md", "a reference", "![Before][before]\n\n[before]: https://example.com/before.png", other],
+    ["brief.md", "an HTML tag", '<img src="https://example.com/before.png">', other],
+    ["brief.md", "a target with a space", "![Before](https://example.com/before one.png)", other],
+    ["summary.md", "a URL", "![Before](https://example.com/before.png)", "names the image https://example.com/before.png, which isn't a bare file name in media/"],
+  ])("%s that shows an image by %s fails the outbox, and nothing is written", async (name, _, image, rule) => {
     const brief = name === "brief.md" ? `${BRIEF}\n\n${image}` : BRIEF;
     const summary = name === "summary.md" ? `${SUMMARY}\n\n${image}` : SUMMARY;
     await leave(outbox.brief({ summary, brief, version: VERSION }));
-    expect(await apply()).toEqual({ result: "failed", rule: `${name} names an image, and the Outbox can't upload media yet`, writes: [] });
+    expect(await apply()).toEqual({ result: "failed", rule: `${name} ${rule}`, writes: [] });
     expect(tracker.writes).toEqual([]);
   });
 

@@ -306,7 +306,7 @@ describe("an exit whose handling throws", () => {
     expect((await world.status()).sessions).toEqual([]);
     for (const issue of [one, two]) {
       expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
-      expect(world.tracker.writes.filter((write) => write.issue === issue.identifier && write.kind === "comment")).toHaveLength(1);
+      expect(world.tracker.writes.filter((write) => write.kind === "comment" && write.issue === issue.identifier)).toHaveLength(1);
     }
   });
 });

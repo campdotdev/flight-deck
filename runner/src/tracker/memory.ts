@@ -2,10 +2,19 @@
 // relies on, and records every write. Scenarios build their world through its `add*` methods and assert on
 // `writes`. The Tracker contract suite checks the same behavior against real Linear.
 import type { Role } from "../record/index.ts";
-import { briefDescription, plusFolds } from "./folds.ts";
+import { briefDescription, plusFolds, unsigned } from "./folds.ts";
 import { FACTORY_ROLES, roleOf } from "./roles.ts";
+import {
+  IssueNotFoundError,
+  type FiledIssue,
+  type IssueDraft,
+  type IssueRef,
+  type RelationKind,
+  type StatusType,
+  type SyncedIssueRef,
+  type UploadFile,
+} from "./types.ts";
 import type {
-  IssueRef,
   PostedComment,
   PostOptions,
   Snapshot,
@@ -20,9 +29,6 @@ import type {
   WriteBriefOptions,
 } from "./types.ts";
 
-/** Linear's status types. */
-export type StatusType = "triage" | "backlog" | "unstarted" | "started" | "completed" | "canceled" | "duplicate";
-
 /** One write the runner made, in the order Linear would have seen it. `issue` is the identifier. */
 export type TrackerWrite =
   | { kind: "move"; issue: string; status: string }
@@ -31,7 +37,11 @@ export type TrackerWrite =
   | { kind: "unsubscribe"; issue: string; user: string }
   | { kind: "comment"; issue: string; body: string }
   | { kind: "description"; issue: string; description: string }
-  | { kind: "duplicate"; issue: string; of: string; status: string };
+  | { kind: "duplicate"; issue: string; of: string; status: string }
+  | { kind: "detach"; issue: string; attachment: string }
+  | { kind: "upload"; name: string; url: string }
+  | { kind: "file"; issue: string; title: string; description: string; status: string }
+  | { kind: "relate"; issue: string; other: string; relation: RelationKind };
 
 export interface TokenRecord {
   session: string;
@@ -56,11 +66,18 @@ export interface StoredIssue {
   priority: number;
   created_at: string;
   comments: TrackerComment[];
+  /** The GitHub sync attachment, which stays after a detach as the link to the GitHub issue. */
   sync_attachment: string | null;
+  /** Whether the GitHub sync is on. */
+  synced: boolean;
   duplicate_of: string | null;
+  /** The relations `relate` made from this issue, by the other issue's UUID. */
+  relations: { kind: RelationKind; issue: string }[];
 }
 
 export interface NewIssue {
+  /** The issue's UUID, when the caller chooses it. */
+  id?: string;
   team: string;
   title: string;
   /** A status name on the team. */
@@ -97,6 +114,8 @@ export class InMemoryTracker implements Tracker {
   readonly writes: TrackerWrite[] = [];
   /** Every Reader token minted, in order. */
   readonly tokens: TokenRecord[] = [];
+  /** Each uploaded file's bytes, by the URL `upload` returned. */
+  readonly uploads = new Map<string, Uint8Array>();
 
   private readonly clock: () => Date;
   /** The user every write acts as: the Flight Deck app user, or the maintainer for a hand run. */
@@ -123,13 +142,17 @@ export class InMemoryTracker implements Tracker {
 
   /** Files an issue as its creator, which subscribes them. */
   addIssue(input: NewIssue): StoredIssue {
+    return this.create(input);
+  }
+
+  private create(input: NewIssue): StoredIssue {
     const team = this.team(input.team);
     this.statusOf(team, input.status);
     const now = this.now();
     const subscribers = [input.creator];
     if (input.assignee !== undefined && input.assignee !== input.creator) subscribers.push(input.assignee);
     const issue: StoredIssue = {
-      id: this.newId("issue"),
+      id: input.id ?? this.newId("issue"),
       identifier: `${team.key}-${team.next++}`,
       team: team.key,
       title: input.title,
@@ -145,7 +168,9 @@ export class InMemoryTracker implements Tracker {
       created_at: now,
       comments: [],
       sync_attachment: input.synced === true ? this.newId("attachment") : null,
+      synced: input.synced === true,
       duplicate_of: null,
+      relations: [],
     };
     this.issues.set(issue.id, issue);
     return issue;
@@ -178,10 +203,26 @@ export class InMemoryTracker implements Tracker {
     issue.status_since = this.now();
   }
 
+  /** An issue the maintainer deletes. */
+  deleteIssue(issueId: string): void {
+    this.issues.delete(this.stored(issueId).id);
+  }
+
+  /** An issue the maintainer moves to another team, which gives it that team's next identifier. */
+  moveToTeam(issueId: string, key: string, status: string): void {
+    const issue = this.stored(issueId);
+    const team = this.team(key);
+    this.statusOf(team, status);
+    issue.team = team.key;
+    issue.identifier = `${team.key}-${team.next++}`;
+    issue.status = status;
+    issue.status_since = this.now();
+  }
+
   /** The stored issue, by UUID or identifier. */
   stored(id: string): StoredIssue {
     const issue = this.issues.get(id) ?? [...this.issues.values()].find((each) => each.identifier === id);
-    if (issue === undefined) throw new Error(`no issue ${id}`);
+    if (issue === undefined) throw new IssueNotFoundError(id);
     return issue;
   }
 
@@ -204,10 +245,13 @@ export class InMemoryTracker implements Tracker {
     const issue = this.stored(ref.id);
     return {
       ...this.read(issue, ref.repo),
+      team: issue.team,
+      status_type: this.statusOf(this.team(issue.team), issue.status).type,
       description: issue.description,
       creator: issue.creator,
       comments: issue.comments.map((comment) => ({ ...comment })),
-      sync_attachment: issue.sync_attachment,
+      synced: issue.synced,
+      sync_attachment: issue.synced ? issue.sync_attachment : null,
     };
   }
 
@@ -268,6 +312,37 @@ export class InMemoryTracker implements Tracker {
     this.writes.push({ kind: "duplicate", issue: issue.identifier, of: original.identifier, status });
   }
 
+  async file(draft: IssueDraft, role: Role): Promise<FiledIssue> {
+    const status = this.statusFor(draft.repo, role);
+    if (draft.id !== undefined && this.issues.has(draft.id)) throw new Error(`an issue with the UUID ${draft.id} exists`);
+    // Filing subscribes the creator, as Linear does.
+    const issue = this.create({ ...(draft.id === undefined ? {} : { id: draft.id }), team: draft.repo.team, title: draft.title, description: draft.description, status, creator: this.actor });
+    this.writes.push({ kind: "file", issue: issue.identifier, title: issue.title, description: issue.description, status });
+    return { id: issue.id, repo: draft.repo, identifier: issue.identifier, url: this.url(draft.repo, issue) };
+  }
+
+  async relate(ref: IssueRef, other: IssueRef, kind: RelationKind): Promise<void> {
+    const issue = this.stored(ref.id);
+    const to = this.stored(other.id);
+    issue.relations.push({ kind, issue: to.id });
+    this.writes.push({ kind: "relate", issue: issue.identifier, other: to.identifier, relation: kind });
+  }
+
+  async detach(ref: SyncedIssueRef): Promise<void> {
+    const issue = this.stored(ref.id);
+    if (!issue.synced || issue.sync_attachment !== ref.sync_attachment) throw new Error(`${issue.identifier} isn't synced through ${ref.sync_attachment}`);
+    issue.synced = false;
+    this.writes.push({ kind: "detach", issue: issue.identifier, attachment: ref.sync_attachment });
+  }
+
+  async upload(file: UploadFile): Promise<string> {
+    // Linear's `fileUpload` returns a signed asset URL. The adapter strips the signature, as the Linear adapter does.
+    const url = unsigned(`https://uploads.linear.app/workspace/${this.newId("upload")}/${encodeURIComponent(file.name)}?signature=signed`);
+    this.uploads.set(url, file.data);
+    this.writes.push({ kind: "upload", name: file.name, url });
+    return url;
+  }
+
   async sessionToken(session: TokenSession): Promise<string> {
     const token = `reader-${session.id}-${this.tokens.length + 1}`;
     this.tokens.push({ session: session.id, token, revoked: false });
@@ -302,13 +377,14 @@ export class InMemoryTracker implements Tracker {
     return read.role === null ? null : { ...read, role: read.role };
   }
 
+  /** The fields a snapshot and `issue` share, with a `null` role for a status the repo's roles don't name. */
   private read(issue: StoredIssue, repo: TrackerRepo): Omit<SnapshotIssue, "role"> & { role: Role | null } {
     return {
       id: issue.id,
       repo,
       identifier: issue.identifier,
       title: issue.title,
-      url: `https://linear.app/${repo.workspace}/issue/${issue.identifier}`,
+      url: this.url(repo, issue),
       role: roleOf(repo, issue.status),
       status: issue.status,
       status_since: issue.status_since,
@@ -319,6 +395,10 @@ export class InMemoryTracker implements Tracker {
       priority: issue.priority,
       created_at: issue.created_at,
     };
+  }
+
+  private url(repo: TrackerRepo, issue: StoredIssue): string {
+    return `https://linear.app/${repo.workspace}/issue/${issue.identifier}`;
   }
 
   private statusFor(repo: TrackerRepo, role: Role): string {
