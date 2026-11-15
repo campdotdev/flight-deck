@@ -121,7 +121,7 @@ export class RunnerComments {
       return "pending";
     }
     const memory = await this.state.issueMemory(repo.name, uuid);
-    const pause = pending.pause === null ? memory.pause : { answers: pending.pause.answers, comment_at: pending.comment_at ?? pending.tried_at, replies: [] };
+    const pause = pending.pause === null ? memory.pause : { answers: pending.pause.answers, session: "", pending: false, comment_at: pending.comment_at ?? pending.tried_at, replies: [] };
     await this.state.writeIssueMemory(repo.name, uuid, { ...memory, pause, pending: null });
     return "landed";
   }
