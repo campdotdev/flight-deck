@@ -47,8 +47,11 @@ export type ExitKind =
   | { kind: "stopped" }
   | { kind: "login_expired" };
 
-/** Every exit names the transcript and the Claude Code version. */
-export type Exit = ExitKind & { transcript: string; claudeCodeVersion: string };
+/**
+ * Every exit names the transcript and the Claude Code version. `error` is the last error message from the
+ * session's `result` event, when it had one. A runner comment's Details fold shows it (ADR 0019).
+ */
+export type Exit = ExitKind & { transcript: string; claudeCodeVersion: string; error?: string };
 
 /** One `rate_limit_event` from the stream. The Harness contract suite's fixtures pin its fields. */
 export interface RateLimitEvent {

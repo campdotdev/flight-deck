@@ -76,7 +76,10 @@ export interface Reply {
 /** An open pause: its answers and when its comment landed. */
 export interface OpenPause {
   answers: Answer[];
-  /** The session whose handoff opened the pause. Only that handoff's retries keep it. */
+  /**
+   * The session whose handoff opened the pause. Only that handoff's retries keep it. A runner comment's pause
+   * has `""`, because no handoff opened it.
+   */
   session: string;
   /**
    * Whether the move to Paused is still to land. The Outbox opens the pause before its comment, and marks the
@@ -89,6 +92,38 @@ export interface OpenPause {
   replies: Reply[];
 }
 
+/**
+ * A runner comment Linear didn't take yet, with the writes that go with it (spec 1, "The runner's own
+ * comments"). The runner tries it again at each poll, and nothing else happens to the issue until it lands.
+ */
+export interface PendingComment {
+  body: string;
+  /** The comment's status line, for the flag. */
+  status_line: string;
+  /** The flag's cause, or `null` for a comment that flags no one, such as the stop pause. */
+  flag: FlagCause | null;
+  /** For a pause: the role it moves the issue from, and its answers. `null` for a comment that moves nothing. */
+  pause: { from: Role; answers: Answer[] } | null;
+  /** The writes that landed so far, in order: `post`, then `move`. */
+  landed: ("post" | "move")[];
+  /** The comment's creation time, once `post` landed. */
+  comment_at: string | null;
+  /** ISO time the runner recorded the comment, before its first try. Only a comment from then on can be its post. */
+  since: string;
+  /** ISO time of the last try. */
+  tried_at: string;
+  /**
+   * For a pause: each comment posted after the runner's comment, or after `since` while the comment's creation
+   * time is unknown, that a snapshot returned while it waited, with the body the first snapshot that returned it
+   * saw. The landing keeps only those after the comment.
+   */
+  replies: Reply[];
+  /** The issue's identifier, title, and URL, for the flag. */
+  issue: string;
+  title: string;
+  url: string;
+}
+
 /** One issue's memory, keyed by Linear's UUID. Later tickets add the attempt and more. */
 export interface IssueMemory {
   /** The brief the runner last wrote for the issue, or `null`. */
@@ -97,9 +132,11 @@ export interface IssueMemory {
   flag: Flag | null;
   /** The open pause, or `null`. */
   pause: OpenPause | null;
+  /** A runner comment Linear didn't take yet, or `null`. */
+  pending: PendingComment | null;
 }
 
-const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null };
+const EMPTY_MEMORY: IssueMemory = { brief: null, flag: null, pause: null, pending: null };
 
 export class State {
   constructor(private readonly folders: Folders) {}
