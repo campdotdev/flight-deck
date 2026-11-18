@@ -335,6 +335,30 @@ describe("a repo whose snapshot fails", () => {
   });
 });
 
+describe("a repo whose team query fails", () => {
+  test("skips only that repo's starts, as a failed snapshot does", async () => {
+    const first = world.config.repos[0]!;
+    const second = "campdotdev/shaders-docs";
+    await world.addRepo(second, "DOC");
+    // The first repo's team query fails, as a network error would on the real adapter.
+    const checkTeam = world.tracker.checkTeam.bind(world.tracker);
+    world.tracker.checkTeam = async (repo) => {
+      if (repo.name === first.name) throw new Error("fetch failed");
+      return checkTeam(repo);
+    };
+    const [held, issue] = ["SHA", "DOC"].map((team) => world.issue({ team, title: "Save button is blue", description: REPORT }));
+    for (const each of [held!, issue!]) {
+      world.send(each);
+      world.harness.script(each.identifier, {});
+    }
+    await world.tick();
+    expect(world.harness.started.map(({ session }) => [session.repo, session.issue])).toEqual([[second, issue!.identifier]]);
+    const status = await world.status();
+    expect(status.polled_at).toBe(world.now.toISOString());
+    expect(status.trouble).toEqual([]);
+  });
+});
+
 describe("a repo whose answers, flags, or subscriptions step fails", () => {
   test("skips only that repo's starts, as a failed snapshot does", async () => {
     const first = world.config.repos[0]!;

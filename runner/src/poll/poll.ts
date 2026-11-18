@@ -292,11 +292,17 @@ export class Poll {
         await this.state.writeLastRecord(registration.name, { commit: fetch.head, read_at: now.toISOString(), record: record.record });
       }
     }
-    const repo = await this.checkTeam(config, credentials, registration, record?.ok === true ? record.record : null, trouble);
+    // A failed Linear call, such as a network error or a 5xx, in the team query, the snapshot, or steps 5 to 8
+    // skips this repo's starts for this poll only. The other repos still poll, and the tick still publishes the
+    // heartbeat and `status.json`.
+    let repo: { repo: TrackerRepo; usable: boolean } | null = null;
+    try {
+      repo = await this.checkTeam(config, credentials, registration, record?.ok === true ? record.record : null, trouble);
+    } catch (error) {
+      await this.state.log(now, `${registration.name}: team check failed: ${(error as Error).message}`);
+    }
 
-    // 3. Snapshot, with the comments since the repo's cursor. A failed Linear call, such as a network error or a
-    // 5xx, in the snapshot or in steps 5 to 8 skips this repo's starts for this poll only. The other repos still
-    // poll, and the tick still publishes the heartbeat and `status.json`.
+    // 3. Snapshot, with the comments since the repo's cursor.
     let snapshot: Snapshot | null = null;
     if (repo !== null && repo.usable) {
       try {
