@@ -1,7 +1,7 @@
 // Workspace runs with real git in a temporary root (spec 1, "Other module tests").
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, stat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { paths } from "../../src/folders/index.ts";
 import { readRecord, type RepoRecord } from "../../src/record/index.ts";
@@ -67,6 +67,23 @@ describe("the clone", () => {
     const { head } = (await workspace.fetch(registration())) as { head: string };
     expect(await workspace.show(registration(), head, ".flight-deck/record.toml")).toBe(SHADERS_RECORD);
     expect(await workspace.show(registration(), head, "missing.toml")).toBeNull();
+  });
+
+  test("isFile holds only for a regular file at the commit, not a directory, a symlink, or a path through one", async () => {
+    await world.push({ "skills/a/SKILL.md": "---\nname: a\n---\n", "skills/b/SKILL.md/notes.md": "not a skill\n" });
+    const work = join(world.root, "links");
+    git(world.root, "clone", "-q", world.remote, work);
+    await symlink("../a/SKILL.md", join(work, "skills", "c-SKILL.md"));
+    await symlink("a", join(work, "skills", "d"));
+    git(work, "add", "-A");
+    git(work, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "Links");
+    git(work, "push", "-q", "origin", "HEAD:main");
+    const { head } = (await workspace.fetch(registration())) as { head: string };
+    expect(await workspace.isFile(registration(), head, "skills/a/SKILL.md")).toBe(true);
+    expect(await workspace.isFile(registration(), head, "skills/b/SKILL.md")).toBe(false);
+    expect(await workspace.isFile(registration(), head, "skills/c-SKILL.md")).toBe(false);
+    expect(await workspace.isFile(registration(), head, "skills/d/SKILL.md")).toBe(false);
+    expect(await workspace.isFile(registration(), head, "skills/missing/SKILL.md")).toBe(false);
   });
 
   test("a failed fetch keeps the last fetched commit", async () => {
