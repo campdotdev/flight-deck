@@ -232,6 +232,26 @@ describe("a session that runs to its end", () => {
     expect(seen).toMatchObject({ kind: "exited", code: 3, transcript: session.transcript, claudeCodeVersion: "2.1.321" });
   });
 
+  test("a transcript it can't write fails the start before claude runs", async () => {
+    const h = await makeHarness(await fakeClaude(`cat ${INIT}`));
+    const session = await makeSession("tr0001");
+    await mkdir(join(session.transcript, ".."), { recursive: true });
+    await writeFile(session.transcript, "");
+    await chmod(session.transcript, 0o444);
+    await expect(h.start(session, { exit: () => {}, rateLimit: () => {} })).rejects.toThrow();
+    await Bun.sleep(100);
+    expect(existsSync(join(root, "args"))).toBe(false);
+  });
+
+  test("an exit.json it can't write still cleans up and reports the exit", async () => {
+    const h = await makeHarness(await fakeClaude(`cat ${INIT}; cat ${RESULT}`));
+    const session = await makeSession("ex0001");
+    // A folder where the file goes makes the write fail.
+    await mkdir(join(session.sessionFolder, "exit.json"));
+    const exit = await new Promise<Exit>((done) => void h.start(session, { exit: done, rateLimit: () => {} }));
+    expect(exit).toMatchObject({ kind: "exited", code: 0 });
+  });
+
   test("reports each rate_limit_event while the session runs", async () => {
     const h = await makeHarness(await fakeClaude(`cat ${INIT}; cat ${RATE_LIMIT}; sleep 0.3; cat ${RESULT}`));
     const run = await start(h, "m4n5o6");
@@ -315,6 +335,23 @@ describe("the watchdogs", () => {
     await h.stop(run.handle);
     expect(await run.exit).toMatchObject({ kind: "stopped" });
     expect(run.exitedAt() - asked).toBeLessThan(2_000);
+  });
+
+  // A background process holds the output pipe open, so the adapter waits out its drain after claude exits.
+  const leavesPipeOpen = `cat ${INIT}; cat ${RESULT}; sleep 0.8 & exit 0`;
+
+  test("a deadline during the drain after claude exits leaves the exit as it was", async () => {
+    const h = await makeHarness(await fakeClaude(leavesPipeOpen));
+    const run = await start(h, "drain1", { deadline: new Date(Date.now() + 400) });
+    expect(await run.exit).toMatchObject({ kind: "exited", code: 0 });
+  });
+
+  test("a stop during the drain after claude exits leaves the exit as it was", async () => {
+    const h = await makeHarness(await fakeClaude(leavesPipeOpen));
+    const run = await start(h, "drain2");
+    await waitFor(() => !alive(run.handle.pid));
+    await h.stop(run.handle);
+    expect(await run.exit).toMatchObject({ kind: "exited", code: 0 });
   });
 
   test("a stop before init wins over no_init", async () => {

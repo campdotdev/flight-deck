@@ -1,10 +1,11 @@
 // An `exited` exit, whatever its code (spec 1, "Exits"). If the issue still sits in the stage's working
-// status, the runner applies the outbox, and the Outbox's result decides. Otherwise the maintainer moved it:
-// the outbox is discarded, with no retry and no pause.
+// status, the runner applies the outbox, and the Outbox's result decides. So does an outbox whose move landed
+// at an earlier try of this exit. Otherwise the maintainer moved the issue: the outbox is discarded, with no
+// retry and no pause.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { sessionParts } from "../../folders/index.ts";
-import type { ApplyResult } from "../../outbox/index.ts";
+import { Outbox, type ApplyResult } from "../../outbox/index.ts";
 import { WORKING } from "../stages.ts";
 import type { ExitContext, ExitHandler } from "./context.ts";
 
@@ -21,7 +22,9 @@ const RESULTS: ResultHandlers = {
 
 export const exited: ExitHandler = async (context) => {
   const issue = await context.tracker.issue({ id: context.entry.issue_id, repo: context.repo });
-  if (issue.role !== WORKING[context.entry.stage]) {
+  // An apply whose move landed before a lost response or a failed write after it runs again, so the writes after
+  // the move still land. The Outbox's check refuses any other status the maintainer moved the issue to.
+  if (issue.role !== WORKING[context.entry.stage] && !(await Outbox.moved(context.sessionFolder, issue.role))) {
     await context.log(`left ${WORKING[context.entry.stage]}, outbox discarded`);
     return context.finish();
   }

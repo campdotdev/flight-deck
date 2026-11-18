@@ -97,6 +97,7 @@ function proseLines(text: string): string[] {
     }
     lines.push(line);
   }
-  // A code span opens with a run of backticks and closes at the next run of the same length, across lines.
-  return lines.join("\n").replace(/(`+)[\s\S]*?\1/g, (span) => " ".repeat(span.length)).split("\n");
+  // A code span opens with a whole run of backticks and closes at the next whole run of the same length, across
+  // lines. A run with no such closer stays text.
+  return lines.join("\n").replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, (span) => " ".repeat(span.length)).split("\n");
 }
