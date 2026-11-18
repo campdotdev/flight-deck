@@ -140,7 +140,7 @@ export interface IssueMemory {
 export interface LastRecord {
   /** The default branch's commit it was read at. */
   commit: string;
-  /** ISO time of the read. */
+  /** ISO time of the latest poll that read it. */
   read_at: string;
   record: RepoRecord;
 }

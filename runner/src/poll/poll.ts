@@ -247,11 +247,11 @@ export class Poll {
     if (!fetch.ok) await this.state.log(now, `${registration.name}: fetch failed: ${fetch.error}`);
 
     // 2. Check the team. The record on the default branch names it, or else the registration's copy does.
-    // State keeps the last valid record, for the stale-take limits.
+    // State keeps the last valid record and the time of its latest read, for the stale-take limits.
     let record: RecordResult | null = null;
     if (fetch.ok) {
       record = await this.recordAt(workspace, registration, fetch.head);
-      if (record?.ok === true && (await this.state.lastRecord(registration.name))?.commit !== fetch.head) {
+      if (record?.ok === true) {
         await this.state.writeLastRecord(registration.name, { commit: fetch.head, read_at: now.toISOString(), record: record.record });
       }
     }
@@ -303,7 +303,7 @@ export class Poll {
     return resolveSlots(read.record, {
       commit,
       shipped: (name) => existsSync(join(this.versionFolder, "skills", name, "SKILL.md")),
-      inRepo: async (path) => (await workspace.show(registration, commit, `${path}/SKILL.md`)) !== null,
+      inRepo: (path) => workspace.isFile(registration, commit, `${path}/SKILL.md`),
     });
   }
 

@@ -114,6 +114,19 @@ export class Workspace {
     return shown.ok ? shown.out : null;
   }
 
+  /**
+   * Whether the commit holds a regular file at the path. A directory, a symlink, or a submodule at the path, or a
+   * symlink on the way to it, is no file, so a slot that names one never reaches a session.
+   */
+  async isFile(repo: Registration, commit: string, path: string): Promise<boolean> {
+    const listed = await this.git(paths.clone(this.folders, repo.name), "ls-tree", "-z", commit, "--", path);
+    if (!listed.ok) return false;
+    const [entry = ""] = listed.out.split("\0");
+    const tab = entry.indexOf("\t");
+    const [mode, type] = entry.slice(0, tab).split(" ");
+    return tab > 0 && type === "blob" && entry.slice(tab + 1) === path && (mode === "100644" || mode === "100755");
+  }
+
   /** A new session ID: 6 lowercase base-36 characters that no session folder, worktree, transcript, or hand run has. */
   async newSessionId(): Promise<string> {
     const taken = await this.takenIds();
