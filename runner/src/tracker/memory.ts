@@ -78,6 +78,8 @@ export interface StoredIssue {
 }
 
 export interface NewIssue {
+  /** The issue's UUID, when the caller chooses it. */
+  id?: string;
   team: string;
   title: string;
   /** A status name on the team. */
@@ -171,7 +173,7 @@ export class InMemoryTracker implements Tracker {
     const subscribers = [input.creator];
     if (input.assignee !== undefined && input.assignee !== input.creator) subscribers.push(input.assignee);
     const issue: StoredIssue = {
-      id: this.newId("issue"),
+      id: input.id ?? this.newId("issue"),
       identifier: `${team.key}-${team.next++}`,
       team: team.key,
       title: input.title,
@@ -218,6 +220,22 @@ export class InMemoryTracker implements Tracker {
   setStatus(issueId: string, status: string): void {
     const issue = this.stored(issueId);
     this.statusOf(this.team(issue.team), status);
+    issue.status = status;
+    issue.status_since = this.now();
+  }
+
+  /** An issue the maintainer deletes. */
+  deleteIssue(issueId: string): void {
+    this.issues.delete(this.stored(issueId).id);
+  }
+
+  /** An issue the maintainer moves to another team, which gives it that team's next identifier. */
+  moveToTeam(issueId: string, key: string, status: string): void {
+    const issue = this.stored(issueId);
+    const team = this.team(key);
+    this.statusOf(team, status);
+    issue.team = team.key;
+    issue.identifier = `${team.key}-${team.next++}`;
     issue.status = status;
     issue.status_since = this.now();
   }
@@ -347,8 +365,9 @@ export class InMemoryTracker implements Tracker {
   async file(draft: IssueDraft, role: Role): Promise<FiledIssue> {
     this.refused("file");
     const status = this.statusFor(draft.repo, role);
+    if (draft.id !== undefined && this.issues.has(draft.id)) throw new Error(`an issue with the UUID ${draft.id} exists`);
     // Filing subscribes the creator, as Linear does.
-    const issue = this.create({ team: draft.repo.team, title: draft.title, description: draft.description, status, creator: this.actor });
+    const issue = this.create({ ...(draft.id === undefined ? {} : { id: draft.id }), team: draft.repo.team, title: draft.title, description: draft.description, status, creator: this.actor });
     this.writes.push({ kind: "file", issue: issue.identifier, title: issue.title, description: issue.description, status });
     return { id: issue.id, repo: draft.repo, identifier: issue.identifier, url: this.url(draft.repo, issue) };
   }
@@ -411,6 +430,7 @@ export class InMemoryTracker implements Tracker {
     return comment;
   }
 
+  /** A snapshot leaves out an issue whose status maps to no role. */
   private snapshotIssue(issue: StoredIssue, repo: TrackerRepo): SnapshotIssue | null {
     const read = this.read(issue, repo);
     return read.role === null ? null : { ...read, role: read.role };

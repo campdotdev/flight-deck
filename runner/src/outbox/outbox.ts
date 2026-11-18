@@ -1,15 +1,18 @@
 // The Outbox checks a session's outbox and makes its writes in order (spec 1, "Outbox"). The runner calls
 // `apply` after each session with the Flight Deck app's identity, and `flight-deck apply` with the maintainer's.
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
-import { readJson, writeJson, type State } from "../state/index.ts";
+import type { Role } from "../record/index.ts";
+import { readJson, writeJson, type OpenPause, type State } from "../state/index.ts";
 import { IssueNotFoundError, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
 import { duplicateLine, followUpFooter, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope } from "./envelope.ts";
 import { contentType, embedImages, nameImages } from "./media.ts";
+import { repliesAfter } from "./replies.ts";
 
 export type ApplyResult =
   /** Every write landed. */
@@ -45,11 +48,13 @@ export interface OutboxOptions {
  */
 interface Applied {
   writes: string[];
-  /** Each follow-up's filed issue UUID, by its path in the outbox. */
+  /** Each follow-up's issue UUID, by its path in the outbox, saved before the create that uses it. */
   filed: Record<string, string>;
   /** Each image's upload URL, by its file name in `media/`, so each image is uploaded once. */
   uploads: Record<string, string>;
 }
+
+const nothingApplied = (): Applied => ({ writes: [], filed: {}, uploads: {} });
 
 /** One write: its name in `applied.json`, and the write, which returns a broken rule or `null`. */
 type Step = [string, (applied: Applied) => Promise<string | null>];
@@ -57,8 +62,33 @@ type Step = [string, (applied: Applied) => Promise<string | null>];
 /** The status types of an open issue: factory statuses included, done, canceled, and duplicate not. */
 const OPEN_TYPES = new Set(["backlog", "unstarted", "started", "triage"]);
 
+/**
+ * Whether the move to `to` landed: `applied.json` records it, or records the writes before it while the issue
+ * already sits in `to`. A move can land without reaching `applied.json`, when its response or the journal write
+ * is lost.
+ */
+function moveLanded(applied: readonly string[], role: Role | null, to: Role): boolean {
+  const before = to === "ready_to_build" ? ["writeBrief", "post"] : ["post"];
+  return applied.includes("move") || (before.every((name) => applied.includes(name)) && role === to);
+}
+
 export class Outbox {
   constructor(private readonly options: OutboxOptions) {}
+
+  /**
+   * Whether an earlier apply of the session's outbox moved its issue, which now has `role`. Poll applies such an
+   * outbox again, though the issue left the working status, so the writes after the move still land.
+   */
+  static async moved(sessionFolder: string, role: Role | null): Promise<boolean> {
+    try {
+      const applied = await readJson<Applied>(join(sessionFolder, "applied.json"), nothingApplied());
+      if (applied.writes.length === 0) return false;
+      const outcome = await readJson<{ move?: unknown }>(join(sessionParts(sessionFolder).outbox, "outcome.json"), {});
+      return typeof outcome.move === "string" && moveLanded(applied.writes, role, outcome.move as Role);
+    } catch {
+      return false;
+    }
+  }
 
   async apply(sessionFolder: string, options: ApplyOptions): Promise<ApplyResult> {
     const session = JSON.parse(await readFile(sessionParts(sessionFolder).sessionJson, "utf8")) as SessionJson;
@@ -66,26 +96,28 @@ export class Outbox {
     if (repo === null) return { result: "failed", rule: `${session.repo} isn't registered on this Mac`, writes: [] };
     const tracker = options.identity;
     const lifecycle = new Lifecycle(tracker);
-    const read = await tracker.issue({ id: session.issue, repo });
-    const role = read.role;
-    if (role === null) return { result: "failed", rule: `${read.identifier}'s status ${read.status} has no role in ${repo.name}'s record`, writes: [] };
-    const issue = { ...read, role };
+    const issue = await tracker.issue({ id: session.issue, repo });
 
+    // A second apply skips the writes already recorded, so once the move has landed, the issue's status no longer
+    // has to allow it.
     const appliedFile = join(sessionFolder, "applied.json");
-    const applied = await readJson<Applied>(appliedFile, { writes: [], filed: {}, uploads: {} });
+    const applied = await readJson<Applied>(appliedFile, nothingApplied());
+    const landed = (to: Role): boolean => moveLanded(applied.writes, issue.role, to);
     const checked = await readEnvelope(sessionParts(sessionFolder).outbox, {
       version: this.options.version,
       stage: session.stage,
       role: issue.role,
       lifecycle,
-      moved: applied.writes.includes("move"),
+      moved: landed,
     });
     if (!checked.ok) return { result: "failed", rule: checked.rule, writes: [] };
     const { envelope } = checked;
     const { move, answers = [], needs } = envelope.outcome;
 
     let original: TrackerIssue | null = null;
-    if (move === "duplicate") {
+    if (move === "duplicate" && !landed("duplicate")) {
+      // Once the mark landed, the writes after it don't need the original, which may since have closed, moved to
+      // another team, or been deleted, so the writes after the mark still land.
       const of = await originalOf(tracker, repo, issue, envelope.outcome.of ?? "");
       if (typeof of === "string") return { result: "failed", rule: of, writes: [] };
       original = of;
@@ -94,6 +126,7 @@ export class Outbox {
     const ref: IssueRef = { id: issue.id, repo };
     const state = this.options.state;
     const phrase = statusPhrase(move, needs);
+    const footer = sessionFooter(this.options.version, session.stage, session.session);
     // Each image is embedded once: in the description for a brief, whose fold then names it, and in the fold otherwise (ADR 0019).
     const handoff = envelope.handoff;
     const comment = (uploads: Applied["uploads"]) =>
@@ -103,12 +136,23 @@ export class Outbox {
         ...(original === null ? {} : { line: duplicateLine(original) }),
         answers: answers.map((answer) => ({ word: answer.word, does: answer.does, status: repo.statuses[answer.move] })),
         handoff: handoff === null ? null : handoff.name === "brief.md" ? nameImages(handoff.text) : embedImages(handoff.text, uploads),
-        footer: sessionFooter(this.options.version, session.stage, session.session),
+        footer,
       });
+    // A post can land without reaching `applied.json`, when its response or the journal write is lost. The footer
+    // names the session, so a retry finds the comment it already posted and doesn't post it twice. The post is
+    // always a top-level Linear comment, so a reply or a comment through the GitHub sync, which anyone who can
+    // comment on the GitHub issue can write, never counts. The author doesn't count either: the runner's post and
+    // a hand `flight-deck apply` of the same session go out as different users.
+    const posted = issue.comments.find(
+      ({ body, synced, parent }) => !synced && parent === null && body.split("\n").some((line) => line.trim() === footer),
+    );
     const cause = move === "paused" ? "pause" : move === "duplicate" ? "duplicate" : "handoff";
     const moveStep: Step = [
       "move",
       async () => {
+        if (landed(move)) return null;
+        // The check refuses an issue with no role before any write, unless the move already landed.
+        if (issue.role === null) return `${issue.identifier}'s status ${issue.status} maps to no role`;
         const of = original === null ? {} : { of: { id: original.id, repo } };
         const moved = await lifecycle.move({ ...ref, role: issue.role }, move, cause, of);
         return moved.ok ? null : moved.violation;
@@ -117,12 +161,18 @@ export class Outbox {
     // A synced issue is detached before its brief and before a duplicate mark, so neither reaches GitHub (ADR 0008).
     const attachment = issue.sync_attachment;
     const detachSteps: Step[] = issue.synced && attachment !== null ? [["detach", async () => (await tracker.detach({ ...ref, sync_attachment: attachment }), null)]] : [];
-    const postStep = (flag: boolean): Step => ["post", async (applied) => (await tracker.post(ref, comment(applied.uploads), { flag }), null)];
+    const postStep = (flag: boolean): Step => [
+      "post",
+      async (applied) => {
+        if (posted === undefined) await tracker.post(ref, comment(applied.uploads), { flag });
+        return null;
+      },
+    ];
     // Every image goes up first, so each write that names one can embed its URL.
-    const uploadSteps: Step[] = envelope.images.map((name): Step => [
+    // The bytes are the ones the check read, so the upload never opens the session's path again.
+    const uploadSteps: Step[] = envelope.images.map(({ name, data }): Step => [
       `upload ${name}`,
       async (applied) => {
-        const data = new Uint8Array(await readFile(join(sessionParts(sessionFolder).outbox, "media", name)));
         applied.uploads[name] = await tracker.upload({ name, contentType: contentType(name), data });
         return null;
       },
@@ -136,7 +186,18 @@ export class Outbox {
           const footer = followUpFooter(this.options.version, session.stage);
           const text = embedImages(followUp.description, applied.uploads);
           const description = text === "" ? footer : `${text}\n\n${footer}`;
-          applied.filed[followUp.name] = (await tracker.file({ repo, title: followUp.title, description }, "intake")).id;
+          // A create can land without reaching `applied.json`, when its response or the journal write is lost. The
+          // issue's UUID is chosen and saved first, so a retry finds the issue it filed and doesn't file it twice.
+          const id = applied.filed[followUp.name] ?? randomUUID();
+          if (applied.filed[followUp.name] === undefined) {
+            applied.filed[followUp.name] = id;
+            await writeJson(appliedFile, applied);
+          }
+          const filed = await tracker.issue({ id, repo }).catch((error: unknown) => {
+            if (error instanceof IssueNotFoundError) return null;
+            throw error;
+          });
+          if (filed === null) await tracker.file({ id, repo, title: followUp.title, description }, "intake");
           return null;
         },
       ],
@@ -154,16 +215,29 @@ export class Outbox {
     // The handoff before the move, so a stage never starts on an issue whose handoff is missing.
     let steps: Step[];
     if (move === "paused") {
-      let commentAt: string | null = null;
+      // A pause an earlier handoff opened, such as before a hand run took the paused issue back into Planning,
+      // offered other answers, so this handoff starts a fresh one.
+      const ownPause = (pause: OpenPause | null): OpenPause | null => (pause?.session === session.session ? pause : null);
       steps = [
         [
           "post",
           async (applied) => {
-            // The flag goes into issue memory first, so the next poll never takes the assignee for one the runner didn't set.
-            const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since: this.options.clock().toISOString() };
+            // The flag and the pause go into issue memory before the comment. The flag keeps the next poll from
+            // taking the assignee for one the runner didn't set. The open pause lets each snapshot keep a reply as
+            // it first saw it, even while the move to Paused keeps failing. A retry keeps the replies saved so far.
+            const since = this.options.clock().toISOString();
+            const flag = { cause: "pause" as const, status_line: opening(phrase, envelope.summary).statusLine, since };
+            const opened = await state.issueMemory(session.repo, issue.id);
+            const pause = ownPause(opened.pause) ?? { answers, session: session.session, pending: true, comment_at: since, replies: [] };
+            const flagged = { ...opened, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } };
+            await state.writeIssueMemory(session.repo, issue.id, { ...flagged, pause });
+            const at = posted?.created_at ?? (await tracker.post(ref, comment(applied.uploads), { flag: true })).created_at;
+            // A poll can save a reply while the post's response is on its way, as during a hand run, so this write
+            // reads issue memory again. Only a comment after the pause comment is a reply.
             const memory = await state.issueMemory(session.repo, issue.id);
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, flag: { ...flag, issue: issue.identifier, title: issue.title, url: issue.url } });
-            commentAt = (await tracker.post(ref, comment(applied.uploads), { flag: true })).created_at;
+            const current = ownPause(memory.pause) ?? pause;
+            const replies = current.replies.filter((reply) => reply.created_at > at);
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { ...current, comment_at: at, replies } });
             return null;
           },
         ],
@@ -171,10 +245,21 @@ export class Outbox {
         [
           "pause",
           async () => {
+            // The issue first, so issue memory is read just before the write, with any reply a poll saved meanwhile.
+            const read = await tracker.issue(ref);
             const memory = await state.issueMemory(session.repo, issue.id);
-            // A resumed apply lost the comment's time, and the flag's start comes just before it.
-            const at = commentAt ?? memory.flag?.since ?? this.options.clock().toISOString();
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { answers, comment_at: at, replies: [] } });
+            const pause = ownPause(memory.pause) ?? {
+              answers,
+              session: session.session,
+              pending: true,
+              comment_at: memory.flag?.since ?? this.options.clock().toISOString(),
+              replies: [],
+            };
+            // A reply no snapshot has returned yet counts too. A reply a snapshot saw keeps the body it saw then.
+            const known = new Set(pause.replies.map((reply) => reply.id));
+            const unseen = repliesAfter(read, pause.comment_at).filter((reply) => !known.has(reply.id));
+            const replies = [...pause.replies, ...unseen].sort((a, b) => a.created_at.localeCompare(b.created_at));
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, pause: { ...pause, pending: false, replies } });
             return null;
           },
         ],
@@ -183,15 +268,18 @@ export class Outbox {
     } else if (move === "duplicate") {
       steps = [...detachSteps, postStep(false), moveStep, ...followUpSteps];
     } else {
-      const brief = envelope.handoff?.text ?? "";
+      const brief = handoff?.text ?? "";
       steps = [
         ...detachSteps,
         [
           "writeBrief",
           async (applied) => {
+            // Issue memory keeps the brief as the description holds it, upload URLs and all, so a re-plan's
+            // `previous-brief.md` differs from the description only where the maintainer edited it.
             const memory = await state.issueMemory(session.repo, issue.id);
-            await tracker.writeBrief(ref, embedImages(brief, applied.uploads), { runnerWroteBrief: memory.brief !== null });
-            await state.writeIssueMemory(session.repo, issue.id, { ...memory, brief });
+            const embedded = embedImages(brief, applied.uploads);
+            await tracker.writeBrief(ref, embedded, { runnerWroteBrief: memory.brief !== null });
+            await state.writeIssueMemory(session.repo, issue.id, { ...memory, brief: embedded });
             return null;
           },
         ],
@@ -218,8 +306,8 @@ export class Outbox {
 }
 
 /**
- * The open issue a duplicate's `of` names, or the broken rule: it must exist, sit on the same team, be open
- * (its status type is backlog, unstarted, started, or triage), and not be the issue itself.
+ * The issue a duplicate's `of` names, or the broken rule: it must exist, sit on the same team, not be the issue
+ * itself, and be open: its status type is backlog, unstarted, started, or triage.
  */
 async function originalOf(tracker: Tracker, repo: TrackerRepo, issue: TrackerIssue, of: string): Promise<TrackerIssue | string> {
   let original: TrackerIssue;
