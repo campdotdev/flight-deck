@@ -209,6 +209,11 @@ export async function writeLaunch(launch: Launch): Promise<void> {
   await writeFile(launch.sessionJson, `${JSON.stringify({ ...json, agents_md: launch.agentsMd }, null, 2)}\n`);
 }
 
+/** Where the Harness records the UUID Claude Code got: `transcripts/<session-id>.uuid`, beside the transcript. */
+export function transcriptUuid(transcript: string): string {
+  return transcript.replace(/\.jsonl$/, ".uuid");
+}
+
 /**
  * The home folder's `CLAUDE.md` and rules, and each folder's above the worktree up to `/`, by absolute path,
  * because `claudeMdExcludes` ignores a pattern that starts with `~` (ADR 0007).

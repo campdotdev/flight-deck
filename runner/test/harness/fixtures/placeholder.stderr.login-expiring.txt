@@ -1,0 +1,1 @@
+Your Claude login expires in 3 days. Run claude, then /login, to renew it.
