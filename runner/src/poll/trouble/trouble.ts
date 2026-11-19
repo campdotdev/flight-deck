@@ -130,14 +130,15 @@ export class Trouble {
         if (reopened) {
           entry.open = true;
           entry.since = at;
-          // Each issue the maintainer hasn't closed gets the reopened comment, which replaces a cleared one still owed.
-          for (const issue of entry.issues) issue.pending = { kind: "reopened", since: at, tried: false };
         }
         // What the runner sees now, so a missing status restored while the cause stays open stops naming it.
         entry.facts = opening.finding.facts;
         entry.repos = opening.finding.repos;
         const text = troubleText(entry, context.version);
         if (reopened) {
+          // Each issue the maintainer hasn't closed gets the reopened comment, which names what broke this time and
+          // replaces a cleared comment still owed.
+          for (const issue of entry.issues) issue.pending = { kind: "reopened", statusLine: `🟡 Needs your help: ${text.title}`, since: at, tried: false };
           await log(`trouble ${entry.cause} opened${entry.repos.length > 0 ? ` for ${entry.repos.join(", ")}` : ""}: ${text.title}${entry.facts.mode === undefined ? "" : ` (mode ${entry.facts.mode})`}`);
           const posted = await notify(text.notification, { path: context.path });
           if (!posted.ok) await log(`notification failed: ${posted.error}`);
@@ -167,7 +168,7 @@ export class Trouble {
       const repo = context.repos.get(issue.repo);
       const read = reads.get(issue.id);
       if (pending === undefined || repo === undefined || read === undefined) continue;
-      const statusLine = pending.kind === "cleared" ? pending.statusLine : `🟡 Needs your help: ${issue.title}`;
+      const { statusLine } = pending;
       const sentences = pending.kind === "cleared" ? pending.sentence : null;
       const body = runnerComment({ statusLine, sentences, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses }).body;
       // A post can land without its response. A later try finds the comment an earlier try posted, and posts nothing.
@@ -191,8 +192,8 @@ export class Trouble {
   }
 
   /**
-   * Reads each of the entry's trouble issues. A closed or deleted one is forgotten, with its flag. An issue with
-   * no assignee loses its flag. Returns each issue still open, as read.
+   * Reads each of the entry's trouble issues. A closed or deleted one is forgotten, with its flag. An issue the
+   * maintainer isn't assigned loses its flag. Returns each issue still open, as read.
    */
   private async sync(context: SettleContext, entry: TroubleEntry): Promise<Map<string, TrackerIssue>> {
     await this.adopt(context, entry);
@@ -218,8 +219,9 @@ export class Trouble {
         await this.forgetFlag(context.state, issue);
         continue;
       }
-      // A flag whose assignment never landed goes too, so `status.json` never lists an issue nobody was assigned.
-      if (read.assignee === null) await this.forgetFlag(context.state, issue);
+      // So does a flag whose assignment never landed, so `status.json` lists only issues waiting on the maintainer.
+      // An assignee someone else set stays.
+      if (read.assignee !== repo.maintainer) await this.forgetFlag(context.state, issue);
       reads.set(issue.id, read);
       kept.push(issue);
     }
@@ -229,7 +231,8 @@ export class Trouble {
 
   /**
    * Looks up each UUID saved before a create that never reported back. An issue Linear has joins the entry's
-   * issues. One it doesn't have keeps its UUID for `file` to try again, while the cause is open.
+   * issues, and a UUID it doesn't have is dropped, because that create never landed. A lookup Linear doesn't take
+   * keeps the UUID, and `file` files nothing in that repo until a lookup answers.
    */
   private async adopt(context: SettleContext, entry: TroubleEntry): Promise<void> {
     for (const [name, id] of Object.entries(entry.filing ?? {})) {
@@ -242,7 +245,6 @@ export class Trouble {
         if (isUnavailable(error)) continue;
         if (!(error instanceof IssueNotFoundError)) throw error;
       }
-      if (read === undefined && entry.open) continue;
       if (read !== undefined) entry.issues.push({ repo: name, id, identifier: read.identifier, url: read.url, title: read.title, flagged: false });
       delete entry.filing![name];
     }
@@ -267,9 +269,12 @@ export class Trouble {
       let issue = entry.issues.find((each) => each.repo === name);
       if (issue?.pending?.kind === "reopened") continue;
       if (issue === undefined) {
-        // The UUID is saved before the create, so a create whose response is lost isn't filed twice.
+        // A UUID still saved is a create whose lookup didn't answer this poll. It waits, so no UUID is created twice.
         const filing = (entry.filing ??= {});
-        const id = (filing[name] ??= randomUUID());
+        if (filing[name] !== undefined) continue;
+        // The UUID is saved before the create, so a create whose response is lost isn't filed twice.
+        const id = randomUUID();
+        filing[name] = id;
         await save();
         const filed = await this.attempt(log, `${name}: trouble issue ${entry.cause}`, () => context.tracker.file({ id, repo, title, description: body }, "intake"));
         if (filed === null) continue;

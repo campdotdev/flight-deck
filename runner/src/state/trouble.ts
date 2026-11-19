@@ -48,10 +48,11 @@ export interface TroubleIssue {
 
 /**
  * A comment owed to a trouble issue: the cleared comment, or the reopened one, which flags the issue again when
- * it's no longer assigned at the poll that posts it. `since` is the ISO time the cause cleared or opened again.
+ * it's no longer assigned at the poll that posts it. `statusLine` is fixed when the comment is owed, so each try
+ * posts the same text. `since` is the ISO time the cause cleared or opened again.
  * `tried` is set once a post was tried, so the next try first looks for a comment whose response was lost.
  */
-export type TroubleComment = ({ kind: "cleared"; statusLine: string; sentence: string } | { kind: "reopened" }) & { since: string; tried: boolean };
+export type TroubleComment = ({ kind: "cleared"; sentence: string } | { kind: "reopened" }) & { statusLine: string; since: string; tried: boolean };
 
 /**
  * One cause. `open` is false once it cleared. A cleared entry stays while one of its issues is still open, so
