@@ -2,7 +2,7 @@
 // finish and starts no new one, and `stop` also stops every session and pauses its issue with the ⚪ text.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { StoredIssue } from "../../src/tracker/index.ts";
-import { outbox, World } from "./world.ts";
+import { outbox, UNMAPPED_STATUS, World } from "./world.ts";
 
 let world: World;
 
@@ -161,6 +161,67 @@ describe("stop", () => {
     expect((await world.status()).sessions).toEqual([]);
   });
 
+  test("whose issue read fails for one entry still stops the rest, and the next tick pauses that issue", async () => {
+    const running = world.issue({ title: "Save button is blue" });
+    const retrying = world.issue({ title: "Cancel button is green" });
+    world.send(running);
+    world.send(retrying);
+    world.harness.script(running.identifier, {});
+    world.harness.script(retrying.identifier, { exit: { kind: "timed_out" } });
+    await world.tick();
+    const [first] = world.harness.started.map((each) => each.session);
+    // One place, which the running session holds, so the failed one's retry waits.
+    world.config.concurrency_cap = 1;
+    await world.writeConfig();
+    await world.tick();
+    expect((await world.status()).sessions.map(({ state }) => state)).toEqual(["running", "retry_waiting"]);
+    // The retry's pause reads the issue first, and that read fails once, as a network error would.
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 1;
+    world.tracker.issue = async (ref) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    await world.stop();
+    expect(world.harness.stops).toEqual([first!.id]);
+    expect(world.tracker.runnerRevokes).toEqual(["campdotdev"]);
+    expect(afterTake(retrying)).toEqual([]);
+
+    await world.tick();
+    expect(afterTake(retrying).map((write) => write.kind === "move" && write.status)).toEqual([false, "Paused"]);
+    expect(afterTake(running).map((write) => write.kind === "move" && write.status)).toEqual([false, "Paused"]);
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
+  test("pauses a waiting retry with the statuses the default branch's record names, not the registration's copy", async () => {
+    world.config.repos[0]!.tracker.statuses.planning = UNMAPPED_STATUS;
+    await world.writeConfig();
+    const running = world.issue({ title: "Save button is blue" });
+    const retrying = world.issue({ title: "Cancel button is green" });
+    world.send(running);
+    world.send(retrying);
+    world.harness.script(running.identifier, {});
+    world.harness.script(retrying.identifier, { exit: { kind: "timed_out" } });
+    await world.tick();
+    // One place, which the running session holds, so the failed one's retry waits.
+    world.config.concurrency_cap = 1;
+    await world.writeConfig();
+    await world.tick();
+    expect((await world.status()).sessions.map(({ state }) => state)).toEqual(["running", "retry_waiting"]);
+    await world.stop();
+    expect(world.tracker.stored(retrying.id).status).toBe("Paused");
+  });
+
+  test("revokes the runner's token in the workspace the record names, as well as the registration's copy", async () => {
+    // The registration's copy names another signed-in workspace, and the poll uses the record's.
+    world.config.repos[0]!.tracker.workspace = "elsewhere";
+    world.config.linear.elsewhere = { ...world.config.linear.campdotdev! };
+    await world.writeConfig();
+    await world.tick();
+    await world.stop();
+    expect(world.tracker.runnerRevokes).toEqual(["elsewhere", "campdotdev"]);
+  });
+
   test("replaces a hold's marker, and a later hold leaves the stop in place", async () => {
     await world.hold();
     await world.tick();
@@ -209,32 +270,71 @@ describe("a runner that starts under a stop marker", () => {
     expect(status.runner).toEqual({ state: "stopped", holds: [{ cause: "stop", scope: "runner", name: null, since: stoppedAt, until: null }] });
   });
 
-  test("whose issue read fails pauses the issue at the next tick", async () => {
-    const issue = world.issue({ title: "Save button is blue" });
-    world.send(issue);
-    world.harness.script(issue.identifier, {});
+  test("whose issue read fails for one entry pauses the rest and publishes, and pauses that issue at the next tick", async () => {
+    const one = world.issue({ title: "Save button is blue" });
+    const two = world.issue({ title: "Cancel button is green" });
+    world.send(one);
+    world.send(two);
+    world.harness.script(one.identifier, {});
+    world.harness.script(two.identifier, {});
     await world.tick();
-    const [session] = world.harness.started.map((each) => each.session);
     await world.writeHoldMarker("stop");
     world.restart();
-    // The pause's issue read fails once, as a network error would on the real adapter.
+    // The first pause's issue read fails once, as a network error would on the real adapter.
     const read = world.tracker.issue.bind(world.tracker);
     let failures = 1;
     world.tracker.issue = async (ref) => {
       if (failures-- > 0) throw new Error("fetch failed");
       return read(ref);
     };
-    await expect(world.tick()).rejects.toThrow("fetch failed");
-    expect(afterTake(issue)).toEqual([]);
     await world.tick();
-    expect(afterTake(issue)).toEqual([
-      {
-        kind: "comment",
-        issue: issue.identifier,
-        body: stopComment([`- Session: \`${session!.id}\``, "- Attempt: 1", `- Transcript: \`${session!.transcript}\``]),
-      },
-      { kind: "move", issue: issue.identifier, status: "Paused" },
-    ]);
+    expect(world.tracker.stored(one.id).status).toBe("Planning");
+    expect(world.tracker.stored(two.id).status).toBe("Paused");
+    // The tick ran to its end and published.
+    const status = await world.status();
+    expect(status.polled_at).toBe(world.now.toISOString());
+    expect(status.sessions.map(({ issue }) => issue)).toEqual([one.identifier]);
+    await world.tick();
+    expect(world.tracker.stored(one.id).status).toBe("Paused");
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
+  test("keeps the stop through a start until every stopped issue is paused", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    await world.writeHoldMarker("stop");
+    world.restart();
+    // The pause's issue read fails at the first tick and again at the start.
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 2;
+    world.tracker.issue = async (ref) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    await world.tick();
+    await expect(world.start()).rejects.toThrow("the stop stays");
+    expect((await world.status()).runner.state).toBe("stopped");
+    await world.start();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    await world.tick();
+    expect((await world.status()).runner).toEqual({ state: "working", holds: [] });
+    expect(world.harness.started).toHaveLength(1);
+  });
+
+  test("pauses with the statuses the take read when the registration's copy names others", async () => {
+    world.config.repos[0]!.tracker.statuses.planning = UNMAPPED_STATUS;
+    await world.writeConfig();
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
+    await world.writeHoldMarker("stop");
+    world.restart();
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
     expect((await world.status()).sessions).toEqual([]);
   });
 

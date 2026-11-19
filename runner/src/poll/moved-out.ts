@@ -16,6 +16,11 @@ export interface MovedOutContext {
   state: State;
   workspace: Workspace;
   folders: Folders;
+  /**
+   * Re-reads the issue with the statuses the entry's take read, which a record changed since may map otherwise.
+   * Whether it still sits in the stage's working status on the repo's team.
+   */
+  stillWorking(entry: SessionEntry): Promise<boolean>;
   /** Asks the Harness to stop a running session because its issue moved out. Its `stopped` exit disposes it. */
   stop(entry: SessionEntry): Promise<void>;
 }
@@ -26,6 +31,9 @@ export async function movedOut(context: MovedOutContext): Promise<void> {
     if (entry.repo !== repo.name) continue;
     const issue = snapshot.issues.find((each) => each.id === entry.issue_id);
     if (issue !== undefined && issue.role === WORKING[entry.stage]) continue;
+    // The snapshot maps statuses with the default branch's record, so a session's issue looks moved when the
+    // record changed what its working status is called. A read with the take's statuses confirms the move.
+    if (await context.stillWorking(entry)) continue;
     const log = (message: string) => state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, ${message}`);
     switch (entry.state) {
       case "running":

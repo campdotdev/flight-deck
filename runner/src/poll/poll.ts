@@ -125,10 +125,17 @@ export class Poll {
     });
   }
 
-  /** `flight-deck start`: ends the `maintainer` and `stop` holds, by removing the hold marker (ADR 0021). */
+  /**
+   * `flight-deck start`: ends the `maintainer` and `stop` holds, by removing the hold marker (ADR 0021). A runner
+   * that started under a `stop` marker first finishes what it does at its start, so no entry the stop left
+   * outlives the marker without its pause. Until that finishes, `start` throws and the marker stays.
+   */
   start(now: Date): Promise<void> {
     return this.serial(async () => {
       if ((await this.state.holdMarker()) === null) return;
+      const config = await readConfig(this.folders);
+      await this.ensureStarted(now, config, new Workspace({ folders: this.folders, git: config.paths.git }));
+      if (!this.started) throw new Error("a stopped session's issue isn't paused yet, so the stop stays: try again after the next poll");
       await this.state.writeHoldMarker(null);
       await this.state.log(now, "hold ended by flight-deck start");
     });
@@ -139,7 +146,7 @@ export class Poll {
    * replacing a hold's, and asks the Harness to stop every running session, whose `stopped` exit pauses its
    * issue at the next tick. It pauses the issue of each `retry_waiting` entry now, with the same ⚪ text. An
    * `apply_waiting` entry keeps retrying, because a held runner still applies outboxes. Last, it revokes the
-   * runner's Linear token in each workspace it serves.
+   * runner's Linear token in each workspace it serves. Each tick under the marker retries an entry this missed.
    */
   stop(now: Date): Promise<void> {
     return this.serial(async () => {
@@ -147,14 +154,52 @@ export class Poll {
       await this.state.log(now, "stopped by flight-deck stop");
       const config = await readConfig(this.folders);
       const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
-      for (const entry of await this.state.sessions()) {
+      // Before the runner's start finishes, its start pauses every entry under the marker.
+      if (this.started) await this.stopEach(now, config, workspace);
+      await this.revokeRunnerTokens(now, config);
+    });
+  }
+
+  /**
+   * Revokes the runner's own token in every workspace it serves: each registration's copy of `[tracker]` names
+   * one, and so does the last valid record a poll read, which the poll uses instead. Each revoke runs even when
+   * one before it fails, and then the first failure throws.
+   */
+  private async revokeRunnerTokens(now: Date, config: Config): Promise<void> {
+    const names = new Set<string>();
+    for (const registration of config.repos) {
+      names.add(registration.tracker.workspace);
+      const record = (await this.state.lastRecord(registration.name))?.record;
+      if (record !== undefined) names.add(record.tracker.workspace);
+    }
+    let failed: unknown = null;
+    for (const name of names) {
+      // A workspace that `login linear` never signed in to has no runner token.
+      if (config.linear[name] === undefined) continue;
+      try {
+        await this.tracker.revokeRunnerToken(name);
+      } catch (error) {
+        await this.state.log(now, `runner token for ${name} not revoked: ${(error as Error).message}`);
+        failed ??= error;
+      }
+    }
+    if (failed !== null) throw failed;
+  }
+
+  /**
+   * Under a `stop` marker, asks the Harness to stop each running session and pauses each `retry_waiting` issue.
+   * Each entry goes on its own: one that throws, such as on a failed Linear read, stays as it was, and the next
+   * tick under the marker tries it again.
+   */
+  private async stopEach(now: Date, config: Config, workspace: Workspace): Promise<void> {
+    for (const entry of await this.state.sessions()) {
+      try {
         if (entry.state === "running") await this.stopSession(now, entry, "stop");
         if (entry.state === "retry_waiting") await this.pauseStopped(now, config, entry, { session: entry.id, attempt: entry.attempt }, workspace);
+      } catch (error) {
+        await this.state.log(now, `${entry.id} ${entry.issue}: stop failed, retrying next poll: ${(error as Error).message}`);
       }
-      for (const name of new Set(config.repos.map((registration) => repoOf(config, registration.name)?.workspace))) {
-        if (name !== undefined) await this.tracker.revokeRunnerToken(name);
-      }
-    });
+    }
   }
 
   /**
@@ -182,12 +227,9 @@ export class Poll {
     const config = await readConfig(this.folders);
     await this.writeEtc(config);
     const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
-    if (!this.started) {
-      // A start that a Linear error cut short runs again at the next tick.
-      await this.atStart(now, config, workspace);
-      this.started = true;
-    }
+    await this.ensureStarted(now, config, workspace);
     await this.handleExits(now, config, workspace);
+    if (this.started && (await this.state.holdMarker())?.by === "stop") await this.stopEach(now, config, workspace);
     const trouble = await Trouble.load(this.state);
     const credentials = await this.checkCredentials(trouble);
 
@@ -232,30 +274,58 @@ export class Poll {
   // The runner's start.
 
   /**
+   * Runs what the runner does at its start, until it finishes. An entry whose pause a Linear error cut short gets
+   * its pause at a later tick, and the rest of each tick still runs.
+   */
+  private async ensureStarted(now: Date, config: Config, workspace: Workspace): Promise<void> {
+    if (!this.started) this.started = await this.atStart(now, config, workspace);
+  }
+
+  /**
    * What the runner does at its start, before its first poll. Under a `stop` marker, written by a `flight-deck
    * stop` the runner didn't answer, it treats each session in its list as stopped, not failed: it pauses the
    * issue with the ⚪ stop text and uses no retry (spec 1, "The runner's socket"). An `apply_waiting` entry
-   * keeps retrying, as after a `stop` the runner answered.
+   * keeps retrying, as after a `stop` the runner answered. Each entry goes on its own, and it returns whether
+   * every entry finished.
    */
-  private async atStart(now: Date, config: Config, workspace: Workspace): Promise<void> {
-    if ((await this.state.holdMarker())?.by !== "stop") return;
+  private async atStart(now: Date, config: Config, workspace: Workspace): Promise<boolean> {
+    if ((await this.state.holdMarker())?.by !== "stop") return true;
+    let finished = true;
     // FLD-108 kills any live session first, with its process groups, because its output pipe died with the old runner.
     for (const entry of await this.state.sessions()) {
       if (entry.state === "apply_waiting") continue;
       const facts: RunnerFacts = { session: entry.id, attempt: entry.attempt };
       if (entry.started_at !== null) facts.transcript = paths.transcript(this.folders, entry.repo, entry.id);
-      await this.pauseStopped(now, config, entry, facts, workspace);
+      try {
+        await this.pauseStopped(now, config, entry, facts, workspace);
+      } catch (error) {
+        await this.state.log(now, `${entry.id} ${entry.issue}: stop pause failed, retrying next poll: ${(error as Error).message}`);
+        finished = false;
+      }
     }
+    return finished;
   }
 
   /** Ends an entry that has no session to wait for, and pauses its issue with the ⚪ stop text. */
   private async pauseStopped(now: Date, config: Config, entry: SessionEntry, facts: RunnerFacts, workspace: Workspace): Promise<void> {
-    const repo = repoOf(config, entry.repo);
+    const repo = await this.entryRepo(config, entry, workspace);
     if (repo === null) {
-      await this.state.log(now, `${entry.id} ${entry.issue}: stopped, and ${entry.repo} has no Linear sign-in`);
+      await this.state.log(now, `${entry.id} ${entry.issue}: stopped, and ${entry.repo} isn't registered or has no Linear sign-in`);
       return this.finish(entry, workspace);
     }
     await this.runnerPause(now, repo, entry, stopPause(), facts, workspace);
+  }
+
+  /**
+   * The repo as the entry's issue reads it: with the record its take read, as an exit uses. A `retry_waiting`
+   * entry's session folder went with its workspace, so it uses the last valid record Poll read, which its retry
+   * would start from. Either falls back to the registration's copy.
+   */
+  private async entryRepo(config: Config, entry: SessionEntry, workspace: Workspace): Promise<TrackerRepo | null> {
+    const registration = config.repos.find((repo) => repo.name === entry.repo);
+    if (registration === undefined) return null;
+    if (entry.state !== "retry_waiting") return this.sessionRepo(config, registration, entry.id, workspace);
+    return trackerRepo(config, registration, (await this.state.lastRecord(registration.name))?.record ?? null);
   }
 
   // Exits.
@@ -450,7 +520,16 @@ export class Poll {
         // A runner comment Linear didn't take yet goes first, and nothing else happens to its issue this poll.
         for (const issue of await this.pendingComments(now, tracker, snapshot)) blocked.add(issue);
         // 4. Moved out.
-        await movedOut({ now, repo: tracker, snapshot, state: this.state, workspace, folders: this.folders, stop: (entry) => this.stopSession(now, entry, "moved_out") });
+        await movedOut({
+          now,
+          repo: tracker,
+          snapshot,
+          state: this.state,
+          workspace,
+          folders: this.folders,
+          stillWorking: async (entry) => (await stillWorking(this.tracker, (await this.entryRepo(config, entry, workspace)) ?? tracker, entry)) !== null,
+          stop: (entry) => this.stopSession(now, entry, "moved_out"),
+        });
         // 5. Answers.
         const handled = await this.answers(now, tracker, snapshot, blocked);
         for (const issue of blocked) handled.add(issue);
@@ -1016,12 +1095,6 @@ function checkGithubToken(repos: RepoPoll[], trouble: Trouble): void {
   } else if (repos.some((poll) => poll.fetch.ok)) {
     trouble.clear("github_token", "runner");
   }
-}
-
-/** The registered repo by name, as the Tracker needs it from the registration's copy of `[tracker]`. */
-function repoOf(config: Config, name: string): TrackerRepo | null {
-  const registration = config.repos.find((repo) => repo.name === name);
-  return registration === undefined ? null : trackerRepo(config, registration, null);
 }
 
 /** How sessions pay, from `config.toml` (ADR 0005). Install always writes `[api]` on an API key. */
