@@ -91,7 +91,7 @@ export class Poll {
   private readonly exits: QueuedExit[] = [];
   /** The `[machine_user]` that `etc/` was last written from, or `null` before this runner's first write. */
   private etcFor: string | null = null;
-  /** Whether this runner's first tick ran, which does what the runner does at its start. */
+  /** Whether what the runner does at its start finished, at its first tick or a later one. */
   private started = false;
   /** `tick`, `hold`, `start`, and `stop` run one at a time, in the order they're called. */
   private queue: Promise<unknown> = Promise.resolve();
@@ -183,8 +183,9 @@ export class Poll {
     await this.writeEtc(config);
     const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
     if (!this.started) {
-      this.started = true;
+      // A start that a Linear error cut short runs again at the next tick.
       await this.atStart(now, config, workspace);
+      this.started = true;
     }
     await this.handleExits(now, config, workspace);
     const trouble = await Trouble.load(this.state);

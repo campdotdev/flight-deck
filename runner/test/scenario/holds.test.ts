@@ -209,6 +209,35 @@ describe("a runner that starts under a stop marker", () => {
     expect(status.runner).toEqual({ state: "stopped", holds: [{ cause: "stop", scope: "runner", name: null, since: stoppedAt, until: null }] });
   });
 
+  test("whose issue read fails pauses the issue at the next tick", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    const [session] = world.harness.started.map((each) => each.session);
+    await world.writeHoldMarker("stop");
+    world.restart();
+    // The pause's issue read fails once, as a network error would on the real adapter.
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 1;
+    world.tracker.issue = async (ref) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    await expect(world.tick()).rejects.toThrow("fetch failed");
+    expect(afterTake(issue)).toEqual([]);
+    await world.tick();
+    expect(afterTake(issue)).toEqual([
+      {
+        kind: "comment",
+        issue: issue.identifier,
+        body: stopComment([`- Session: \`${session!.id}\``, "- Attempt: 1", `- Transcript: \`${session!.transcript}\``]),
+      },
+      { kind: "move", issue: issue.identifier, status: "Paused" },
+    ]);
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
   test("under a hold's marker stays held, pauses nothing, and starts nothing", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     world.send(issue);
