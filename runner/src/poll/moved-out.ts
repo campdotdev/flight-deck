@@ -31,14 +31,15 @@ export async function movedOut(context: MovedOutContext): Promise<void> {
   for (const entry of await state.sessions()) {
     if (entry.repo !== repo.name) continue;
     // The issue still sits in the status the take called the stage's working status. A snapshot holds only the
-    // team's issues that aren't archived.
+    // team's issues that aren't archived, so it answers only for a take on the snapshot's team.
     const take = await context.takeRepo(entry);
     const working = WORKING[entry.stage];
+    const sameTeam = take.workspace === repo.workspace && take.team === repo.team;
     const issue = snapshot.issues.find((each) => each.id === entry.issue_id);
-    if (issue !== undefined && working !== undefined && issue.status === take.statuses[working]) continue;
-    // A status the default branch's record doesn't map leaves the issue out of the snapshot, so a read confirms
-    // the move.
-    if (issue === undefined && (await stillWorking(context.tracker, take, entry)) !== null) continue;
+    if (sameTeam && issue !== undefined && working !== undefined && issue.status === take.statuses[working]) continue;
+    // A status the default branch's record doesn't map leaves the issue out of the snapshot, and a record that
+    // names another team polls that team, so a read with the take's team and statuses confirms the move.
+    if ((!sameTeam || issue === undefined) && (await stillWorking(context.tracker, take, entry)) !== null) continue;
     const log = (message: string) => state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, ${message}`);
     switch (entry.state) {
       case "running":

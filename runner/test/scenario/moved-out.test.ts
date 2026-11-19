@@ -124,6 +124,20 @@ describe("an issue moved out of Planning", () => {
     expect(world.harness.stops).toEqual([session]);
   });
 
+  test("stops a session whose issue moves to the team a newer record names, and not before", async () => {
+    world.tracker.addTeam({ key: "OTH", name: "Other", statuses: [...Object.values(STATUSES), [UNMAPPED_STATUS, "backlog"] as const].map(([name, type]) => ({ name, type })) });
+    const issue = world.issue({ title: "Save button is blue" });
+    const session = await running(issue);
+    await world.push({ ".flight-deck/record.toml": SHADERS_RECORD.replace(/^team = "SHA"$/m, 'team = "OTH"') });
+    // The new record polls the other team, whose snapshot lacks the issue, and the take's team still holds it.
+    await world.tick();
+    expect(world.harness.stops).toEqual([]);
+    // The other team has a status of the same name, but the take's team was Shaders.
+    world.tracker.moveToTeam(issue.id, "OTH", STATUSES.planning[0]);
+    await world.tick();
+    expect(world.harness.stops).toEqual([session]);
+  });
+
   test("leaves a session alone when the default branch's record renames its working status", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     await running(issue);
