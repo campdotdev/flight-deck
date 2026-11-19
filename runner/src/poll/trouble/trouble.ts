@@ -5,8 +5,9 @@
 // issue whose cause cleared, and writes `state/trouble.json`.
 import { randomUUID } from "node:crypto";
 import { runnerComment } from "../../outbox/runner-comments/frame.ts";
+import { postedComment } from "../../outbox/runner-comments/writes.ts";
 import type { State, StatusHold, TroubleCause, TroubleEntry, TroubleFacts, TroubleIssue } from "../../state/index.ts";
-import { isUnavailable, IssueNotFoundError, type StatusType, type Tracker, type TrackerRepo } from "../../tracker/index.ts";
+import { isUnavailable, IssueNotFoundError, type StatusType, type Tracker, type TrackerIssue, type TrackerRepo } from "../../tracker/index.ts";
 import { notify } from "./notify.ts";
 import { clearedText, troubleText } from "./texts.ts";
 
@@ -122,15 +123,15 @@ export class Trouble {
 
     for (const entry of this.entries) {
       const k = key(entry.cause, entry.id);
-      const assigned = await this.sync(context, entry);
+      const reads = await this.sync(context, entry);
       const opening = this.opened.get(k);
       if (opening !== undefined) {
         const reopened = !entry.open;
         if (reopened) {
           entry.open = true;
           entry.since = at;
-          // A cleared comment Linear hasn't taken yet would be wrong now.
-          for (const issue of entry.issues) if (issue.pending?.kind === "cleared") delete issue.pending;
+          // Each issue the maintainer hasn't closed gets the reopened comment, which replaces a cleared one still owed.
+          for (const issue of entry.issues) issue.pending = { kind: "reopened", since: at, tried: false };
         }
         // What the runner sees now, so a missing status restored while the cause stays open stops naming it.
         entry.facts = opening.finding.facts;
@@ -141,33 +142,46 @@ export class Trouble {
           const posted = await notify(text.notification, { path: context.path });
           if (!posted.ok) await log(`notification failed: ${posted.error}`);
         }
-        if (text.body !== null) await this.file(context, entry, text.title, text.body, reopened ? assigned : null, save);
+        if (text.body !== null) await this.file(context, entry, text.title, text.body, save);
       } else if (this.cleared.has(k) && entry.open) {
         entry.open = false;
         await log(`trouble ${entry.cause} cleared${entry.repos.length > 0 ? ` for ${entry.repos.join(", ")}` : ""}`);
         const cleared = clearedText(entry, this.cleared.get(k) ?? {});
-        if (cleared !== null) for (const issue of entry.issues) issue.pending = { kind: "cleared", ...cleared };
+        if (cleared !== null) for (const issue of entry.issues) issue.pending = { kind: "cleared", ...cleared, since: at, tried: false };
       }
-      await this.comment(context, entry, save);
+      await this.comment(context, entry, reads, save);
       await save();
     }
     this.entries = this.entries.filter((entry) => entry.open || entry.issues.length > 0 || Object.keys(entry.filing ?? {}).length > 0);
     await save();
   }
 
-  /** Posts each comment the entry's issues are owed. One Linear doesn't take stays owed for the next poll. */
-  private async comment(context: SettleContext, entry: TroubleEntry, save: () => Promise<void>): Promise<void> {
+  /**
+   * Posts each comment the entry's issues are owed. One Linear doesn't take stays owed for the next poll. `reads`
+   * holds each issue as `sync` read it this poll, and an issue it couldn't read waits.
+   */
+  private async comment(context: SettleContext, entry: TroubleEntry, reads: Map<string, TrackerIssue>, save: () => Promise<void>): Promise<void> {
     const log = (message: string) => context.state.log(context.now, message);
     for (const issue of entry.issues) {
       const pending = issue.pending;
       const repo = context.repos.get(issue.repo);
-      if (pending === undefined || repo === undefined) continue;
-      const flag = pending.kind === "reopened" && pending.flag;
+      const read = reads.get(issue.id);
+      if (pending === undefined || repo === undefined || read === undefined) continue;
       const statusLine = pending.kind === "cleared" ? pending.statusLine : `🟡 Needs your help: ${issue.title}`;
       const sentences = pending.kind === "cleared" ? pending.sentence : null;
+      const body = runnerComment({ statusLine, sentences, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses }).body;
+      // A post can land without its response. A later try finds the comment an earlier try posted, and posts nothing.
+      if (pending.tried && postedComment(read, { body, status_line: statusLine, since: pending.since }) !== undefined) {
+        delete issue.pending;
+        await save();
+        continue;
+      }
+      // The reopened comment flags the issue again when it's no longer assigned.
+      const flag = pending.kind === "reopened" && read.assignee === null;
       // The flag goes into issue memory before the write, at every try, because `sync` forgets it while unassigned.
       if (flag) await this.rememberFlag(context, issue);
-      const body = runnerComment({ statusLine, sentences, flag: null, answers: null }, {}, { version: context.version, statuses: repo.statuses }).body;
+      pending.tried = true;
+      await save();
       const posted = await this.attempt(log, `${issue.identifier}: ${pending.kind} comment`, () => context.tracker.post({ id: issue.id, repo }, body, { flag }));
       if (posted === null) continue;
       if (flag) issue.flagged = true;
@@ -177,12 +191,12 @@ export class Trouble {
   }
 
   /**
-   * Reads each of the entry's trouble issues. A closed or deleted one is forgotten, with its flag. An issue whose
-   * assignee the maintainer cleared loses its flag. Returns whether each issue still open is assigned.
+   * Reads each of the entry's trouble issues. A closed or deleted one is forgotten, with its flag. An issue with
+   * no assignee loses its flag. Returns each issue still open, as read.
    */
-  private async sync(context: SettleContext, entry: TroubleEntry): Promise<Map<string, boolean>> {
+  private async sync(context: SettleContext, entry: TroubleEntry): Promise<Map<string, TrackerIssue>> {
     await this.adopt(context, entry);
-    const assigned = new Map<string, boolean>();
+    const reads = new Map<string, TrackerIssue>();
     const kept: TroubleIssue[] = [];
     for (const issue of entry.issues) {
       const repo = context.repos.get(issue.repo);
@@ -204,12 +218,13 @@ export class Trouble {
         await this.forgetFlag(context.state, issue);
         continue;
       }
-      if (read.assignee === null && issue.flagged) await this.forgetFlag(context.state, issue);
-      assigned.set(issue.id, read.assignee !== null);
+      // A flag whose assignment never landed goes too, so `status.json` never lists an issue nobody was assigned.
+      if (read.assignee === null) await this.forgetFlag(context.state, issue);
+      reads.set(issue.id, read);
       kept.push(issue);
     }
     entry.issues = kept;
-    return assigned;
+    return reads;
   }
 
   /**
@@ -234,16 +249,14 @@ export class Trouble {
   }
 
   /**
-   * Makes sure each repo the entry affects has an open, flagged trouble issue. With `reopened`, the cause opened
-   * again: an issue the maintainer hasn't closed gets "🟡 Needs your help: " and the title, flagged again when
-   * it's no longer assigned, and no second issue is filed.
+   * Makes sure each repo the entry affects has an open, flagged trouble issue. An issue owed the reopened comment
+   * is left to `comment`, and no second issue is filed.
    */
   private async file(
     context: SettleContext,
     entry: TroubleEntry,
     title: string,
     body: string,
-    reopened: Map<string, boolean> | null,
     save: () => Promise<void>,
   ): Promise<void> {
     const log = (message: string) => context.state.log(context.now, message);
@@ -252,12 +265,7 @@ export class Trouble {
       const repo = context.repos.get(name);
       if (repo === undefined) continue;
       let issue = entry.issues.find((each) => each.repo === name);
-      if (issue !== undefined && reopened !== null) {
-        // `comment` posts it, and tries again at later polls until Linear takes it.
-        issue.pending = { kind: "reopened", flag: reopened.get(issue.id) === false };
-        await save();
-        continue;
-      }
+      if (issue?.pending?.kind === "reopened") continue;
       if (issue === undefined) {
         // The UUID is saved before the create, so a create whose response is lost isn't filed twice.
         const filing = (entry.filing ??= {});

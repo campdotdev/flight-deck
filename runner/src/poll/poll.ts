@@ -61,6 +61,14 @@ interface RepoPoll {
   staleTakes: Status["stale_takes"];
 }
 
+/** A repo's step 1: its fetch, and the record on its default branch. */
+interface Fetched {
+  registration: Registration;
+  fetch: FetchResult;
+  /** The record on the default branch, or `null` when the branch holds none. */
+  record: RecordResult | null;
+}
+
 interface QueuedExit {
   session: string;
   exit: Exit;
@@ -99,10 +107,14 @@ export class Poll {
     await this.handleExits(now, config, workspace);
     const trouble = await Trouble.load(this.state);
     const credentials = await this.checkCredentials(trouble);
-    checkSharedTeams(config, trouble);
+
+    // Every repo's fetch comes first, so the shared-team check reads the team each repo's poll uses.
+    const fetched: Fetched[] = [];
+    for (const registration of config.repos) fetched.push(await this.fetchRepo(now, registration, workspace));
+    checkSharedTeams(fetched, trouble);
 
     const repos: RepoPoll[] = [];
-    for (const registration of config.repos) repos.push(await this.pollRepo(now, config, credentials, registration, workspace, trouble));
+    for (const each of fetched) repos.push(await this.pollRepo(now, config, credentials, each, workspace, trouble));
     checkGithubToken(repos, trouble);
 
     await this.starts(now, config, repos, workspace, trouble);
@@ -271,20 +283,13 @@ export class Poll {
 
   // Each repo.
 
-  private async pollRepo(
-    now: Date,
-    config: Config,
-    credentials: Credentials | null,
-    registration: Registration,
-    workspace: Workspace,
-    trouble: Trouble,
-  ): Promise<RepoPoll> {
-    // 1. Fetch.
+  /**
+   * 1. Fetch, and the record on the default branch. State keeps the last valid record and the time of its latest
+   * read, for the stale-take limits.
+   */
+  private async fetchRepo(now: Date, registration: Registration, workspace: Workspace): Promise<Fetched> {
     const fetch = await workspace.fetch(registration);
     if (!fetch.ok) await this.state.log(now, `${registration.name}: fetch failed: ${fetch.error}`);
-
-    // 2. Check the team. The record on the default branch names it, or else the registration's copy does.
-    // State keeps the last valid record and the time of its latest read, for the stale-take limits.
     let record: RecordResult | null = null;
     if (fetch.ok) {
       record = await this.recordAt(workspace, registration, fetch.head);
@@ -292,6 +297,18 @@ export class Poll {
         await this.state.writeLastRecord(registration.name, { commit: fetch.head, read_at: now.toISOString(), record: record.record });
       }
     }
+    return { registration, fetch, record };
+  }
+
+  private async pollRepo(
+    now: Date,
+    config: Config,
+    credentials: Credentials | null,
+    { registration, fetch, record }: Fetched,
+    workspace: Workspace,
+    trouble: Trouble,
+  ): Promise<RepoPoll> {
+    // 2. Check the team. The record on the default branch names it, or else the registration's copy does.
     // A failed Linear call, such as a network error or a 5xx, in the team query, the snapshot, or steps 5 to 8
     // skips this repo's starts for this poll only. The other repos still poll, and the tick still publishes the
     // heartbeat and `status.json`.
@@ -361,19 +378,22 @@ export class Poll {
     trouble: Trouble,
   ): Promise<{ repo: TrackerRepo; usable: boolean } | null> {
     const name = registration.name;
-    const workspace = (record?.tracker ?? registration.tracker).workspace;
+    const tracker = record?.tracker ?? registration.tracker;
+    const workspace = tracker.workspace;
     const repo = trackerRepo(config, registration, record);
     if (repo === null || !hasWorkspace(credentials, workspace)) {
       trouble.open("linear_login", name, { scope: "repo", repos: [name], facts: { repo: name, workspace } });
       return null;
     }
     trouble.clear("linear_login", name);
-    if (trouble.isOpen("shared_team", `${registration.tracker.workspace}/${registration.tracker.team}`)) return { repo, usable: false };
+    if (trouble.isOpen("shared_team", `${tracker.workspace}/${tracker.team}`)) return { repo, usable: false };
 
     const team = await this.tracker.checkTeam(repo);
     if (!team.ok && team.reason === "unreadable") {
       trouble.open("team_unreadable", name, { scope: "repo", repos: [name], facts: { repo: name, team: repo.team } });
-      return { repo, usable: false };
+      // No repo for step 10 either: Linear can report an issue the app can't read as one it doesn't have, and
+      // step 10 would forget a trouble issue that's still open.
+      return null;
     }
     trouble.clear("team_unreadable", name);
     if (!team.ok) {
@@ -852,11 +872,15 @@ function runnerStatus(holds: StatusHold[]): Status["runner"] {
   return { state: holds.some((hold) => hold.scope === "runner") ? "held" : "working", holds };
 }
 
-/** Two registrations that name the same team open `shared_team` for both, and both skip their poll (ADR 0006). */
-function checkSharedTeams(config: Config, trouble: Trouble): void {
+/**
+ * Two repos that use the same team open `shared_team` for both, and both skip their poll (ADR 0006). A repo
+ * uses the team its default branch's valid record names, or else its registration's copy.
+ */
+function checkSharedTeams(fetched: Fetched[], trouble: Trouble): void {
   const byTeam = new Map<string, string[]>();
-  for (const registration of config.repos) {
-    const team = `${registration.tracker.workspace}/${registration.tracker.team}`;
+  for (const { registration, record } of fetched) {
+    const tracker = record?.ok === true ? record.record.tracker : registration.tracker;
+    const team = `${tracker.workspace}/${tracker.team}`;
     byTeam.set(team, [...(byTeam.get(team) ?? []), registration.name]);
   }
   for (const [team, names] of byTeam) {
