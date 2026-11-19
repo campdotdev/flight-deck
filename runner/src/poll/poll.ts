@@ -93,6 +93,10 @@ export class Poll {
   private etcFor: string | null = null;
   /** Whether what the runner does at its start finished, at its first tick or a later one. */
   private started = false;
+  /** Each running session's repo with the statuses its take read, by session ID, read once per runner. */
+  private readonly takeRepos = new Map<string, TrackerRepo>();
+  /** The sessions whose stop this runner asked the Harness for, by session ID. A failed request isn't here. */
+  private readonly stopsSent = new Set<string>();
   /** `tick`, `hold`, `start`, and `stop` run one at a time, in the order they're called. */
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -134,8 +138,12 @@ export class Poll {
     return this.serial(async () => {
       if ((await this.state.holdMarker()) === null) return;
       const config = await readConfig(this.folders);
-      await this.ensureStarted(now, config, new Workspace({ folders: this.folders, git: config.paths.git }));
-      if (!this.started) throw new Error("a stopped session's issue isn't paused yet, so the stop stays: try again after the next poll");
+      const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
+      await this.ensureStarted(now, config, workspace);
+      const stopped = (await this.state.holdMarker())?.by === "stop";
+      if (!this.started || (stopped && !(await this.stopEach(now, config, workspace)))) {
+        throw new Error("a stopped session's issue isn't paused yet, so the stop stays: try again after the next poll");
+      }
       await this.state.writeHoldMarker(null);
       await this.state.log(now, "hold ended by flight-deck start");
     });
@@ -161,21 +169,13 @@ export class Poll {
   }
 
   /**
-   * Revokes the runner's own token in every workspace it serves: each registration's copy of `[tracker]` names
-   * one, and so does the last valid record a poll read, which the poll uses instead. Each revoke runs even when
-   * one before it fails, and then the first failure throws.
+   * Revokes the runner's own token in every workspace `login linear` signed in to. Any of them may hold one,
+   * because a session's take, a registration's copy of `[tracker]`, or any record since can name it. Each revoke
+   * runs even when one before it fails, and then the first failure throws.
    */
   private async revokeRunnerTokens(now: Date, config: Config): Promise<void> {
-    const names = new Set<string>();
-    for (const registration of config.repos) {
-      names.add(registration.tracker.workspace);
-      const record = (await this.state.lastRecord(registration.name))?.record;
-      if (record !== undefined) names.add(record.tracker.workspace);
-    }
     let failed: unknown = null;
-    for (const name of names) {
-      // A workspace that `login linear` never signed in to has no runner token.
-      if (config.linear[name] === undefined) continue;
+    for (const name of Object.keys(config.linear)) {
       try {
         await this.tracker.revokeRunnerToken(name);
       } catch (error) {
@@ -191,30 +191,37 @@ export class Poll {
    * Each entry goes on its own: one that throws, such as on a failed Linear read, stays as it was, and the next
    * tick under the marker tries it again.
    */
-  private async stopEach(now: Date, config: Config, workspace: Workspace): Promise<void> {
+  private async stopEach(now: Date, config: Config, workspace: Workspace): Promise<boolean> {
+    let finished = true;
     for (const entry of await this.state.sessions()) {
       try {
         if (entry.state === "running") await this.stopSession(now, entry, "stop");
         if (entry.state === "retry_waiting") await this.pauseStopped(now, config, entry, { session: entry.id, attempt: entry.attempt }, workspace);
       } catch (error) {
         await this.state.log(now, `${entry.id} ${entry.issue}: stop failed, retrying next poll: ${(error as Error).message}`);
+        finished = false;
       }
     }
+    return finished;
   }
 
   /**
-   * Asks the Harness to stop a running session, once, and records why in its entry, for its `stopped` exit.
-   * The exit comes later, and the next tick handles it.
+   * Asks the Harness to stop a running session, and records why in its entry, for its `stopped` exit. The first
+   * cause stays. The request goes once, and a request that failed goes again at the next call. The exit comes
+   * later, and the next tick handles it.
    */
   private async stopSession(now: Date, entry: SessionEntry, cause: StopCause): Promise<void> {
-    if (entry.stop_cause !== undefined) return;
+    if (this.stopsSent.has(entry.id)) return;
     if (entry.pid === null || entry.pid_started_at === null) {
       await this.state.log(now, `${entry.id} ${entry.issue}: no process to stop`);
       return;
     }
-    await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? { ...each, stop_cause: cause } : each)));
-    await this.state.log(now, `${entry.id} ${entry.issue}: stopping (${cause})`);
+    if (entry.stop_cause === undefined) {
+      await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? { ...each, stop_cause: cause } : each)));
+    }
+    await this.state.log(now, `${entry.id} ${entry.issue}: stopping (${entry.stop_cause ?? cause})`);
     await this.harness.stop({ session: entry.id, uuid: entry.claude_uuid ?? "", pid: entry.pid, pidStartedAt: entry.pid_started_at });
+    this.stopsSent.add(entry.id);
   }
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
@@ -324,8 +331,13 @@ export class Poll {
   private async entryRepo(config: Config, entry: SessionEntry, workspace: Workspace): Promise<TrackerRepo | null> {
     const registration = config.repos.find((repo) => repo.name === entry.repo);
     if (registration === undefined) return null;
-    if (entry.state !== "retry_waiting") return this.sessionRepo(config, registration, entry.id, workspace);
-    return trackerRepo(config, registration, (await this.state.lastRecord(registration.name))?.record ?? null);
+    if (entry.state === "retry_waiting") return trackerRepo(config, registration, (await this.state.lastRecord(registration.name))?.record ?? null);
+    // Step 4 asks at each poll, and a session's take never changes, so it reads the take's record once.
+    const cached = this.takeRepos.get(entry.id);
+    if (cached !== undefined) return cached;
+    const repo = await this.sessionRepo(config, registration, entry.id, workspace);
+    if (repo !== null) this.takeRepos.set(entry.id, repo);
+    return repo;
   }
 
   // Exits.
@@ -409,6 +421,8 @@ export class Poll {
 
   /** The session is over: its workspace goes, and so does its entry. */
   private async finish(entry: SessionEntry, workspace: Workspace): Promise<void> {
+    this.takeRepos.delete(entry.id);
+    this.stopsSent.delete(entry.id);
     await workspace.dispose({ session: entry.id, worktree: entry.worktree });
     await this.dropEntry(entry.id);
   }
@@ -527,7 +541,8 @@ export class Poll {
           state: this.state,
           workspace,
           folders: this.folders,
-          stillWorking: async (entry) => (await stillWorking(this.tracker, (await this.entryRepo(config, entry, workspace)) ?? tracker, entry)) !== null,
+          tracker: this.tracker,
+          takeRepo: async (entry) => (await this.entryRepo(config, entry, workspace)) ?? tracker,
           stop: (entry) => this.stopSession(now, entry, "moved_out"),
         });
         // 5. Answers.

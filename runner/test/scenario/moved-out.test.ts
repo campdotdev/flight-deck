@@ -113,6 +113,17 @@ describe("an issue moved out of Planning", () => {
     expect((await world.status()).sessions.map(({ state }) => state)).toEqual(["running"]);
   });
 
+  test("stops a session whose issue moves into the status a newer record calls Planning", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const session = await running(issue);
+    await world.push({ ".flight-deck/record.toml": SHADERS_RECORD.replace('planning = "Planning"', `planning = "${UNMAPPED_STATUS}"`) });
+    await world.tick();
+    // The snapshot now calls the new status Planning, but the take didn't, so the issue left its working status.
+    world.tracker.setStatus(issue.id, UNMAPPED_STATUS);
+    await world.tick();
+    expect(world.harness.stops).toEqual([session]);
+  });
+
   test("leaves a session alone when the default branch's record renames its working status", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     await running(issue);

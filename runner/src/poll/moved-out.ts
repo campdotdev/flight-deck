@@ -16,11 +16,12 @@ export interface MovedOutContext {
   state: State;
   workspace: Workspace;
   folders: Folders;
+  tracker: Tracker;
   /**
-   * Re-reads the issue with the statuses the entry's take read, which a record changed since may map otherwise.
-   * Whether it still sits in the stage's working status on the repo's team.
+   * The repo with the statuses the entry's take read. The default branch's record may have renamed the
+   * working status since, and the snapshot maps statuses with that record.
    */
-  stillWorking(entry: SessionEntry): Promise<boolean>;
+  takeRepo(entry: SessionEntry): Promise<TrackerRepo>;
   /** Asks the Harness to stop a running session because its issue moved out. Its `stopped` exit disposes it. */
   stop(entry: SessionEntry): Promise<void>;
 }
@@ -29,11 +30,15 @@ export async function movedOut(context: MovedOutContext): Promise<void> {
   const { now, repo, snapshot, state, workspace } = context;
   for (const entry of await state.sessions()) {
     if (entry.repo !== repo.name) continue;
+    // The issue still sits in the status the take called the stage's working status. A snapshot holds only the
+    // team's issues that aren't archived.
+    const take = await context.takeRepo(entry);
+    const working = WORKING[entry.stage];
     const issue = snapshot.issues.find((each) => each.id === entry.issue_id);
-    if (issue !== undefined && issue.role === WORKING[entry.stage]) continue;
-    // The snapshot maps statuses with the default branch's record, so a session's issue looks moved when the
-    // record changed what its working status is called. A read with the take's statuses confirms the move.
-    if (await context.stillWorking(entry)) continue;
+    if (issue !== undefined && working !== undefined && issue.status === take.statuses[working]) continue;
+    // A status the default branch's record doesn't map leaves the issue out of the snapshot, so a read confirms
+    // the move.
+    if (issue === undefined && (await stillWorking(context.tracker, take, entry)) !== null) continue;
     const log = (message: string) => state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, ${message}`);
     switch (entry.state) {
       case "running":

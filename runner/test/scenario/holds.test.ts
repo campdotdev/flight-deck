@@ -212,14 +212,61 @@ describe("stop", () => {
     expect(world.tracker.stored(retrying.id).status).toBe("Paused");
   });
 
-  test("revokes the runner's token in the workspace the record names, as well as the registration's copy", async () => {
+  test("revokes the runner's token in every signed-in workspace, not only the one the registration's copy names", async () => {
     // The registration's copy names another signed-in workspace, and the poll uses the record's.
     world.config.repos[0]!.tracker.workspace = "elsewhere";
     world.config.linear.elsewhere = { ...world.config.linear.campdotdev! };
     await world.writeConfig();
     await world.tick();
     await world.stop();
-    expect(world.tracker.runnerRevokes).toEqual(["elsewhere", "campdotdev"]);
+    expect(world.tracker.runnerRevokes).toEqual(["campdotdev", "elsewhere"]);
+  });
+
+  test("asks the Harness again at the next tick when its stop request failed", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    const session = world.harness.started[0]!.session;
+    const stop = world.harness.stop.bind(world.harness);
+    let failures = 1;
+    world.harness.stop = async (handle) => {
+      if (failures-- > 0) throw new Error("kill failed");
+      return stop(handle);
+    };
+    await world.stop();
+    expect(world.harness.stops).toEqual([]);
+    await world.tick();
+    expect(world.harness.stops).toEqual([session.id]);
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
+  test("keeps the stop through a start until a waiting retry's issue is paused", async () => {
+    const running = world.issue({ title: "Save button is blue" });
+    const retrying = world.issue({ title: "Cancel button is green" });
+    world.send(running);
+    world.send(retrying);
+    world.harness.script(running.identifier, {});
+    world.harness.script(retrying.identifier, { exit: { kind: "timed_out" } });
+    await world.tick();
+    // One place, which the running session holds, so the failed one's retry waits.
+    world.config.concurrency_cap = 1;
+    await world.writeConfig();
+    await world.tick();
+    // The retry's pause reads the issue first, and that read fails at the stop and again at the start.
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 2;
+    world.tracker.issue = async (ref) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    await world.stop();
+    await expect(world.start()).rejects.toThrow("the stop stays");
+    expect(world.tracker.stored(retrying.id).status).toBe("Planning");
+    await world.start();
+    expect(world.tracker.stored(retrying.id).status).toBe("Paused");
   });
 
   test("replaces a hold's marker, and a later hold leaves the stop in place", async () => {
