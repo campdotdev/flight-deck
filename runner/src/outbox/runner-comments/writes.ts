@@ -5,7 +5,7 @@
 // memory, and the next poll tries the writes still to land. Nothing else happens to the issue until it lands.
 import { Lifecycle } from "../../lifecycle/index.ts";
 import type { Role } from "../../record/index.ts";
-import type { PendingComment, Reply, State } from "../../state/index.ts";
+import type { IssueMemory, PendingComment, Reply, State } from "../../state/index.ts";
 import { isUnavailable, type SnapshotIssue, type Tracker, type TrackerComment, type TrackerIssue, type TrackerRepo } from "../../tracker/index.ts";
 import { repliesAfter } from "../replies.ts";
 import type { RunnerComment } from "./frame.ts";
@@ -45,8 +45,11 @@ export class RunnerComments {
     this.clock = options.clock;
   }
 
-  /** Records the comment in issue memory, then makes its writes. */
-  async post(target: RunnerTarget, comment: RunnerComment): Promise<RunnerWriteResult> {
+  /**
+   * Records the comment in issue memory, then makes its writes. `extra` holds other issue-memory fields that go in
+   * the same write, such as a stale take's stay, so a stop between two writes can't keep one without the other.
+   */
+  async post(target: RunnerTarget, comment: RunnerComment, extra: Partial<Omit<IssueMemory, "pending">> = {}): Promise<RunnerWriteResult> {
     const now = this.clock().toISOString();
     const pending: PendingComment = {
       body: comment.body,
@@ -63,7 +66,7 @@ export class RunnerComments {
       url: target.url,
     };
     const memory = await this.state.issueMemory(target.repo.name, target.id);
-    await this.state.writeIssueMemory(target.repo.name, target.id, { ...memory, pending });
+    await this.state.writeIssueMemory(target.repo.name, target.id, { ...memory, ...extra, pending });
     return this.write(target.repo, target.id, pending, false);
   }
 
@@ -82,7 +85,9 @@ export class RunnerComments {
       pending = { ...pending, landed: [...pending.landed, "move"] };
     }
     const moved = pending.pause !== null && !pending.landed.includes("move") && issue?.role !== pending.pause.from;
-    if (issue === null || moved) {
+    // A stale-take comment belongs to the stay it flagged, which issue memory's `stale_take` names. A move ends it.
+    const stayEnded = pending.flag === "stale_take" && !pending.landed.includes("post") && issue?.status_since !== memory.stale_take;
+    if (issue === null || moved || stayEnded) {
       const flag = pending.landed.includes("post") ? memory.flag : null;
       await this.state.writeIssueMemory(repo.name, uuid, { ...memory, flag, pending: null });
       await this.state.log(this.clock(), `${pending.issue}: moved on, runner comment dropped: ${pending.status_line}`);
@@ -157,7 +162,7 @@ export class RunnerComments {
  * GitHub sync, created once the runner recorded the comment, with its status line and footer. Nothing else
  * happens to the issue while the comment waits, so no other runner comment matches.
  */
-function postedComment(issue: Pick<TrackerIssue, "comments">, pending: PendingComment): TrackerComment | undefined {
+export function postedComment(issue: Pick<TrackerIssue, "comments">, pending: Pick<PendingComment, "body" | "status_line" | "since">): TrackerComment | undefined {
   const footer = pending.body
     .split("\n")
     .map((line) => line.trim())

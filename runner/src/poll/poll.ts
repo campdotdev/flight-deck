@@ -3,27 +3,30 @@
 // Tracker and Harness ports and the state file, so scenarios test it there.
 //
 // Each kind of exit has its handler in `exits/`, and each comment the runner writes on its own has its text in
-// `../outbox/runner-comments/`. Later tickets add the team check, moved-out issues, stale takes, trouble,
-// usage, holds, and the start order.
+// `../outbox/runner-comments/`. Trouble causes live in `trouble/`, and step 8 in `stale-takes.ts`. Later tickets
+// add moved-out issues, usage, holds, and the start order.
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Folders } from "../folders/index.ts";
 import { paths, sessionParts } from "../folders/index.ts";
 import { buildLaunch, type Auth, type Exit, type ExitKind, type Handle, type Harness, type HarnessSession } from "../harness/index.ts";
-import { readConfig, writeEtc, type Config, type Registration } from "../install/index.ts";
+import { hasWorkspace, othersCanRead, readConfig, readCredentials, writeEtc, type Config, type Credentials, type Registration } from "../install/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
 import { failedTwice, type FailedExit } from "../outbox/runner-comments/failed-twice.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from "../outbox/runner-comments/index.ts";
 import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/record.ts";
 import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
-import { State, type IssueMemory, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo } from "../state/index.ts";
+import { State, type IssueMemory, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusHold, type StatusRepo } from "../state/index.ts";
 import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult, type SessionJson } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
 import { EXITS, type ExitContext } from "./exits/index.ts";
 import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
+import { staleTakes } from "./stale-takes.ts";
+import { Trouble } from "./trouble/trouble.ts";
+import { MIN_VERSION, tooOld } from "./trouble/version.ts";
 
 export interface PollOptions {
   folders: Folders;
@@ -34,6 +37,8 @@ export interface PollOptions {
   /** The Tracker adapter, as the Flight Deck app. */
   tracker: Tracker;
   harness: Harness;
+  /** The runner's `PATH`, for the commands it runs itself, such as `osascript`. The process's own by default. */
+  path?: string;
 }
 
 const RECORD_PATH = ".flight-deck/record.toml";
@@ -52,6 +57,16 @@ interface RepoPoll {
    * except that a runner pause keeps its replies.
    */
   blocked: Set<string>;
+  /** Step 8's stale takes, for `status.json`. */
+  staleTakes: Status["stale_takes"];
+}
+
+/** A repo's step 1: its fetch, and the record on its default branch. */
+interface Fetched {
+  registration: Registration;
+  fetch: FetchResult;
+  /** The record on the default branch, or `null` when the branch holds none. */
+  record: RecordResult | null;
 }
 
 interface QueuedExit {
@@ -65,6 +80,7 @@ export class Poll {
   private readonly versionFolder: string;
   private readonly tracker: Tracker;
   private readonly harness: Harness;
+  private readonly path: string;
   private readonly lifecycle: Lifecycle;
   private readonly state: State;
   /** Exits queue as they happen, and the next tick handles them first. */
@@ -78,6 +94,7 @@ export class Poll {
     this.versionFolder = options.versionFolder;
     this.tracker = options.tracker;
     this.harness = options.harness;
+    this.path = options.path ?? process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin";
     this.lifecycle = new Lifecycle(options.tracker);
     this.state = new State(options.folders);
   }
@@ -88,12 +105,37 @@ export class Poll {
     await this.writeEtc(config);
     const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
     await this.handleExits(now, config, workspace);
+    const trouble = await Trouble.load(this.state);
+    const credentials = await this.checkCredentials(trouble);
+
+    // Every repo's fetch comes first, so the shared-team check reads the team each repo's poll uses.
+    const fetched: Fetched[] = [];
+    for (const registration of config.repos) fetched.push(await this.fetchRepo(now, registration, workspace));
+    checkSharedTeams(fetched, trouble);
 
     const repos: RepoPoll[] = [];
-    for (const registration of config.repos) repos.push(await this.pollRepo(now, config, registration, workspace));
+    for (const each of fetched) repos.push(await this.pollRepo(now, config, credentials, each, workspace, trouble));
+    checkGithubToken(repos, trouble);
 
-    await this.starts(now, config, repos, workspace);
-    await this.publish(now, config, repos);
+    await this.starts(now, config, repos, workspace, trouble);
+    // 10. Trouble.
+    const reachable = new Map(repos.flatMap((poll) => (poll.tracker === null ? [] : [[poll.registration.name, poll.tracker] as const])));
+    await trouble.settle({ now, tracker: this.tracker, state: this.state, version: this.version, path: this.path, repos: reachable });
+    await this.publish(now, config, repos, trouble);
+  }
+
+  /**
+   * `credentials.env` that anyone but the maintainer can read holds every session, and the runner stays up, so
+   * launchd doesn't restart it in a loop. A missing file isn't this cause: each repo gets `linear_login` (ADR 0005).
+   */
+  private async checkCredentials(trouble: Trouble): Promise<Credentials | null> {
+    const credentials = await readCredentials(this.folders);
+    if (credentials !== null && othersCanRead(credentials)) {
+      trouble.open("credentials", "runner", { scope: "runner", repos: [], facts: { mode: `0${credentials.mode.toString(8)}` } });
+    } else {
+      trouble.clear("credentials", "runner");
+    }
+    return credentials;
   }
 
   /** `etc/` at each start, and again whenever `[machine_user]` changes (spec 1, "Folders and files"). */
@@ -241,13 +283,13 @@ export class Poll {
 
   // Each repo.
 
-  private async pollRepo(now: Date, config: Config, registration: Registration, workspace: Workspace): Promise<RepoPoll> {
-    // 1. Fetch.
+  /**
+   * 1. Fetch, and the record on the default branch. State keeps the last valid record and the time of its latest
+   * read, for the stale-take limits.
+   */
+  private async fetchRepo(now: Date, registration: Registration, workspace: Workspace): Promise<Fetched> {
     const fetch = await workspace.fetch(registration);
     if (!fetch.ok) await this.state.log(now, `${registration.name}: fetch failed: ${fetch.error}`);
-
-    // 2. Check the team. The record on the default branch names it, or else the registration's copy does.
-    // State keeps the last valid record and the time of its latest read, for the stale-take limits.
     let record: RecordResult | null = null;
     if (fetch.ok) {
       record = await this.recordAt(workspace, registration, fetch.head);
@@ -255,40 +297,114 @@ export class Poll {
         await this.state.writeLastRecord(registration.name, { commit: fetch.head, read_at: now.toISOString(), record: record.record });
       }
     }
-    const repo = trackerRepo(config, registration, record?.ok === true ? record.record : null);
+    return { registration, fetch, record };
+  }
 
-    // 3. Snapshot, with the comments since the repo's cursor. A failed Linear call, such as a network error or a
-    // 5xx, in the snapshot or in steps 5 to 7 skips this repo's starts for this poll only. The other repos still
-    // poll, and the tick still publishes the heartbeat and `status.json`.
+  private async pollRepo(
+    now: Date,
+    config: Config,
+    credentials: Credentials | null,
+    { registration, fetch, record }: Fetched,
+    workspace: Workspace,
+    trouble: Trouble,
+  ): Promise<RepoPoll> {
+    // 2. Check the team. The record on the default branch names it, or else the registration's copy does.
+    // A failed Linear call, such as a network error or a 5xx, in the team query, the snapshot, or steps 5 to 8
+    // skips this repo's starts for this poll only. The other repos still poll, and the tick still publishes the
+    // heartbeat and `status.json`.
+    let repo: { repo: TrackerRepo; usable: boolean } | null = null;
+    try {
+      repo = await this.checkTeam(config, credentials, registration, record?.ok === true ? record.record : null, trouble);
+    } catch (error) {
+      await this.state.log(now, `${registration.name}: team check failed: ${(error as Error).message}`);
+    }
+
+    // 3. Snapshot, with the comments since the repo's cursor.
     let snapshot: Snapshot | null = null;
-    if (repo !== null) {
+    if (repo !== null && repo.usable) {
       try {
-        snapshot = await this.tracker.snapshot(repo, { since: await this.state.cursor(registration.name) });
+        snapshot = await this.tracker.snapshot(repo.repo, { since: await this.state.cursor(registration.name) });
       } catch (error) {
         await this.state.log(now, `${registration.name}: snapshot failed: ${(error as Error).message}`);
       }
     }
     const blocked = new Set<string>();
+    let stale: Status["stale_takes"] = [];
     if (repo !== null && snapshot !== null) {
+      const tracker = repo.repo;
       try {
         // A runner comment Linear didn't take yet goes first, and nothing else happens to its issue this poll.
-        for (const issue of await this.pendingComments(now, repo, snapshot)) blocked.add(issue);
+        for (const issue of await this.pendingComments(now, tracker, snapshot)) blocked.add(issue);
         // 5. Answers. FLD-104 adds step 4, moved out.
-        const handled = await this.answers(now, repo, snapshot, blocked);
+        const handled = await this.answers(now, tracker, snapshot, blocked);
         for (const issue of blocked) handled.add(issue);
         // The cursor moves only once every comment it passes is in issue memory.
         const latest = snapshot.comments.at(-1)?.created_at;
         if (latest !== undefined) await this.state.writeCursor(registration.name, latest);
         // 6. Flags, and 7. Subscriptions.
-        await this.flags(now, repo, snapshot, handled);
-        await this.subscriptions(repo, snapshot, handled);
+        await this.flags(now, tracker, snapshot, handled);
+        await this.subscriptions(tracker, snapshot, handled);
+        // 8. Stale takes.
+        stale = await staleTakes({
+          now,
+          repo: tracker,
+          snapshot,
+          blocked,
+          record: record?.ok === true ? record.record : ((await this.state.lastRecord(registration.name))?.record ?? null),
+          sessions: await this.state.sessions(),
+          state: this.state,
+          comments: this.comments(now),
+          version: this.version,
+        });
       } catch (error) {
-        await this.state.log(now, `${registration.name}: runner comments, answers, flags, or subscriptions failed: ${(error as Error).message}`);
+        await this.state.log(now, `${registration.name}: runner comments, answers, flags, subscriptions, or stale takes failed: ${(error as Error).message}`);
         snapshot = null;
       }
     }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
-    return { registration, tracker: repo, fetch, record, snapshot, waitingForSpecs, blocked };
+    return { registration, tracker: repo?.repo ?? null, fetch, record, snapshot, waitingForSpecs, blocked, staleTakes: stale };
+  }
+
+  /**
+   * Step 2's checks, before any other Linear call for the repo: a Linear login for its workspace, a team no other
+   * registration names, and the team query (ADRs 0005 and 0006). Each failure opens its trouble cause and skips
+   * the rest of the repo's poll. Returns the repo for the Tracker, and whether the poll goes on.
+   */
+  private async checkTeam(
+    config: Config,
+    credentials: Credentials | null,
+    registration: Registration,
+    record: RepoRecord | null,
+    trouble: Trouble,
+  ): Promise<{ repo: TrackerRepo; usable: boolean } | null> {
+    const name = registration.name;
+    const tracker = record?.tracker ?? registration.tracker;
+    const workspace = tracker.workspace;
+    const repo = trackerRepo(config, registration, record);
+    if (repo === null || !hasWorkspace(credentials, workspace)) {
+      trouble.open("linear_login", name, { scope: "repo", repos: [name], facts: { repo: name, workspace } });
+      return null;
+    }
+    trouble.clear("linear_login", name);
+    if (trouble.isOpen("shared_team", `${tracker.workspace}/${tracker.team}`)) return { repo, usable: false };
+
+    const team = await this.tracker.checkTeam(repo);
+    if (!team.ok && team.reason === "unreadable") {
+      trouble.open("team_unreadable", name, { scope: "repo", repos: [name], facts: { repo: name, team: repo.team } });
+      // No repo for step 10 either: Linear can report an issue the app can't read as one it doesn't have, and
+      // step 10 would forget a trouble issue that's still open.
+      return null;
+    }
+    trouble.clear("team_unreadable", name);
+    if (!team.ok) {
+      const missing = team.roles.map((role) => ({ role, name: repo.statuses[role] }));
+      trouble.open("missing_status", name, { scope: "repo", repos: [name], facts: { repo: name, team: repo.team, missing } });
+      if (!team.roles.includes("intake")) trouble.canFile(name);
+      return { repo, usable: false };
+    }
+    trouble.clear("missing_status", name);
+    trouble.canFile(name);
+    return { repo, usable: true };
   }
 
   /**
@@ -391,6 +507,8 @@ export class Poll {
     const inFlight = new Set(snapshot.issues.filter((issue) => FACTORY_ROLES.includes(issue.role)).map((issue) => issue.id));
     for (const { uuid, memory } of await this.state.issueMemories(repo.name)) {
       if ((memory.flag === null && memory.pause === null) || inFlight.has(uuid) || handled.has(uuid)) continue;
+      // A trouble issue sits outside flight by design. Step 10 keeps its flag.
+      if (memory.flag?.cause === "trouble") continue;
       await this.state.writeIssueMemory(repo.name, uuid, { ...memory, flag: null, pause: null });
       await this.state.log(now, `${memory.flag?.issue ?? uuid}: left flight, flag and pause forgotten`);
     }
@@ -432,10 +550,26 @@ export class Poll {
 
   // Starts.
 
-  private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace): Promise<void> {
+  private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace, trouble: Trouble): Promise<void> {
     const sessions = await this.state.sessions();
     const busy = new Set(sessions.map((entry) => entry.issue_id));
     let free = config.concurrency_cap - sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
+
+    // Before each start, Claude Code's version, and nothing starts while a cause holds every session (ADR 0015).
+    const work = sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
+    if (trouble.isOpen("claude_code_version", "runner") || (free > 0 && work)) {
+      let version: string;
+      try {
+        version = await this.harness.version();
+      } catch (error) {
+        // Nothing starts this poll, and the tick still settles trouble and publishes its status.
+        await this.state.log(now, `Claude Code version check failed, no session starts this poll: ${(error as Error).message}`);
+        return;
+      }
+      if (tooOld(version)) trouble.open("claude_code_version", "runner", { scope: "runner", repos: [], facts: { version, minVersion: MIN_VERSION } });
+      else trouble.clear("claude_code_version", "runner", { version });
+    }
+    if (trouble.stopsRunner()) return;
 
     // A retry waiting for a free place starts before any new take.
     for (const entry of sessions.filter((each) => each.state === "retry_waiting")) {
@@ -669,7 +803,7 @@ export class Poll {
     return flags;
   }
 
-  private async publish(now: Date, config: Config, repos: RepoPoll[]): Promise<void> {
+  private async publish(now: Date, config: Config, repos: RepoPoll[], trouble: Trouble): Promise<void> {
     const at = now.toISOString();
     await this.state.writeHeartbeat(now);
     const sessions = await this.state.sessions();
@@ -677,7 +811,7 @@ export class Poll {
       version: this.version,
       heartbeat_at: at,
       polled_at: at,
-      runner: { state: "working", holds: [] },
+      runner: runnerStatus(trouble.holds()),
       sessions: sessions.map((entry) => ({
         id: entry.id,
         repo: entry.repo,
@@ -700,8 +834,8 @@ export class Poll {
             }
           : { auth: "subscription", five_hour: null, weekly: null },
       flags: await this.flagList(repos),
-      trouble: [],
-      stale_takes: [],
+      trouble: trouble.status(),
+      stale_takes: repos.flatMap((poll) => poll.staleTakes),
       repos: repos.map(statusRepo),
     };
     await this.state.publish(status);
@@ -728,9 +862,45 @@ function freshReplies(snapshot: Snapshot, uuid: string, after: string, known: re
 function trackerRepo(config: Config, registration: Registration, record: RepoRecord | null): TrackerRepo | null {
   const tracker = record?.tracker ?? registration.tracker;
   const linear = config.linear[tracker.workspace];
-  // FLD-98's trouble causes open `linear_login` for a workspace `login linear` hasn't signed in.
+  // Step 2 opens `linear_login` for a workspace `login linear` hasn't signed in.
   if (linear === undefined) return null;
   return { name: registration.name, workspace: tracker.workspace, team: tracker.team, statuses: tracker.statuses, maintainer: linear.maintainer_id };
+}
+
+/** The runner's state and holds. Only a hold scoped to the runner makes it `held` (spec 1, "`status.json`"). */
+function runnerStatus(holds: StatusHold[]): Status["runner"] {
+  return { state: holds.some((hold) => hold.scope === "runner") ? "held" : "working", holds };
+}
+
+/**
+ * Two repos that use the same team open `shared_team` for both, and both skip their poll (ADR 0006). A repo
+ * uses the team its default branch's valid record names, or else its registration's copy.
+ */
+function checkSharedTeams(fetched: Fetched[], trouble: Trouble): void {
+  const byTeam = new Map<string, string[]>();
+  for (const { registration, record } of fetched) {
+    const tracker = record?.ok === true ? record.record.tracker : registration.tracker;
+    const team = `${tracker.workspace}/${tracker.team}`;
+    byTeam.set(team, [...(byTeam.get(team) ?? []), registration.name]);
+  }
+  for (const [team, names] of byTeam) {
+    if (names.length < 2) continue;
+    trouble.open("shared_team", team, { scope: "repo", repos: names, facts: { workspace: team.split("/")[0]!, team: team.split("/")[1]! } });
+  }
+  trouble.clearOthers("shared_team");
+}
+
+/**
+ * A fetch that fails to authenticate opens `github_token`, which holds every session, and a fetch that
+ * authenticates clears it (ADR 0005). On a public repo a fetch needs no login, so spec 1 can't tell there.
+ */
+function checkGithubToken(repos: RepoPoll[], trouble: Trouble): void {
+  const failed = repos.find((poll) => !poll.fetch.ok && poll.fetch.auth);
+  if (failed !== undefined && !failed.fetch.ok) {
+    trouble.open("github_token", "runner", { scope: "runner", repos: [], facts: { repo: failed.registration.name, error: failed.fetch.error } });
+  } else if (repos.some((poll) => poll.fetch.ok)) {
+    trouble.clear("github_token", "runner");
+  }
 }
 
 /** How sessions pay, from `config.toml` (ADR 0005). Install always writes `[api]` on an API key. */

@@ -1,0 +1,119 @@
+// Each trouble cause's text, fixed in the runner's code with no model call (spec 1, "Trouble issues", ADR 0019):
+// the trouble issue's title and body, the cleared comment, and the macOS notification. The title is plain text
+// shaped "<what broke>: <the fix>", because the phone shows "assigned to you" and the title. A long workspace or
+// status name may push it past 79 characters, and it stays whole.
+import { codeBlock, runnerFooter } from "../../outbox/runner-comments/frame.ts";
+import type { TroubleEntry, TroubleFacts } from "../../state/index.ts";
+import { fold } from "../../tracker/index.ts";
+
+export interface TroubleText {
+  /** The trouble issue's title. A cause that files no issue has one too, for `status.json`. */
+  title: string;
+  /** The trouble issue's description, or `null` for a cause the runner can't file and only notifies. */
+  body: string | null;
+  /** The macOS notification's text, under the title "Flight Deck". */
+  notification: string;
+}
+
+/** The cleared comment: "🟢 Fixed: " and what works again, then what restarts. */
+export interface ClearedText {
+  statusLine: string;
+  sentence: string;
+}
+
+const CLOSING = "Flight Deck comments here once it works again. Close the issue then.";
+
+export function troubleText(entry: Pick<TroubleEntry, "cause" | "since" | "facts">, version: string): TroubleText {
+  const { facts } = entry;
+  const since = when(entry.since);
+  switch (entry.cause) {
+    case "missing_status": {
+      const missing = facts.missing ?? [];
+      const first = missing[0]?.name ?? "";
+      const title = `Linear status ${first} is missing: rename it back or rerun setup`;
+      // The trouble issue goes in the `intake` role's status, so a missing `intake` status can only notify.
+      if (missing[0]?.role === "intake") return { title, body: null, notification: title };
+      const body = issueBody({
+        what: `Flight Deck stopped starting sessions for ${facts.repo} at ${since}. The repo's record names Linear statuses that team ${facts.team} doesn't have:\n\n${missing.map((each) => `- ${each.name}, for the \`${each.role}\` role`).join("\n")}`,
+        steps: [
+          `In Linear, open team ${facts.team}'s settings, then its issue statuses.`,
+          "Give each status above its old name again, or add it back.",
+          "If you renamed a status on purpose, rerun setup, so the record names the new name.",
+        ],
+        details: [`- Repo: \`${facts.repo}\``, `- Team: \`${facts.team}\``, `- Missing roles: ${missing.map((each) => `\`${each.role}\``).join(", ")}`],
+        cause: entry.cause,
+        version,
+      });
+      return { title, body, notification: title };
+    }
+    case "claude_code_version": {
+      const title = `Claude Code ${facts.version} is too old for Flight Deck: run claude update`;
+      const body = issueBody({
+        what: `Flight Deck stopped starting sessions on this Mac at ${since}. It needs Claude Code ${facts.minVersion} or later, and the Mac has ${facts.version}.`,
+        steps: ["In a terminal on the Mac, run `claude update`.", `Run \`claude --version\`, and check that it prints ${facts.minVersion} or later.`],
+        details: [`- Installed: \`${facts.version}\``, `- Needed: \`${facts.minVersion}\` or later`],
+        cause: entry.cause,
+        version,
+      });
+      return { title, body, notification: title };
+    }
+    case "github_token": {
+      const title = "Flight Deck can't sign in to GitHub: run flight-deck login github";
+      const body = issueBody({
+        what: `Flight Deck stopped starting sessions on this Mac at ${since}. GitHub refused the machine user's login when Flight Deck fetched ${facts.repo}.`,
+        steps: ["In a terminal on the Mac, run `flight-deck login github`.", "Sign in as the machine user, not as yourself."],
+        details: [`- Repo: \`${facts.repo}\``, ...(facts.error === undefined ? [] : ["", `The fetch failed with:\n\n${codeBlock(facts.error)}`])],
+        cause: entry.cause,
+        version,
+      });
+      return { title, body, notification: title };
+    }
+    case "linear_login": {
+      const title = `No Linear login for ${facts.workspace}: run flight-deck login linear ${facts.workspace}`;
+      return { title, body: null, notification: title };
+    }
+    case "team_unreadable": {
+      const title = `Flight Deck can't read Linear team ${facts.team}: check the team and both apps' access`;
+      return { title, body: null, notification: title };
+    }
+    case "shared_team": {
+      const title = `Two repos use Linear team ${facts.team}: run flight-deck register for one team per repo`;
+      return { title, body: null, notification: title };
+    }
+    case "credentials": {
+      const title = "Flight Deck stopped: others can read credentials.env. Run chmod 600 on it.";
+      return { title, body: null, notification: title };
+    }
+    case "claude_login":
+    case "claude_login_soon":
+    case "linear_token":
+      // FLD-109 and FLD-112 add these causes' texts.
+      throw new Error(`no trouble text for ${entry.cause} yet`);
+  }
+}
+
+/** The comment on the trouble issue once the cause clears. `now` holds what the runner sees at the clearing poll. */
+export function clearedText(entry: Pick<TroubleEntry, "cause" | "facts">, now: TroubleFacts): ClearedText | null {
+  switch (entry.cause) {
+    case "missing_status":
+      return { statusLine: `🟢 Fixed: Linear status ${entry.facts.missing?.[0]?.name} is back.`, sentence: "This repo's sessions start again at the next poll." };
+    case "claude_code_version":
+      return { statusLine: `🟢 Fixed: Claude Code ${now.version ?? entry.facts.version} works with Flight Deck.`, sentence: "Sessions start again at the next poll." };
+    case "github_token":
+      return { statusLine: "🟢 Fixed: Flight Deck can sign in to GitHub again.", sentence: "Sessions start again at the next poll." };
+    default:
+      return null;
+  }
+}
+
+/** The body's shape: what stopped, the numbered fix, the closing sentence, then the Details fold with the footer. */
+function issueBody(input: { what: string; steps: string[]; details: string[]; cause: string; version: string }): string {
+  const steps = input.steps.map((step, i) => `${i + 1}. ${step}`).join("\n");
+  const details = [`- Cause: \`${input.cause}\``, ...input.details].join("\n");
+  return [input.what, steps, CLOSING, fold("Details", `${details}\n\n${runnerFooter(input.version)}`)].join("\n\n");
+}
+
+/** An ISO time as `2026-11-10 09:01 UTC`. */
+function when(iso: string): string {
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}

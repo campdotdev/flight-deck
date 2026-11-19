@@ -1,7 +1,6 @@
 // A sent issue gets a brief: the tracer bullet through the runner, at the one seam.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
 import { paths } from "../../src/folders/index.ts";
 import { outbox, SHADERS_RECORD, UNMAPPED_STATUS, World } from "./world.ts";
 
@@ -313,25 +312,50 @@ describe("an exit whose handling throws", () => {
 
 describe("a repo whose snapshot fails", () => {
   test("skips only that repo's starts, and the poll still publishes status.json", async () => {
-    // A second registration on the same team, polled after the first.
+    // A second registration, on its own team, polled after the first.
     const first = world.config.repos[0]!;
     const second = "campdotdev/shaders-docs";
-    world.config.repos.push({ ...first, name: second, checkout: join(world.root, "checkout-docs") });
-    await world.writeConfig();
+    await world.addRepo(second, "DOC");
     // The first repo's snapshot fails, as a network error would on the real adapter.
     const snapshot = world.tracker.snapshot.bind(world.tracker);
     world.tracker.snapshot = async (repo) => {
       if (repo.name === first.name) throw new Error("fetch failed");
       return snapshot(repo);
     };
-    const issue = world.issue({ title: "Save button is blue", description: REPORT });
-    world.send(issue);
-    world.harness.script(issue.identifier, {});
+    const [held, issue] = ["SHA", "DOC"].map((team) => world.issue({ team, title: "Save button is blue", description: REPORT }));
+    for (const each of [held!, issue!]) {
+      world.send(each);
+      world.harness.script(each.identifier, {});
+    }
     await world.tick();
-    expect(world.harness.started.map(({ session }) => [session.repo, session.issue])).toEqual([[second, issue.identifier]]);
+    expect(world.harness.started.map(({ session }) => [session.repo, session.issue])).toEqual([[second, issue!.identifier]]);
     const status = await world.status();
     expect(status.polled_at).toBe(world.now.toISOString());
     expect(status.repos.map(({ name }) => name)).toEqual([first.name, second]);
+  });
+});
+
+describe("a repo whose team query fails", () => {
+  test("skips only that repo's starts, as a failed snapshot does", async () => {
+    const first = world.config.repos[0]!;
+    const second = "campdotdev/shaders-docs";
+    await world.addRepo(second, "DOC");
+    // The first repo's team query fails, as a network error would on the real adapter.
+    const checkTeam = world.tracker.checkTeam.bind(world.tracker);
+    world.tracker.checkTeam = async (repo) => {
+      if (repo.name === first.name) throw new Error("fetch failed");
+      return checkTeam(repo);
+    };
+    const [held, issue] = ["SHA", "DOC"].map((team) => world.issue({ team, title: "Save button is blue", description: REPORT }));
+    for (const each of [held!, issue!]) {
+      world.send(each);
+      world.harness.script(each.identifier, {});
+    }
+    await world.tick();
+    expect(world.harness.started.map(({ session }) => [session.repo, session.issue])).toEqual([[second, issue!.identifier]]);
+    const status = await world.status();
+    expect(status.polled_at).toBe(world.now.toISOString());
+    expect(status.trouble).toEqual([]);
   });
 });
 
@@ -339,19 +363,20 @@ describe("a repo whose answers, flags, or subscriptions step fails", () => {
   test("skips only that repo's starts, as a failed snapshot does", async () => {
     const first = world.config.repos[0]!;
     const second = "campdotdev/shaders-docs";
-    world.config.repos.push({ ...first, name: second, checkout: join(world.root, "checkout-docs") });
-    await world.writeConfig();
+    await world.addRepo(second, "DOC");
     // The first repo's step 7 fails on a Linear write, as a network error would on the real adapter.
     const unsubscribe = world.tracker.unsubscribe.bind(world.tracker);
     world.tracker.unsubscribe = async (ref) => {
       if (ref.repo.name === first.name) throw new Error("fetch failed");
       return unsubscribe(ref);
     };
-    const issue = world.issue({ title: "Save button is blue", description: REPORT });
-    world.send(issue);
-    world.harness.script(issue.identifier, {});
+    const [held, issue] = ["SHA", "DOC"].map((team) => world.issue({ team, title: "Save button is blue", description: REPORT }));
+    for (const each of [held!, issue!]) {
+      world.send(each);
+      world.harness.script(each.identifier, {});
+    }
     await world.tick();
-    expect(world.harness.started.map(({ session }) => [session.repo, session.issue])).toEqual([[second, issue.identifier]]);
+    expect(world.harness.started.map(({ session }) => [session.repo, session.issue])).toEqual([[second, issue!.identifier]]);
     expect((await world.status()).polled_at).toBe(world.now.toISOString());
   });
 });
