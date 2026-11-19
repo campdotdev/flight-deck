@@ -2,6 +2,7 @@
 // `intake` role and posts a macOS notification, then comments when the cause clears (spec 1, "Trouble issues",
 // ADR 0011). Causes the runner can't file only notify.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { IssueNotFoundError, TrackerUnavailable } from "../../src/tracker/index.ts";
 import { World } from "./world.ts";
 
 let world: World;
@@ -96,6 +97,26 @@ describe("missing_status", () => {
     expect((await world.status()).trouble).toHaveLength(1);
   });
 
+  test("a trouble issue assigned to someone else loses its flag and keeps that assignee", async () => {
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    await world.tick();
+    world.tracker.setAssignee("SHA-1", "someone-else");
+    expect(await nextTick()).toEqual([]);
+    expect((await world.status()).flags).toEqual([]);
+    expect(world.tracker.stored("SHA-1").assignee).toBe("someone-else");
+  });
+
+  test("a cause that opens again with another status missing names that status in its comment", async () => {
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    await world.tick();
+    world.tracker.renameStatus("SHA", "Plan", "Planning");
+    await world.tick();
+    world.tracker.renameStatus("SHA", "Building", "Build");
+    expect(await nextTick()).toEqual([
+      { kind: "comment", issue: "SHA-1", body: `🟡 Needs your help: Linear status Building is missing: rename it back or rerun setup\n\n${FOOTER}` },
+    ]);
+  });
+
   test("a cause that opens again before its issue is closed comments, flags again, and files no second issue", async () => {
     const title = "Linear status Planning is missing: rename it back or rerun setup";
     world.tracker.renameStatus("SHA", "Planning", "Plan");
@@ -148,6 +169,127 @@ describe("missing_status", () => {
     expect(filed!.description).toContain("- Ready to plan, for the `ready_to_plan` role\n- Paused, for the `paused` role\n");
     expect(filed!.description).toContain("- Missing roles: `ready_to_plan`, `paused`");
   });
+
+  test("restoring a missing intake status while another stays missing files the issue for the other", async () => {
+    world.tracker.renameStatus("SHA", "Triage", "Inbox");
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    expect(await nextTick()).toEqual([]);
+    world.tracker.renameStatus("SHA", "Inbox", "Triage");
+    const writes = (await nextTick()) as { kind: string; title?: string }[];
+    expect(writes.map((write) => write.kind)).toEqual(["file", "assign"]);
+    expect(writes[0]!.title).toBe("Linear status Planning is missing: rename it back or rerun setup");
+  });
+});
+
+describe("writes Linear doesn't take", () => {
+  const title = "Linear status Planning is missing: rename it back or rerun setup";
+
+  test("a trouble issue whose create landed but whose response was lost isn't filed again", async () => {
+    const file = world.tracker.file.bind(world.tracker);
+    let lost = 1;
+    world.tracker.file = async (draft, role) => {
+      const filed = await file(draft, role);
+      if (lost-- > 0) throw new TrackerUnavailable("network");
+      return filed;
+    };
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    expect(((await nextTick()) as { kind: string }[]).map((write) => write.kind)).toEqual(["file"]);
+    expect(await nextTick()).toEqual([{ kind: "assign", issue: "SHA-1", user: world.maintainer.id }]);
+    expect((await world.status()).trouble.map((each) => each.issue_url)).toEqual(["https://linear.app/campdotdev/issue/SHA-1"]);
+    expect(await nextTick()).toEqual([]);
+  });
+
+  test("a cleared comment Linear refuses is posted at the next poll", async () => {
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    await world.tick();
+    world.tracker.renameStatus("SHA", "Plan", "Planning");
+    world.tracker.refuse("post");
+    expect(await nextTick()).toEqual([]);
+    expect(await nextTick()).toEqual([{ kind: "comment", issue: "SHA-1", body: `🟢 Fixed: Linear status Planning is back.\n\nThis repo's sessions start again at the next poll.\n\n${FOOTER}` }]);
+    expect(await nextTick()).toEqual([]);
+  });
+
+  test("a reopened comment Linear refuses is posted, and flags again, at the next poll", async () => {
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    await world.tick();
+    world.tracker.renameStatus("SHA", "Plan", "Planning");
+    await world.tick();
+    world.tracker.setAssignee("SHA-1", null);
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    world.tracker.refuse("post");
+    expect(await nextTick()).toEqual([]);
+    expect(await nextTick()).toEqual([
+      { kind: "assign", issue: "SHA-1", user: world.maintainer.id },
+      { kind: "comment", issue: "SHA-1", body: `🟡 Needs your help: ${title}\n\n${FOOTER}` },
+    ]);
+    expect((await world.status()).flags.map((flag) => flag.issue)).toEqual(["SHA-1"]);
+    expect(await nextTick()).toEqual([]);
+  });
+
+  test("a cleared comment that landed but whose response was lost isn't posted again", async () => {
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    await world.tick();
+    const post = world.tracker.post.bind(world.tracker);
+    let lost = 1;
+    world.tracker.post = async (ref, body, options) => {
+      const posted = await post(ref, body, options);
+      if (lost-- > 0) throw new TrackerUnavailable("network");
+      return posted;
+    };
+    world.tracker.renameStatus("SHA", "Plan", "Planning");
+    expect(((await nextTick()) as { kind: string }[]).map((write) => write.kind)).toEqual(["comment"]);
+    expect(await nextTick()).toEqual([]);
+  });
+
+  test("a create whose lookup Linear doesn't answer waits, and files no second issue", async () => {
+    const file = world.tracker.file.bind(world.tracker);
+    let lost = 1;
+    world.tracker.file = async (draft, role) => {
+      const filed = await file(draft, role);
+      if (lost-- > 0) throw new TrackerUnavailable("network");
+      return filed;
+    };
+    const issue = world.tracker.issue.bind(world.tracker);
+    let unanswered = 0;
+    world.tracker.issue = async (ref) => {
+      if (unanswered-- > 0) throw new TrackerUnavailable("network");
+      return issue(ref);
+    };
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    expect(((await nextTick()) as { kind: string }[]).map((write) => write.kind)).toEqual(["file"]);
+    unanswered = 1;
+    expect(await nextTick()).toEqual([]);
+    expect(await nextTick()).toEqual([{ kind: "assign", issue: "SHA-1", user: world.maintainer.id }]);
+  });
+
+  test("a flag Linear refuses is forgotten once the cause clears, so status.json lists no flag", async () => {
+    world.tracker.refuse("flag");
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    expect(((await nextTick()) as { kind: string }[]).map((write) => write.kind)).toEqual(["file"]);
+    world.tracker.renameStatus("SHA", "Plan", "Planning");
+    await world.tick();
+    expect((await world.status()).flags).toEqual([]);
+  });
+});
+
+describe("unreadable teams", () => {
+  test("a trouble issue isn't forgotten while its team is unreadable", async () => {
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    await world.tick();
+    // Linear reports an issue the app can't read as one it doesn't have.
+    const issue = world.tracker.issue.bind(world.tracker);
+    let readable = false;
+    world.tracker.issue = async (ref) => {
+      if (!readable) throw new IssueNotFoundError(ref.id);
+      return issue(ref);
+    };
+    world.tracker.setReadable("SHA", false);
+    expect(await nextTick()).toEqual([]);
+    readable = true;
+    world.tracker.setReadable("SHA", true);
+    expect(await nextTick()).toEqual([]);
+    expect((await world.status()).trouble.map((each) => each.issue_url)).toEqual(["https://linear.app/campdotdev/issue/SHA-1"]);
+  });
 });
 
 describe("notify-only causes", () => {
@@ -193,6 +335,33 @@ describe("notify-only causes", () => {
 
     world.config.repos.pop();
     await world.writeConfig();
+    await world.tick();
+    expect(world.tracker.stored(sent.id).status).toBe("Planning");
+    expect((await world.status()).runner.holds).toEqual([]);
+  });
+
+  test("two repos whose records name one team hold both, though their registrations name different teams", async () => {
+    await world.addRepo("campdotdev/shaders-docs", "DOC");
+    // The second repo's remote now holds a record that names Shaders' team.
+    world.config.repos[1]!.remote = world.config.repos[0]!.remote;
+    await world.writeConfig();
+    const sent = world.issue({ title: "Save button is blue" });
+    world.send(sent);
+    await world.tick();
+    expect(world.tracker.stored(sent.id).status).toBe("Ready to plan");
+    expect((await world.status()).runner.holds.map((hold) => [hold.cause, hold.name])).toEqual([
+      ["shared_team", "campdotdev/shaders"],
+      ["shared_team", "campdotdev/shaders-docs"],
+    ]);
+  });
+
+  test("two registrations naming one team hold nothing once their records name different teams", async () => {
+    await world.addRepo("campdotdev/shaders-docs", "DOC");
+    // The registration's copy still names Shaders' team, and the record names its own.
+    world.config.repos[1]!.tracker = { ...world.config.repos[0]!.tracker };
+    await world.writeConfig();
+    const sent = world.issue({ title: "Save button is blue" });
+    world.send(sent);
     await world.tick();
     expect(world.tracker.stored(sent.id).status).toBe("Planning");
     expect((await world.status()).runner.holds).toEqual([]);
@@ -260,6 +429,18 @@ describe("claude_code_version", () => {
       { kind: "comment", issue: "SHA-2", body: `🟢 Fixed: Claude Code 2.1.400 works with Flight Deck.\n\nSessions start again at the next poll.\n\n${FOOTER}` },
     ]);
   });
+
+  test("a failed version query starts nothing, and the tick still publishes its status", async () => {
+    world.harness.version = async () => {
+      throw new Error("claude --version printed no version: command not found");
+    };
+    const sent = world.issue({ title: "Save button is blue" });
+    world.send(sent);
+    await world.tick();
+    expect(world.harness.started).toEqual([]);
+    expect(world.tracker.stored(sent.id).status).toBe("Ready to plan");
+    expect((await world.status()).trouble).toEqual([]);
+  });
 });
 
 describe("github_token", () => {
@@ -289,6 +470,32 @@ describe("github_token", () => {
       await world.writeConfig();
       expect(await nextTick()).toEqual([
         { kind: "comment", issue: "SHA-1", body: `🟢 Fixed: Flight Deck can sign in to GitHub again.\n\nSessions start again at the next poll.\n\n${FOOTER}` },
+      ]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("opening again while the repo's intake status is missing still comments on its issue, and flags again", async () => {
+    const server = Bun.serve({ port: 0, fetch: () => new Response("", { status: 401, headers: { "WWW-Authenticate": 'Basic realm="GitHub"' } }) });
+    try {
+      const remote = world.config.repos[0]!.remote;
+      const refused = `http://127.0.0.1:${server.port}/campdotdev/shaders.git`;
+      world.config.repos[0]!.remote = refused;
+      await world.writeConfig();
+      await world.tick();
+      world.config.repos[0]!.remote = remote;
+      await world.writeConfig();
+      await world.tick();
+
+      // The maintainer clears the assignee. Then the cause opens again while no trouble issue can be filed.
+      world.tracker.setAssignee("SHA-1", null);
+      world.tracker.renameStatus("SHA", "Triage", "Inbox");
+      world.config.repos[0]!.remote = refused;
+      await world.writeConfig();
+      expect(await nextTick()).toEqual([
+        { kind: "assign", issue: "SHA-1", user: world.maintainer.id },
+        { kind: "comment", issue: "SHA-1", body: `🟡 Needs your help: Flight Deck can't sign in to GitHub: run flight-deck login github\n\n${FOOTER}` },
       ]);
     } finally {
       server.stop(true);
@@ -359,6 +566,37 @@ describe("stale takes", () => {
     expect(await nextTick(new Date(since + 5 * 3600_000))).toEqual([]);
     expect((await world.status()).flags).toEqual([]);
     expect((await world.status()).stale_takes.map((take) => take.issue)).toEqual([issue.identifier]);
+  });
+
+  test("a stale-take comment Linear refused is dropped once its stay ends", async () => {
+    const issue = handTake();
+    const since = Date.parse(world.now.toISOString());
+    await world.tick();
+    world.tracker.refuse("post");
+    expect(await nextTick(new Date(since + 31 * 60_000))).toEqual([]);
+    world.tracker.setStatus(issue.id, "Ready to plan");
+    const writes = (await nextTick()) as { kind: string }[];
+    expect(writes.filter((write) => write.kind === "comment" || write.kind === "assign")).toEqual([]);
+    expect((await world.status()).flags).toEqual([]);
+  });
+
+  test("a stale-take comment that landed before the runner stopped isn't posted again", async () => {
+    const issue = handTake();
+    const since = Date.parse(world.now.toISOString());
+    await world.tick();
+    // The comment lands, and the poll stops before anything else, as a crash would.
+    const post = world.tracker.post.bind(world.tracker);
+    let crash = 1;
+    world.tracker.post = async (ref, body, options) => {
+      const posted = await post(ref, body, options);
+      if (crash-- > 0) throw new Error("runner stopped");
+      return posted;
+    };
+    expect(((await nextTick(new Date(since + 31 * 60_000))) as { kind: string }[]).map((write) => write.kind)).toEqual(["assign", "comment"]);
+    world.restart();
+    expect(await nextTick()).toEqual([]);
+    expect(await nextTick()).toEqual([]);
+    expect((await world.status()).flags.map((flag) => flag.issue)).toEqual([issue.identifier]);
   });
 
   test("an issue in Planning with a session in the list is no stale take", async () => {

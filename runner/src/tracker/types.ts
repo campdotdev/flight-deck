@@ -125,6 +125,11 @@ export interface SyncedIssueRef extends IssueRef {
 
 /** An issue `file` files: its team comes from the repo. */
 export interface IssueDraft {
+  /**
+   * The new issue's UUID, which Linear's `issueCreate` takes, so a caller that saves it first can find an issue
+   * whose create landed though its response was lost. Linear refuses a second create with the same UUID.
+   */
+  id?: string;
   repo: TrackerRepo;
   title: string;
   description: string;

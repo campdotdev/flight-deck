@@ -56,6 +56,16 @@ export async function movedOut(context: MovedOutContext): Promise<void> {
  * Returns `null` once it was deleted, archived, moved to another team, or moved out of the working status.
  */
 export async function stillWorking(tracker: Tracker, repo: TrackerRepo, entry: SessionEntry): Promise<TrackerIssue | null> {
+  const issue = await onTeam(tracker, repo, entry);
+  const working = WORKING[entry.stage];
+  return issue !== null && working !== undefined && issue.role === working ? issue : null;
+}
+
+/**
+ * Re-reads the issue, and returns it while it's still on the repo's team and not archived, in any status.
+ * Returns `null` once it was deleted, archived, or moved to another team. Any other failed read throws.
+ */
+export async function onTeam(tracker: Tracker, repo: TrackerRepo, entry: SessionEntry): Promise<TrackerIssue | null> {
   let issue: TrackerIssue;
   try {
     issue = await tracker.issue({ id: entry.issue_id, repo });
@@ -63,8 +73,7 @@ export async function stillWorking(tracker: Tracker, repo: TrackerRepo, entry: S
     if (error instanceof IssueNotFoundError) return null;
     throw error;
   }
-  const working = WORKING[entry.stage];
-  return working !== undefined && issue.role === working && issue.team === repo.team && !issue.archived ? issue : null;
+  return issue.team === repo.team && !issue.archived ? issue : null;
 }
 
 /** Whether the outbox's status move landed, from the writes `applied.json` records. */

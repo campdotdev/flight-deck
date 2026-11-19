@@ -206,12 +206,23 @@ describe("slot entries", () => {
       "Plan can't run, because the record at `.flight-deck/record.toml` on `main` has an error:",
       "",
       "```text",
-      `slots.plan.reproduce[2]: .claude/skills/triage/SKILL.md isn't in the repo at commit ${world.commit.slice(0, 7)}`,
+      `slots.plan.reproduce[2]: .claude/skills/triage/SKILL.md isn't a file in the repo at commit ${world.commit.slice(0, 7)}`,
       "```",
     ]);
     expect(world.harness.started).toEqual([]);
     expect(world.tracker.stored(issue.id).status).toBe("Paused");
     expect(await recordState()).toBe("invalid");
+  });
+
+  test("a SKILL.md that is a directory makes the record invalid, and no session starts", async () => {
+    world = await World.create({ record: edited(REPRODUCE, 'plan = { reproduce = ["reproducing-bugs", ".claude/skills/triage"], design = [] }') });
+    await world.push({ ".claude/skills/triage/SKILL.md/notes.md": "not a skill\n" });
+    const issue = await sendAndTake();
+    const comment = afterTake(issue).find((write) => write.kind === "comment");
+    if (comment?.kind !== "comment") throw new Error("no comment");
+    expect(comment.body).toContain(`slots.plan.reproduce[2]: .claude/skills/triage/SKILL.md isn't a file in the repo at commit ${world.commit.slice(0, 7)}`);
+    expect(world.harness.started).toEqual([]);
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
   });
 
   test("a name the running version doesn't ship makes the record invalid", async () => {

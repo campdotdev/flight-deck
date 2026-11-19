@@ -1,5 +1,5 @@
-// The schema-1 rules that JSON Schema can't hold: hosts that reach GitHub, read paths that reopen a
-// credential, duplicate categories and names, and roles that share a status name.
+// The schema-1 rules that JSON Schema can't hold: hosts that reach GitHub, read paths outside the
+// folders a session may read, duplicate categories and names, and roles that share a status name.
 
 import type { Path } from "./lines.ts";
 import { ROLES } from "./types.ts";
@@ -13,17 +13,35 @@ export interface Problem {
 
 const GITHUB_HOSTS = ["github.com", "api.github.com", "uploads.github.com"];
 
-// ADRs 0007 and 0017: each would reopen a credential or the runner's socket.
-const FORBIDDEN_READ_PATHS = [
-  "~/.config/flight-deck",
-  "~/.local/share/flight-deck",
-  "~/.claude",
-  "~/.ssh",
-  "~/.gnupg",
-  "~/.aws",
-  "~/.config/gh",
-  "~/Library/Keychains",
-];
+// Spec 1: the only folders a session may read, with the paths inside them. A folder this list doesn't
+// name could hold a credential, such as ~/.netrc, and no list of forbidden folders can name them all.
+const READABLE_FOLDERS = [
+  // Toolchains, for the package manager and Node on a session's PATH.
+  "~/.nvm",
+  "~/.volta",
+  "~/.bun/bin",
+  "~/.bun/install/cache",
+  "~/Library/pnpm",
+  "~/.fnm",
+  "~/.local/share/fnm",
+  "~/Library/Application Support/fnm",
+  "~/.local/state/fnm_multishells",
+  "~/Library/Caches/fnm_multishells",
+  "~/.local/share/mise/installs",
+  "~/.local/share/mise/shims",
+  "~/.asdf/installs",
+  "~/.asdf/shims",
+  // Tool downloads and caches.
+  "~/.npm/_cacache",
+  "~/Library/Caches/ms-playwright",
+  "~/Library/Caches/Cypress",
+  "~/Library/Caches/pnpm",
+  "~/Library/Caches/Yarn",
+  "~/Library/Caches/node-gyp",
+  "~/.cache/puppeteer",
+].map((folder) => folder.toLowerCase());
+
+const READ_PATH_MESSAGE = 'must be a folder a session may read, such as "~/.nvm", or a path inside one';
 
 /** The only two roles that may share a status name. */
 const SHARED_ROLES = new Set(["intake", "backlog"]);
@@ -55,13 +73,11 @@ function checkReadPaths(record: Table): Problem[] {
   const problems: Problem[] = [];
   asList(asTable(record.sandbox)?.read_paths)?.forEach((value, i) => {
     if (typeof value !== "string" || !value.startsWith("~/")) return;
-    // APFS ignores case by default, so ~/.SSH opens ~/.ssh.
+    // APFS ignores case by default, so ~/.NVM opens ~/.nvm.
     const path = value.replace(/\/$/, "").toLowerCase();
-    const folder = FORBIDDEN_READ_PATHS.find((forbidden) => {
-      const f = forbidden.toLowerCase();
-      return path === f || path.startsWith(`${f}/`) || f.startsWith(`${path}/`);
-    });
-    if (folder) problems.push({ path: ["sandbox", "read_paths", i], message: `reopens ${folder}, which no session may read` });
+    if (!READABLE_FOLDERS.some((folder) => path === folder || path.startsWith(`${folder}/`))) {
+      problems.push({ path: ["sandbox", "read_paths", i], message: READ_PATH_MESSAGE });
+    }
   });
   return problems;
 }

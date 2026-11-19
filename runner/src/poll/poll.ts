@@ -7,10 +7,11 @@
 // `stale-takes.ts`, and every hold, the trouble ones too, comes through `holds.ts`. Later tickets add usage and
 // the start order.
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Folders } from "../folders/index.ts";
 import { paths, sessionParts } from "../folders/index.ts";
-import { buildLaunch, type Auth, type Exit, type ExitKind, type Harness, type HarnessSession, type Launch } from "../harness/index.ts";
+import { buildLaunch, type Auth, type Exit, type ExitKind, type Handle, type Harness, type HarnessSession } from "../harness/index.ts";
 import { hasWorkspace, othersCanRead, readConfig, readCredentials, writeEtc, type Config, type Credentials, type Registration } from "../install/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
@@ -19,9 +20,9 @@ import { stopPause } from "../outbox/runner-comments/stop.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from "../outbox/runner-comments/index.ts";
 import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/record.ts";
 import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
-import { State, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
+import { State, type IssueMemory, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
 import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
-import { Workspace, type FetchResult } from "../workspace/index.ts";
+import { Workspace, type FetchResult, type SessionJson } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
 import { EXITS, type ExitContext } from "./exits/index.ts";
 import { movedOut, stillWorking } from "./moved-out.ts";
@@ -55,10 +56,21 @@ interface RepoPoll {
   record: RecordResult | null;
   snapshot: Snapshot | null;
   waitingForSpecs: SnapshotIssue[];
-  /** The issues with a runner comment that hadn't landed at the start of this poll. Nothing else happens to them. */
+  /**
+   * The issues with a runner comment that hadn't landed at the start of this poll. Nothing else happens to them,
+   * except that a runner pause keeps its replies.
+   */
   blocked: Set<string>;
   /** Step 8's stale takes, for `status.json`. */
   staleTakes: Status["stale_takes"];
+}
+
+/** A repo's step 1: its fetch, and the record on its default branch. */
+interface Fetched {
+  registration: Registration;
+  fetch: FetchResult;
+  /** The record on the default branch, or `null` when the branch holds none. */
+  record: RecordResult | null;
 }
 
 interface QueuedExit {
@@ -177,10 +189,14 @@ export class Poll {
     await this.handleExits(now, config, workspace);
     const trouble = await Trouble.load(this.state);
     const credentials = await this.checkCredentials(trouble);
-    checkSharedTeams(config, trouble);
+
+    // Every repo's fetch comes first, so the shared-team check reads the team each repo's poll uses.
+    const fetched: Fetched[] = [];
+    for (const registration of config.repos) fetched.push(await this.fetchRepo(now, registration, workspace));
+    checkSharedTeams(fetched, trouble);
 
     const repos: RepoPoll[] = [];
-    for (const registration of config.repos) repos.push(await this.pollRepo(now, config, credentials, registration, workspace, trouble));
+    for (const each of fetched) repos.push(await this.pollRepo(now, config, credentials, each, workspace, trouble));
     checkGithubToken(repos, trouble);
 
     await this.starts(now, config, repos, workspace, trouble);
@@ -243,52 +259,81 @@ export class Poll {
 
   // Exits.
 
+  /**
+   * An exit leaves the queue only once it's handled. One that throws, such as on a failed Linear read, stays queued
+   * for the next tick, and the exits after it are still handled. Handling it again is safe: the Outbox skips the
+   * writes `applied.json` records, and an issue the move already left Planning has its outbox discarded.
+   */
   private async handleExits(now: Date, config: Config, workspace: Workspace): Promise<void> {
-    const queued = this.exits.splice(0);
-    if (queued.length === 0) return;
-    const outbox = new Outbox({
-      version: this.version,
-      state: this.state,
-      clock: () => now,
-      repo: (name) => {
-        const registration = config.repos.find((repo) => repo.name === name);
-        return registration === undefined ? null : trackerRepo(config, registration, null);
-      },
-    });
-    for (const { session, exit } of queued) {
-      const entry = (await this.state.sessions()).find((each) => each.id === session);
-      if (entry === undefined) continue;
-      const registration = config.repos.find((repo) => repo.name === entry.repo);
-      const repo = registration === undefined ? null : trackerRepo(config, registration, null);
-      if (repo === null) {
-        await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind}, and ${entry.repo} has no Linear sign-in`);
-        await this.finish(entry, workspace);
-        continue;
+    for (const queued of [...this.exits]) {
+      try {
+        await this.handleExit(now, config, workspace, queued);
+        this.exits.splice(this.exits.indexOf(queued), 1);
+      } catch (error) {
+        await this.state.log(now, `${queued.session}: exit ${queued.exit.kind} not handled, retrying next poll: ${(error as Error).message}`);
       }
-      await this.tracker.revoke({ id: entry.id, repo });
-
-      const sessionFolder = paths.sessionFolder(this.folders, entry.id);
-      const { transcript, claudeCodeVersion: _, error, ...kind } = exit;
-      const facts: RunnerFacts = { exit: kind as ExitKind, session: entry.id, attempt: entry.attempt, transcript };
-      if (error !== undefined) facts.error = error;
-      const context: ExitContext = {
-        now,
-        entry,
-        exit,
-        repo,
-        tracker: this.tracker,
-        state: this.state,
-        workspace,
-        sessionFolder,
-        facts,
-        apply: () => outbox.apply(sessionFolder, { identity: this.tracker }),
-        finish: () => this.finish(entry, workspace),
-        fail: (failure) => this.fail(now, repo, entry, failure, facts, workspace),
-        pause: (text) => this.runnerPause(now, repo, entry, text, facts, workspace),
-        log: (message) => this.state.log(now, `${entry.id} ${entry.issue}: ${message}`),
-      };
-      await EXITS[exit.kind](context);
     }
+  }
+
+  private async handleExit(now: Date, config: Config, workspace: Workspace, { session, exit }: QueuedExit): Promise<void> {
+    const sessions = await this.state.sessions();
+    const entry = sessions.find((each) => each.id === session);
+    if (entry === undefined) return;
+    const registration = config.repos.find((repo) => repo.name === entry.repo);
+    const repo = registration === undefined ? null : await this.sessionRepo(config, registration, entry.id, workspace);
+    if (repo === null) {
+      // Linear's revoke takes only the token, but `Tracker.revoke` takes a repo, and with no registration or no
+      // `login linear` for the workspace, Poll can't build one. The token stays live until it expires, as one a
+      // crashed runner leaves does (ADR 0005). FLD-109 revokes by session from the token the adapter holds.
+      const why = registration === undefined ? `${entry.repo} isn't registered` : "its workspace has no Linear login";
+      await this.state.log(now, `${entry.id} ${entry.issue}: Reader token not revoked, because ${why}`);
+      await this.state.log(now, `${entry.id} ${entry.issue}: exit ${exit.kind}`);
+      await this.finish(entry, workspace);
+      return;
+    }
+    await this.tracker.revoke({ id: entry.id, repo });
+
+    const sessionFolder = paths.sessionFolder(this.folders, entry.id);
+    const outbox = new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => (name === entry.repo ? repo : null) });
+    const { transcript, claudeCodeVersion: _, error, ...kind } = exit;
+    const facts: RunnerFacts = { exit: kind as ExitKind, session: entry.id, attempt: entry.attempt, transcript };
+    if (error !== undefined) facts.error = error;
+    const context: ExitContext = {
+      now,
+      entry,
+      exit,
+      repo,
+      tracker: this.tracker,
+      state: this.state,
+      workspace,
+      sessionFolder,
+      facts,
+      apply: () => outbox.apply(sessionFolder, { identity: this.tracker }),
+      finish: () => this.finish(entry, workspace),
+      fail: (failure) => this.fail(now, repo, entry, failure, facts, workspace),
+      pause: (text) => this.runnerPause(now, repo, entry, text, facts, workspace),
+      log: (message) => this.state.log(now, `${entry.id} ${entry.issue}: ${message}`),
+    };
+    await EXITS[exit.kind](context);
+  }
+
+  /**
+   * The repo as the take saw it: the record at the commit `session.json` names, which the take read and found
+   * valid. The default branch's record or the registration's copy may name other statuses by now, and reading
+   * the issue's status with those would discard a finished outbox or move the issue to the wrong status.
+   * A session folder or commit that can't be read falls back to the registration's copy.
+   */
+  private async sessionRepo(config: Config, registration: Registration, session: string, workspace: Workspace): Promise<TrackerRepo | null> {
+    let record: RepoRecord | null = null;
+    try {
+      const json = JSON.parse(await readFile(sessionParts(paths.sessionFolder(this.folders, session)).sessionJson, "utf8")) as SessionJson;
+      const text = await workspace.show(registration, json.commit, RECORD_PATH);
+      const read = text === null ? null : readRecord(text);
+      if (read?.ok === true) record = read.record;
+    } catch {
+      // Falls back to the registration's copy below.
+    }
+    return trackerRepo(config, registration, record);
   }
 
   /** The session is over: its workspace goes, and so does its entry. */
@@ -318,7 +363,8 @@ export class Poll {
         deadline: null,
         state: "retry_waiting",
       };
-      await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? waiting : each)));
+      // The entry moves to the end of the list, so retries start in the order they began waiting.
+      await this.state.writeSessions([...(await this.state.sessions()).filter((each) => each.id !== entry.id), waiting]);
       await this.state.log(now, `${entry.id} ${entry.issue}: failed (${failure.kind}), attempt ${waiting.attempt} waits for a place`);
       return;
     }
@@ -331,8 +377,10 @@ export class Poll {
    * working status, the maintainer moved it, and nothing is posted.
    */
   private async runnerPause(now: Date, repo: TrackerRepo, entry: SessionEntry, text: RunnerText, facts: RunnerFacts, workspace: Workspace): Promise<void> {
-    await this.finish(entry, workspace);
+    // Linear first: a read that fails leaves the entry, so the exit runs again at the next poll. A deleted,
+    // archived, or moved issue counts as moved out too.
     const issue = await stillWorking(this.tracker, repo, entry);
+    await this.finish(entry, workspace);
     if (issue === null || issue.role === null) {
       await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, no pause posted`);
       return;
@@ -348,60 +396,85 @@ export class Poll {
 
   // Each repo.
 
+  /**
+   * 1. Fetch, and the record on the default branch. State keeps the last valid record and the time of its latest
+   * read, for the stale-take limits.
+   */
+  private async fetchRepo(now: Date, registration: Registration, workspace: Workspace): Promise<Fetched> {
+    const fetch = await workspace.fetch(registration);
+    if (!fetch.ok) await this.state.log(now, `${registration.name}: fetch failed: ${fetch.error}`);
+    let record: RecordResult | null = null;
+    if (fetch.ok) {
+      record = await this.recordAt(workspace, registration, fetch.head);
+      if (record?.ok === true) {
+        await this.state.writeLastRecord(registration.name, { commit: fetch.head, read_at: now.toISOString(), record: record.record });
+      }
+    }
+    return { registration, fetch, record };
+  }
+
   private async pollRepo(
     now: Date,
     config: Config,
     credentials: Credentials | null,
-    registration: Registration,
+    { registration, fetch, record }: Fetched,
     workspace: Workspace,
     trouble: Trouble,
   ): Promise<RepoPoll> {
-    // 1. Fetch.
-    const fetch = await workspace.fetch(registration);
-    if (!fetch.ok) await this.state.log(now, `${registration.name}: fetch failed: ${fetch.error}`);
-
     // 2. Check the team. The record on the default branch names it, or else the registration's copy does.
-    // State keeps the last valid record, for the stale-take limits.
-    let record: RecordResult | null = null;
-    if (fetch.ok) {
-      record = await this.recordAt(workspace, registration, fetch.head);
-      if (record?.ok === true && (await this.state.lastRecord(registration.name))?.commit !== fetch.head) {
-        await this.state.writeLastRecord(registration.name, { commit: fetch.head, read_at: now.toISOString(), record: record.record });
-      }
+    // A failed Linear call, such as a network error or a 5xx, in the team query, the snapshot, or steps 5 to 8
+    // skips this repo's starts for this poll only. The other repos still poll, and the tick still publishes the
+    // heartbeat and `status.json`.
+    let repo: { repo: TrackerRepo; usable: boolean } | null = null;
+    try {
+      repo = await this.checkTeam(config, credentials, registration, record?.ok === true ? record.record : null, trouble);
+    } catch (error) {
+      await this.state.log(now, `${registration.name}: team check failed: ${(error as Error).message}`);
     }
-    const repo = await this.checkTeam(config, credentials, registration, record?.ok === true ? record.record : null, trouble);
 
     // 3. Snapshot, with the comments since the repo's cursor.
-    const snapshot = repo === null || !repo.usable ? null : await this.tracker.snapshot(repo.repo, { since: await this.state.cursor(registration.name) });
+    let snapshot: Snapshot | null = null;
+    if (repo !== null && repo.usable) {
+      try {
+        snapshot = await this.tracker.snapshot(repo.repo, { since: await this.state.cursor(registration.name) });
+      } catch (error) {
+        await this.state.log(now, `${registration.name}: snapshot failed: ${(error as Error).message}`);
+      }
+    }
     const blocked = new Set<string>();
     let stale: Status["stale_takes"] = [];
     if (repo !== null && snapshot !== null) {
       const tracker = repo.repo;
-      // A runner comment Linear didn't take yet goes first, and nothing else happens to its issue this poll.
-      for (const issue of await this.pendingComments(now, tracker, snapshot)) blocked.add(issue);
-      // 4. Moved out.
-      await movedOut({ now, repo: tracker, snapshot, state: this.state, workspace, folders: this.folders, stop: (entry) => this.stopSession(now, entry, "moved_out") });
-      // 5. Answers.
-      const handled = await this.answers(now, tracker, snapshot, blocked);
-      for (const issue of blocked) handled.add(issue);
-      // The cursor moves only once every comment it passes is in issue memory.
-      const latest = snapshot.comments.at(-1)?.created_at;
-      if (latest !== undefined) await this.state.writeCursor(registration.name, latest);
-      // 6. Flags, and 7. Subscriptions.
-      await this.flags(now, tracker, snapshot, handled);
-      await this.subscriptions(tracker, snapshot, handled);
-      // 8. Stale takes.
-      stale = await staleTakes({
-        now,
-        repo: tracker,
-        snapshot,
-        blocked,
-        record: record?.ok === true ? record.record : ((await this.state.lastRecord(registration.name))?.record ?? null),
-        sessions: await this.state.sessions(),
-        state: this.state,
-        comments: this.comments(now),
-        version: this.version,
-      });
+      try {
+        // A runner comment Linear didn't take yet goes first, and nothing else happens to its issue this poll.
+        for (const issue of await this.pendingComments(now, tracker, snapshot)) blocked.add(issue);
+        // 4. Moved out.
+        await movedOut({ now, repo: tracker, snapshot, state: this.state, workspace, folders: this.folders, stop: (entry) => this.stopSession(now, entry, "moved_out") });
+        // 5. Answers.
+        const handled = await this.answers(now, tracker, snapshot, blocked);
+        for (const issue of blocked) handled.add(issue);
+        // The cursor moves only once every comment it passes is in issue memory.
+        const latest = snapshot.comments.at(-1)?.created_at;
+        if (latest !== undefined) await this.state.writeCursor(registration.name, latest);
+        // 6. Flags, and 7. Subscriptions.
+        await this.flags(now, tracker, snapshot, handled);
+        await this.subscriptions(tracker, snapshot, handled);
+        // 8. Stale takes.
+        stale = await staleTakes({
+          now,
+          repo: tracker,
+          snapshot,
+          blocked,
+          record: record?.ok === true ? record.record : ((await this.state.lastRecord(registration.name))?.record ?? null),
+          sessions: await this.state.sessions(),
+          state: this.state,
+          comments: this.comments(now),
+          version: this.version,
+        });
+      } catch (error) {
+        await this.state.log(now, `${registration.name}: runner comments, moved out, answers, flags, subscriptions, or stale takes failed: ${(error as Error).message}`);
+        snapshot = null;
+      }
     }
     const waitingForSpecs = (snapshot?.issues ?? []).filter((issue) => issue.role === "ready_to_plan" && hasSpec(issue));
     return { registration, tracker: repo?.repo ?? null, fetch, record, snapshot, waitingForSpecs, blocked, staleTakes: stale };
@@ -420,19 +493,22 @@ export class Poll {
     trouble: Trouble,
   ): Promise<{ repo: TrackerRepo; usable: boolean } | null> {
     const name = registration.name;
-    const workspace = (record?.tracker ?? registration.tracker).workspace;
+    const tracker = record?.tracker ?? registration.tracker;
+    const workspace = tracker.workspace;
     const repo = trackerRepo(config, registration, record);
     if (repo === null || !hasWorkspace(credentials, workspace)) {
       trouble.open("linear_login", name, { scope: "repo", repos: [name], facts: { repo: name, workspace } });
       return null;
     }
     trouble.clear("linear_login", name);
-    if (trouble.isOpen("shared_team", `${registration.tracker.workspace}/${registration.tracker.team}`)) return { repo, usable: false };
+    if (trouble.isOpen("shared_team", `${tracker.workspace}/${tracker.team}`)) return { repo, usable: false };
 
     const team = await this.tracker.checkTeam(repo);
     if (!team.ok && team.reason === "unreadable") {
       trouble.open("team_unreadable", name, { scope: "repo", repos: [name], facts: { repo: name, team: repo.team } });
-      return { repo, usable: false };
+      // No repo for step 10 either: Linear can report an issue the app can't read as one it doesn't have, and
+      // step 10 would forget a trouble issue that's still open.
+      return null;
     }
     trouble.clear("team_unreadable", name);
     if (!team.ok) {
@@ -458,13 +534,14 @@ export class Poll {
     return resolveSlots(read.record, {
       commit,
       shipped: (name) => existsSync(join(this.versionFolder, "skills", name, "SKILL.md")),
-      inRepo: async (path) => (await workspace.show(registration, commit, `${path}/SKILL.md`)) !== null,
+      inRepo: (path) => workspace.isFile(registration, commit, `${path}/SKILL.md`),
     });
   }
 
   /**
-   * Tries each runner comment Linear didn't take at an earlier poll again (spec 1, "The runner's own comments").
-   * Returns every issue that had one, landed or not, so nothing else happens to it this poll.
+   * Tries each runner comment Linear didn't take at an earlier poll again (spec 1, "The runner's own comments"),
+   * once a pause has kept this snapshot's replies. Returns every issue that had one, landed or not, so nothing
+   * else happens to it this poll.
    */
   private async pendingComments(now: Date, repo: TrackerRepo, snapshot: Snapshot): Promise<string[]> {
     const pending: string[] = [];
@@ -472,6 +549,8 @@ export class Poll {
     for (const { uuid, memory } of await this.state.issueMemories(repo.name)) {
       if (memory.pending === null) continue;
       pending.push(uuid);
+      // The snapshot's replies go in first, so the read that lands the pause can't replace a body this poll saw.
+      await this.keepPendingReplies(repo, snapshot, uuid);
       const result = await comments.retry(repo, uuid, snapshot.issues.find((issue) => issue.id === uuid) ?? null);
       await this.state.log(now, `${memory.pending.issue}: runner comment ${result}`);
     }
@@ -481,27 +560,30 @@ export class Poll {
   // 5. Answers.
 
   /**
-   * For each paused issue with an open pause, keeps each comment posted after the pause comment as the first
-   * snapshot that returned it saw it, then moves the issue when the oldest reply that names an answer does,
+   * For each issue with an open pause, keeps each comment posted after the pause comment as the first snapshot
+   * that returned it saw it. Then it moves each paused issue when the oldest reply that names an answer does,
    * and clears the flag (ADR 0019). Any other reply leaves the issue paused and flagged.
    */
   private async answers(now: Date, repo: TrackerRepo, snapshot: Snapshot, blocked: Set<string>): Promise<Set<string>> {
-    const handled = new Set<string>();
+    // Every open pause's replies go into issue memory before any move, so a move that fails, on this issue or
+    // another, still leaves them as first seen.
+    const open: { issue: SnapshotIssue; memory: IssueMemory; pause: OpenPause }[] = [];
     for (const issue of snapshot.issues) {
-      if (issue.role !== "paused" || blocked.has(issue.id)) continue;
+      if ((issue.role !== "paused" && issue.role !== "planning") || blocked.has(issue.id)) continue;
       const memory = await this.state.issueMemory(repo.name, issue.id);
       const pause = memory.pause;
-      if (pause === null) continue;
-      const known = new Set(pause.replies.map((reply) => reply.id));
-      const fresh: Reply[] = snapshot.comments
-        .filter((comment) => comment.issue === issue.id && comment.created_at > pause.comment_at && !known.has(comment.id))
-        .map(({ id, author, created_at, body, synced }) => ({ id, author, created_at, body, synced }));
-      const open: OpenPause = { ...pause, replies: [...pause.replies, ...fresh] };
-      const answer = answerOf(open, repo.maintainer);
-      if (answer === null) {
-        if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, issue.id, { ...memory, pause: open });
-        continue;
-      }
+      // A pause in Planning keeps its replies, and takes no answer yet, only while its move to Paused is pending.
+      if (pause === null || (issue.role === "planning" && !pause.pending)) continue;
+      const fresh = freshReplies(snapshot, issue.id, pause.comment_at, pause.replies);
+      const seen: OpenPause = { ...pause, replies: [...pause.replies, ...fresh] };
+      if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, issue.id, { ...memory, pause: seen });
+      if (issue.role === "paused") open.push({ issue, memory, pause: seen });
+    }
+
+    const handled = new Set<string>();
+    for (const { issue, memory, pause } of open) {
+      const answer = answerOf(pause, repo.maintainer);
+      if (answer === null) continue;
       const moved = await this.lifecycle.move(issue, answer.move, "answer");
       if (!moved.ok) {
         await this.state.log(now, `${issue.identifier}: answer ${answer.word} refused: ${moved.violation}`);
@@ -515,12 +597,25 @@ export class Poll {
     return handled;
   }
 
+  /**
+   * A runner pause whose writes wait keeps each reply as the first snapshot that returned it saw it, though it
+   * takes no answer until it lands. Until its post's creation time is known, as after a lost response, every
+   * comment since the runner recorded it is kept, and the landing keeps only those after the comment.
+   */
+  private async keepPendingReplies(repo: TrackerRepo, snapshot: Snapshot, uuid: string): Promise<void> {
+    const memory = await this.state.issueMemory(repo.name, uuid);
+    const pending = memory.pending;
+    if (pending === null || pending.pause === null) return;
+    const fresh = freshReplies(snapshot, uuid, pending.comment_at ?? pending.since, pending.replies);
+    if (fresh.length > 0) await this.state.writeIssueMemory(repo.name, uuid, { ...memory, pending: { ...pending, replies: [...pending.replies, ...fresh] } });
+  }
+
   // 6. Flags.
 
   /**
    * The runner owns an in-flight issue's assignee (ADR 0011). A flagged issue back in a factory queue loses
-   * its flag. An assignee the runner didn't set goes. An assignee the maintainer cleared by hand clears the
-   * flag, and the runner doesn't assign again. A flagged or paused issue that leaves flight loses its flag and
+   * its flag. An assignee the runner didn't set goes. An assignee the maintainer cleared by hand, or set to
+   * someone else, clears the flag, and the runner doesn't assign again. A flagged or paused issue that leaves flight loses its flag and
    * open pause, and keeps its assignee, because it's the maintainer's again. Adds each issue it clears to `handled`.
    */
   private async flags(now: Date, repo: TrackerRepo, snapshot: Snapshot, handled: Set<string>): Promise<void> {
@@ -537,13 +632,20 @@ export class Poll {
       if (handled.has(issue.id)) continue;
       const memory = await this.state.issueMemory(repo.name, issue.id);
       let next = memory;
-      // A pause closes when its issue leaves Paused.
-      if (memory.pause !== null && issue.role !== "paused") next = { ...next, pause: null };
+      // A pause closes when its issue leaves Paused, unless it waits in Planning for its pending move to Paused.
+      const waits = issue.role === "planning" && memory.pause?.pending === true;
+      if (memory.pause !== null && issue.role !== "paused" && !waits) next = { ...next, pause: null };
       if (memory.flag === null ? issue.assignee !== null : QUEUE_ROLES.includes(issue.role)) {
         await this.tracker.clearFlag(issue);
         next = { ...next, flag: null };
         handled.add(issue.id);
-      } else if (memory.flag !== null && issue.assignee === null) {
+      } else if (memory.flag !== null && issue.assignee !== repo.maintainer) {
+        // An assignee cleared by hand, or set to someone else, clears the flag, and the runner doesn't assign again.
+        // It clears an assignee it didn't set, which unsubscribes the maintainer too.
+        if (issue.assignee !== null) {
+          await this.tracker.clearFlag(issue);
+          handled.add(issue.id);
+        }
         next = { ...next, flag: null };
       }
       if (next !== memory) await this.state.writeIssueMemory(repo.name, issue.id, next);
@@ -571,7 +673,14 @@ export class Poll {
     // Before each start, Claude Code's version (ADR 0015).
     const work = sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
     if (trouble.isOpen("claude_code_version", "runner") || (free > 0 && work)) {
-      const version = await this.harness.version();
+      let version: string;
+      try {
+        version = await this.harness.version();
+      } catch (error) {
+        // Nothing starts this poll, and the tick still settles trouble and publishes its status.
+        await this.state.log(now, `Claude Code version check failed, no session starts this poll: ${(error as Error).message}`);
+        return;
+      }
       if (tooOld(version)) trouble.open("claude_code_version", "runner", { scope: "runner", repos: [], facts: { version, minVersion: MIN_VERSION } });
       else trouble.clear("claude_code_version", "runner", { version });
     }
@@ -636,38 +745,44 @@ export class Poll {
       state: "starting",
     };
 
-    if (retry === undefined) {
-      // 1. The entry first, then the take, so the issue never sits in Planning unseen (ADR 0002).
-      await this.state.writeSessions([...(await this.state.sessions()), entry]);
-      const taken = await this.lifecycle.move(issue, "planning", "take");
-      if (!taken.ok) {
-        await this.state.log(now, `${id} ${issue.identifier}: take refused: ${taken.violation}`);
-        await this.dropEntry(id);
+    // 1. The entry first, then the take, so the issue never sits in Planning unseen (ADR 0002). A retry's fresh
+    // session takes the waiting entry's place.
+    if (retry === undefined) await this.state.writeSessions([...(await this.state.sessions()), entry]);
+    else await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
+    // A throw from here until the Harness holds the session, such as a failed Linear read, ends the start: the
+    // workspace and the entry go, so a `starting` entry with no session never holds a slot. A retry's entry
+    // waits as `retry_waiting` again. A failed prepare or launch is a failed session instead.
+    let preparing = false;
+    let minted = false;
+    let handle: Handle;
+    let deadline: string;
+    try {
+      if (retry === undefined) {
+        const taken = await this.lifecycle.move(issue, "planning", "take");
+        if (!taken.ok) {
+          await this.state.log(now, `${id} ${issue.identifier}: take refused: ${taken.violation}`);
+          await this.dropEntry(id);
+          return;
+        }
+      }
+
+      // 2. The record at the commit the session starts from: the default branch's tip at this poll. A retry reads
+      // it again at its own commit. A missing, invalid, or too-new record pauses the issue and uses no retry.
+      const commit = poll.fetch.head;
+      const read = await this.recordAt(workspace, registration, commit);
+      if (read?.ok !== true) {
+        await this.runnerPause(now, repo, entry, recordPause(read, poll.fetch.branch, this.version), {}, workspace);
         return;
       }
-    } else {
-      await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === retry.id ? entry : each)));
-    }
+      const record: RepoRecord = read.record;
+      deadline = new Date(now.getTime() + durationMs(record.time_limits.plan)).toISOString();
+      const linear = config.linear[repo.workspace];
+      const full = await this.tracker.issue(issue);
+      const memory = await this.state.issueMemory(registration.name, issue.id);
 
-    // 2. The record at the commit the session starts from: the default branch's tip at this poll. A retry reads
-    // it again at its own commit. A missing, invalid, or too-new record pauses the issue and uses no retry.
-    const commit = poll.fetch.head;
-    const read = await this.recordAt(workspace, registration, commit);
-    if (read?.ok !== true) {
-      await this.runnerPause(now, repo, entry, recordPause(read, poll.fetch.branch, this.version), {}, workspace);
-      return;
-    }
-    const record: RepoRecord = read.record;
-    const deadline = new Date(now.getTime() + durationMs(record.time_limits.plan)).toISOString();
-    const linear = config.linear[repo.workspace];
-    const full = await this.tracker.issue(issue);
-    const memory = await this.state.issueMemory(registration.name, issue.id);
-
-    // 3. Prepare, then the launch. A failure of either is a failed session.
-    let prepared;
-    let launch: Launch;
-    try {
-      prepared = await workspace.prepare({
+      // 3. Prepare, then the launch. A failure of either is a failed session.
+      preparing = true;
+      const prepared = await workspace.prepare({
         session: id,
         stage,
         mode: "issue",
@@ -689,7 +804,7 @@ export class Poll {
           syncedComments: full.comments.filter((comment) => comment.synced).map((comment) => comment.id),
         },
       });
-      launch = await buildLaunch({
+      const launch = await buildLaunch({
         folders: this.folders,
         id,
         stage,
@@ -703,35 +818,52 @@ export class Poll {
         auth: auth(config),
         versionFolder: this.versionFolder,
       });
+      preparing = false;
+
+      // 4. The Reader token, then the session. A mint can land without its response, so a failed start revokes
+      // from the moment the mint is sent. Revoking a session with no token does nothing.
+      minted = true;
+      await this.tracker.sessionToken({ id, repo });
+      const session: HarnessSession = {
+        id,
+        stage,
+        mode: "issue",
+        repo: registration.name,
+        issue: issue.identifier,
+        worktree: prepared.worktree,
+        sessionFolder: prepared.sessionFolder,
+        sessionJson: sessionParts(prepared.sessionFolder).sessionJson,
+        transcript: paths.transcript(this.folders, registration.name, id),
+        deadline,
+        model: config.models.plan,
+        versionFolder: this.versionFolder,
+        launch,
+      };
+      handle = await this.harness.start(session, {
+        exit: (exit) => void this.exits.push({ session: id, exit }),
+        // FLD-105 turns each event into the plan-limit hold.
+        rateLimit: () => {},
+      });
     } catch (error) {
       const message = (error as Error).message;
-      await this.state.log(now, `${id} ${issue.identifier}: prepare failed: ${message}`);
-      await this.fail(now, repo, entry, { kind: "prepare", message }, { session: id, attempt: entry.attempt, prepare: message }, workspace);
+      if (preparing) {
+        await this.state.log(now, `${id} ${issue.identifier}: prepare failed: ${message}`);
+        try {
+          await this.fail(now, repo, entry, { kind: "prepare", message }, { session: id, attempt: entry.attempt, prepare: message }, workspace);
+        } catch (failError) {
+          // A second failure's pause reads Linear first, and no exit queues it again, so a read that throws ends
+          // the start as any other throw does: the retry waits again with its attempt, and the next poll starts it.
+          await this.state.log(now, `${id} ${issue.identifier}: failed start not handled: ${(failError as Error).message}`);
+          await this.endStart(now, workspace, id, worktree, null, retry);
+        }
+      } else {
+        await this.state.log(now, `${id} ${issue.identifier}: start failed: ${message}`);
+        await this.endStart(now, workspace, id, worktree, minted ? repo : null, retry);
+      }
       return;
     }
 
-    // 4. The Reader token, then the session.
-    await this.tracker.sessionToken({ id, repo });
-    const session: HarnessSession = {
-      id,
-      stage,
-      mode: "issue",
-      repo: registration.name,
-      issue: issue.identifier,
-      worktree: prepared.worktree,
-      sessionFolder: prepared.sessionFolder,
-      sessionJson: sessionParts(prepared.sessionFolder).sessionJson,
-      transcript: paths.transcript(this.folders, registration.name, id),
-      deadline,
-      model: config.models.plan,
-      versionFolder: this.versionFolder,
-      launch,
-    };
-    const handle = await this.harness.start(session, {
-      exit: (exit) => void this.exits.push({ session: id, exit }),
-      // FLD-105 turns each event into the plan-limit hold.
-      rateLimit: () => {},
-    });
+    // The session runs now, so its exit cleans up after it, even if this write fails.
     const running: SessionEntry = {
       ...entry,
       pid: handle.pid,
@@ -742,6 +874,27 @@ export class Poll {
       state: "running",
     };
     await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === id ? running : each)));
+  }
+
+  /**
+   * Undoes a start that failed before the Harness held its session. Each step runs even when one before it fails.
+   * A retry's waiting entry takes its place back, with the attempt it had, so the next poll starts it again.
+   */
+  private async endStart(now: Date, workspace: Workspace, id: string, worktree: string, minted: TrackerRepo | null, retry?: SessionEntry): Promise<void> {
+    const steps: [string, () => Promise<void>][] = [
+      ["revoke", async () => (minted === null ? undefined : await this.tracker.revoke({ id, repo: minted }))],
+      ["dispose", () => workspace.dispose({ session: id, worktree })],
+      retry === undefined
+        ? ["drop", () => this.dropEntry(id)]
+        : ["requeue", async () => this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === id ? retry : each)))],
+    ];
+    for (const [name, step] of steps) {
+      try {
+        await step();
+      } catch (error) {
+        await this.state.log(now, `${id}: ${name} after a failed start failed: ${(error as Error).message}`);
+      }
+    }
   }
 
   private holdContext(now: Date, config: Config, trouble: Trouble): HoldContext {
@@ -816,6 +969,14 @@ function ownedIssues(snapshot: Snapshot): SnapshotIssue[] {
   return snapshot.issues.filter((issue) => FACTORY_ROLES.includes(issue.role) && !(issue.role === "ready_to_plan" && hasSpec(issue)));
 }
 
+/** The snapshot's comments on the issue after `after` that `known` doesn't hold yet, as replies. */
+function freshReplies(snapshot: Snapshot, uuid: string, after: string, known: readonly Reply[]): Reply[] {
+  const ids = new Set(known.map((reply) => reply.id));
+  return snapshot.comments
+    .filter((comment) => comment.issue === uuid && comment.created_at > after && !ids.has(comment.id))
+    .map(({ id, author, created_at, body, synced }) => ({ id, author, created_at, body, synced }));
+}
+
 /** The repo as the Tracker needs it: the record's `[tracker]` when it's valid, or else the registration's copy. */
 function trackerRepo(config: Config, registration: Registration, record: RepoRecord | null): TrackerRepo | null {
   const tracker = record?.tracker ?? registration.tracker;
@@ -825,11 +986,15 @@ function trackerRepo(config: Config, registration: Registration, record: RepoRec
   return { name: registration.name, workspace: tracker.workspace, team: tracker.team, statuses: tracker.statuses, maintainer: linear.maintainer_id };
 }
 
-/** Two registrations that name the same team open `shared_team` for both, and both skip their poll (ADR 0006). */
-function checkSharedTeams(config: Config, trouble: Trouble): void {
+/**
+ * Two repos that use the same team open `shared_team` for both, and both skip their poll (ADR 0006). A repo
+ * uses the team its default branch's valid record names, or else its registration's copy.
+ */
+function checkSharedTeams(fetched: Fetched[], trouble: Trouble): void {
   const byTeam = new Map<string, string[]>();
-  for (const registration of config.repos) {
-    const team = `${registration.tracker.workspace}/${registration.tracker.team}`;
+  for (const { registration, record } of fetched) {
+    const tracker = record?.ok === true ? record.record.tracker : registration.tracker;
+    const team = `${tracker.workspace}/${tracker.team}`;
     byTeam.set(team, [...(byTeam.get(team) ?? []), registration.name]);
   }
   for (const [team, names] of byTeam) {
