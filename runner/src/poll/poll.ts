@@ -538,7 +538,14 @@ export class Poll {
     // Before each start, Claude Code's version, and nothing starts while a cause holds every session (ADR 0015).
     const work = sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
     if (trouble.isOpen("claude_code_version", "runner") || (free > 0 && work)) {
-      const version = await this.harness.version();
+      let version: string;
+      try {
+        version = await this.harness.version();
+      } catch (error) {
+        // Nothing starts this poll, and the tick still settles trouble and publishes its status.
+        await this.state.log(now, `Claude Code version check failed, no session starts this poll: ${(error as Error).message}`);
+        return;
+      }
       if (tooOld(version)) trouble.open("claude_code_version", "runner", { scope: "runner", repos: [], facts: { version, minVersion: MIN_VERSION } });
       else trouble.clear("claude_code_version", "runner", { version });
     }

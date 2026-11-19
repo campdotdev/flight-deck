@@ -2,6 +2,7 @@
 // `intake` role and posts a macOS notification, then comments when the cause clears (spec 1, "Trouble issues",
 // ADR 0011). Causes the runner can't file only notify.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { TrackerUnavailable } from "../../src/tracker/index.ts";
 import { World } from "./world.ts";
 
 let world: World;
@@ -148,6 +149,62 @@ describe("missing_status", () => {
     expect(filed!.description).toContain("- Ready to plan, for the `ready_to_plan` role\n- Paused, for the `paused` role\n");
     expect(filed!.description).toContain("- Missing roles: `ready_to_plan`, `paused`");
   });
+
+  test("restoring a missing intake status while another stays missing files the issue for the other", async () => {
+    world.tracker.renameStatus("SHA", "Triage", "Inbox");
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    expect(await nextTick()).toEqual([]);
+    world.tracker.renameStatus("SHA", "Inbox", "Triage");
+    const writes = (await nextTick()) as { kind: string; title?: string }[];
+    expect(writes.map((write) => write.kind)).toEqual(["file", "assign"]);
+    expect(writes[0]!.title).toBe("Linear status Planning is missing: rename it back or rerun setup");
+  });
+});
+
+describe("writes Linear doesn't take", () => {
+  const title = "Linear status Planning is missing: rename it back or rerun setup";
+
+  test("a trouble issue whose create landed but whose response was lost isn't filed again", async () => {
+    const file = world.tracker.file.bind(world.tracker);
+    let lost = 1;
+    world.tracker.file = async (draft, role) => {
+      const filed = await file(draft, role);
+      if (lost-- > 0) throw new TrackerUnavailable("network");
+      return filed;
+    };
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    expect(((await nextTick()) as { kind: string }[]).map((write) => write.kind)).toEqual(["file"]);
+    expect(await nextTick()).toEqual([{ kind: "assign", issue: "SHA-1", user: world.maintainer.id }]);
+    expect((await world.status()).trouble.map((each) => each.issue_url)).toEqual(["https://linear.app/campdotdev/issue/SHA-1"]);
+    expect(await nextTick()).toEqual([]);
+  });
+
+  test("a cleared comment Linear refuses is posted at the next poll", async () => {
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    await world.tick();
+    world.tracker.renameStatus("SHA", "Plan", "Planning");
+    world.tracker.refuse("post");
+    expect(await nextTick()).toEqual([]);
+    expect(await nextTick()).toEqual([{ kind: "comment", issue: "SHA-1", body: `🟢 Fixed: Linear status Planning is back.\n\nThis repo's sessions start again at the next poll.\n\n${FOOTER}` }]);
+    expect(await nextTick()).toEqual([]);
+  });
+
+  test("a reopened comment Linear refuses is posted, and flags again, at the next poll", async () => {
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    await world.tick();
+    world.tracker.renameStatus("SHA", "Plan", "Planning");
+    await world.tick();
+    world.tracker.setAssignee("SHA-1", null);
+    world.tracker.renameStatus("SHA", "Planning", "Plan");
+    world.tracker.refuse("post");
+    expect(await nextTick()).toEqual([]);
+    expect(await nextTick()).toEqual([
+      { kind: "assign", issue: "SHA-1", user: world.maintainer.id },
+      { kind: "comment", issue: "SHA-1", body: `🟡 Needs your help: ${title}\n\n${FOOTER}` },
+    ]);
+    expect((await world.status()).flags.map((flag) => flag.issue)).toEqual(["SHA-1"]);
+    expect(await nextTick()).toEqual([]);
+  });
 });
 
 describe("notify-only causes", () => {
@@ -259,6 +316,18 @@ describe("claude_code_version", () => {
       { kind: "move", issue: sent.identifier, status: "Planning" },
       { kind: "comment", issue: "SHA-2", body: `🟢 Fixed: Claude Code 2.1.400 works with Flight Deck.\n\nSessions start again at the next poll.\n\n${FOOTER}` },
     ]);
+  });
+
+  test("a failed version query starts nothing, and the tick still publishes its status", async () => {
+    world.harness.version = async () => {
+      throw new Error("claude --version printed no version: command not found");
+    };
+    const sent = world.issue({ title: "Save button is blue" });
+    world.send(sent);
+    await world.tick();
+    expect(world.harness.started).toEqual([]);
+    expect(world.tracker.stored(sent.id).status).toBe("Ready to plan");
+    expect((await world.status()).trouble).toEqual([]);
   });
 });
 

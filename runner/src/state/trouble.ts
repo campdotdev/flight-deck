@@ -14,7 +14,7 @@ export type TroubleCause =
   | "shared_team"
   | "credentials";
 
-/** What the runner saw when the cause opened, for the trouble issue's text, and the cleared comment's. */
+/** What the runner saw at the last poll the cause was open, for the trouble issue's text, and the cleared comment's. */
 export interface TroubleFacts {
   /** `owner/repo`, for a repo's cause, or the repo whose fetch failed. */
   repo?: string;
@@ -42,7 +42,15 @@ export interface TroubleIssue {
   title: string;
   /** Whether `Tracker.flag` landed. A flag Linear didn't take is tried again at the next poll. */
   flagged: boolean;
+  /** The comment the runner owes the issue, kept until Linear takes it, so a failed write is tried again. */
+  pending?: TroubleComment;
 }
+
+/**
+ * A comment owed to a trouble issue: the cleared comment, or the reopened one, which flags the issue again when
+ * `flag` is set.
+ */
+export type TroubleComment = { kind: "cleared"; statusLine: string; sentence: string } | { kind: "reopened"; flag: boolean };
 
 /**
  * One cause. `open` is false once it cleared. A cleared entry stays while one of its issues is still open, so
@@ -61,4 +69,9 @@ export interface TroubleEntry {
   since: string;
   facts: TroubleFacts;
   issues: TroubleIssue[];
+  /**
+   * Each repo's UUID for a trouble issue being filed, saved before the create. A create can land though its
+   * response is lost, so the next poll looks the UUID up and keeps the issue it finds rather than filing another.
+   */
+  filing?: Record<string, string>;
 }
