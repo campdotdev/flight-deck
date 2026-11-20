@@ -161,6 +161,26 @@ describe("stop", () => {
     expect((await world.status()).sessions).toEqual([]);
   });
 
+  test("pauses with the ⚪ text, without a flag, a session that sent no init just before the stop reached it", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    const session = world.harness.started[0]!.session;
+    world.harness.finish(session.id, { kind: "no_init" });
+    await world.stop();
+    await world.tick();
+    expect(afterTake(issue)).toEqual([
+      {
+        kind: "comment",
+        issue: issue.identifier,
+        body: stopComment(["- Exit: `no_init`", `- Session: \`${session.id}\``, "- Attempt: 1", `- Transcript: \`${session.transcript}\``]),
+      },
+      { kind: "move", issue: issue.identifier, status: "Paused" },
+    ]);
+    expect((await world.status()).flags).toEqual([]);
+  });
+
   test("whose issue read fails for one entry still stops the rest, and the next tick pauses that issue", async () => {
     const running = world.issue({ title: "Save button is blue" });
     const retrying = world.issue({ title: "Cancel button is green" });
