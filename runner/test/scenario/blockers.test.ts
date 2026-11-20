@@ -254,4 +254,32 @@ describe("a blocker that won't be done", () => {
     expect(world.tracker.writes.map((write) => write.kind)).toEqual(["unsubscribe", "assign", "comment", "move"]);
     expect(world.harness.started).toEqual([]);
   });
+
+  test("a pause that throws skips only its own issue, and the tick still starts, publishes, and retries it next poll", async () => {
+    const failing = world.issue({ title: "Save button is blue" });
+    const other = world.issue({ title: "Save button is green" });
+    const free = world.issue({ title: "Save button is red" });
+    for (const each of [failing, other]) world.tracker.addBlocker(each.id, blocker("Canceled", `Blocker of ${each.title}`).id);
+    for (const each of [failing, other, free]) world.send(each);
+    // Linear rejects the first post with an error that isn't a network failure, such as a GraphQL error.
+    const post = world.tracker.post.bind(world.tracker);
+    let failed = false;
+    world.tracker.post = async (ref, body, options) => {
+      if (!failed && ref.id === failing.id) {
+        failed = true;
+        throw new Error("GraphQL error: something went wrong");
+      }
+      return post(ref, body, options);
+    };
+    await world.tick();
+    expect(world.tracker.stored(failing.id).status).toBe("Ready to plan");
+    expect(world.tracker.stored(other.id).status).toBe("Paused");
+    expect(startedFor(free)).toBe(1);
+    expect((await world.status()).polled_at).toBe(world.now.toISOString());
+
+    await world.tick();
+    expect(world.tracker.stored(failing.id).status).toBe("Paused");
+    expect(writesOn(failing).filter((kind) => kind === "comment")).toHaveLength(1);
+    expect(startedFor(failing)).toBe(0);
+  });
 });

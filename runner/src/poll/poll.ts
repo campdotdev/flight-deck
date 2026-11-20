@@ -824,7 +824,9 @@ export class Poll {
   /**
    * The blocker test, on each sent issue spec 1 can take, before the order and even with no free place (ADR 0002).
    * A canceled blocker, or a duplicate of nothing, pauses the issue from Ready to plan with no session and no
-   * retry used. An open blocker leaves it waiting with nothing posted, under `waiting_for_blockers`.
+   * retry used. An open blocker leaves it waiting with nothing posted, under `waiting_for_blockers`. A pause that
+   * throws skips only its own issue, which the order leaves out anyway: the tick still starts sessions, settles
+   * trouble, and publishes, and any comment the pause left pending retries at the next poll.
    */
   private async blockers(now: Date, poll: RepoPoll, busy: Set<string>): Promise<void> {
     if (poll.tracker === null || poll.snapshot === null) return;
@@ -834,8 +836,12 @@ export class Poll {
       if (test.kind === "wait") poll.waitingForBlockers.push({ issue, open: test.open });
       if (test.kind !== "pause") continue;
       const comment = runnerComment(blockerPause(test), {}, { version: this.version, statuses: poll.tracker.statuses });
-      const result = await this.comments(now).post(issue, comment);
-      await this.state.log(now, `${issue.identifier}: blocker pause ${result}: ${comment.statusLine}`);
+      try {
+        const result = await this.comments(now).post(issue, comment);
+        await this.state.log(now, `${issue.identifier}: blocker pause ${result}: ${comment.statusLine}`);
+      } catch (error) {
+        await this.state.log(now, `${issue.identifier}: blocker pause failed: ${(error as Error).message}`);
+      }
     }
   }
 
