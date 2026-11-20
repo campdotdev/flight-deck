@@ -217,6 +217,22 @@ describe("a blocker that won't be done", () => {
     });
   });
 
+  test("a bracket or a backslash in a blocker's title can't end its link early", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const canceled = blocker("Canceled", "Palette](https://example.invalid) [follow-up \\");
+    world.tracker.addBlocker(issue.id, canceled.id);
+    world.send(issue);
+    await world.tick();
+    expect(world.tracker.writes.find((write) => write.kind === "comment")).toEqual({
+      kind: "comment",
+      issue: issue.identifier,
+      body: pauseComment(
+        "🟡 Needs your help: a blocker was canceled",
+        `Plan can't start, because a blocker of this issue won't be done. [Palette\\](https://example.invalid) \\[follow-up \\\\](https://linear.app/campdotdev/issue/${canceled.identifier}) was canceled. Remove the blocking relation, or reopen the blocker.`,
+      ),
+    });
+  });
+
   test("a canceled blocker pauses even beside an open one, and its status line wins over a duplicate of nothing", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     const open = blocker("Backlog");

@@ -26,7 +26,12 @@ export function blockerPause(blockers: { canceled: readonly LinkedBlocker[]; not
 
 /** "[A](a)", "[A](a) and [B](b)", or "[A](a), [B](b), and [C](c)". */
 function links(blockers: readonly LinkedBlocker[]): string {
-  const each = blockers.map(({ title, url }) => `[${title}](${url})`);
+  const each = blockers.map(({ title, url }) => `[${linkText(title)}](${url})`);
   if (each.length <= 2) return each.join(" and ");
   return `${each.slice(0, -1).join(", ")}, and ${each.at(-1)}`;
+}
+
+/** A title as a link's text. A backslash or a square bracket gets a backslash, so a title can't end its link early. */
+function linkText(title: string): string {
+  return title.replace(/[\\[\]]/g, "\\$&");
 }

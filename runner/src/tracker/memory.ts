@@ -502,8 +502,9 @@ export class InMemoryTracker implements Tracker {
       const blocker = this.blockerIssue(this.stored(id), repo);
       return blocker.readable ? { ...blocker, original: this.original(this.stored(id), repo) } : blocker;
     });
-    // A duplicate blocker counts as its original, so a duplicate of this issue is this issue.
-    const isThis = (id: string) => id === issue.id || this.countsAs(this.stored(id)) === issue;
+    // A blocker counts as its original, so a duplicate of this issue is this issue, and this issue, when it's a
+    // duplicate itself, is its original.
+    const isThis = (id: string) => this.countsAs(this.stored(id)) === issue;
     const unblocks = [...this.issues.values()].filter(
       (other) =>
         other.blockers.some(isThis) &&

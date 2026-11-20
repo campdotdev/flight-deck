@@ -542,6 +542,13 @@ describe("snapshot blockers and unblocks", () => {
     expect((await read(one.id)).unblocks).toBe(2);
   });
 
+  test("counts nothing for an issue that is itself a duplicate of an open issue", async () => {
+    const one = issue("x", "Ready to plan");
+    tracker.setDuplicate(one.id, ops("Todo").id);
+    tracker.addBlocker(ops("Todo").id, one.id);
+    expect((await read(one.id)).unblocks).toBe(0);
+  });
+
   test("doesn't follow the duplicate relation of a blocker the app can't read", async () => {
     const one = issue("x", "Ready to plan");
     const behindSecret = ops("Todo");
