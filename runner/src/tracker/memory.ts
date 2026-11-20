@@ -247,9 +247,14 @@ export class InMemoryTracker implements Tracker {
     issue.status_since = this.now();
   }
 
-  /** An issue the maintainer deletes. */
+  /** An issue the maintainer deletes. Its blocking and duplicate relations go with it. */
   deleteIssue(issueId: string): void {
-    this.issues.delete(this.stored(issueId).id);
+    const { id } = this.stored(issueId);
+    this.issues.delete(id);
+    for (const other of this.issues.values()) {
+      other.blockers = other.blockers.filter((each) => each !== id);
+      if (other.duplicate_of === id) other.duplicate_of = null;
+    }
   }
 
   /** The maintainer archives the issue. A snapshot no longer returns it. */
@@ -501,13 +506,27 @@ export class InMemoryTracker implements Tracker {
       (other) =>
         other.blockers.includes(issue.id) &&
         this.open(other) &&
-        other.blockers.every((id) => id === issue.id || !this.open(this.stored(id))),
+        other.blockers.every((id) => {
+          // A duplicate blocker counts as its original, so a duplicate of this issue is this issue.
+          const counted = this.countsAs(this.stored(id));
+          return id === issue.id || counted === issue || !this.open(counted);
+        }),
     ).length;
     return { blockers, unblocks };
   }
 
   /** The issue a duplicate relation leads to, through further duplicates, or `null` with none or a loop. */
   private original(issue: StoredIssue, repo: TrackerRepo): BlockerIssue | null {
+    const original = this.storedOriginal(issue);
+    return original === null ? null : this.blockerIssue(original, repo);
+  }
+
+  /** The issue a blocker counts as: its original when it has one, and itself otherwise. */
+  private countsAs(issue: StoredIssue): StoredIssue {
+    return this.storedOriginal(issue) ?? issue;
+  }
+
+  private storedOriginal(issue: StoredIssue): StoredIssue | null {
     const seen = new Set([issue.id]);
     let current = issue;
     while (current.duplicate_of !== null) {
@@ -517,7 +536,7 @@ export class InMemoryTracker implements Tracker {
       // The app can't read an unreadable issue's relations, so the chain stops there.
       if (!this.team(current.team).readable) break;
     }
-    return current === issue ? null : this.blockerIssue(current, repo);
+    return current === issue ? null : current;
   }
 
   private blockerIssue(issue: StoredIssue, repo: TrackerRepo): BlockerIssue {

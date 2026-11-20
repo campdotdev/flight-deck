@@ -195,6 +195,28 @@ describe("a blocker that won't be done", () => {
     });
   });
 
+  test("a duplicate blocker pauses by its original, and the comment names the original", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const toCanceled = blocker("Duplicate", "Pick colors");
+    const canceled = blocker("Canceled", "Pick the palette");
+    world.tracker.setDuplicate(toCanceled.id, canceled.id);
+    const toOrphan = blocker("Duplicate", "Pick fonts");
+    const orphan = blocker("Duplicate", "Pick the type scale");
+    world.tracker.setDuplicate(toOrphan.id, orphan.id);
+    for (const each of [toCanceled, toOrphan]) world.tracker.addBlocker(issue.id, each.id);
+    world.send(issue);
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    expect(world.tracker.writes.find((write) => write.kind === "comment")).toEqual({
+      kind: "comment",
+      issue: issue.identifier,
+      body: pauseComment(
+        "🟡 Needs your help: a blocker was canceled",
+        `Plan can't start, because blockers of this issue won't be done. ${link(canceled)} was canceled. ${link(orphan)} is marked a duplicate of no issue. Remove each blocking relation, or reopen each blocker.`,
+      ),
+    });
+  });
+
   test("a canceled blocker pauses even beside an open one, and its status line wins over a duplicate of nothing", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     const open = blocker("Backlog");

@@ -516,4 +516,41 @@ describe("snapshot blockers and unblocks", () => {
     tracker.addBlocker(closed.id, one.id);
     expect((await read(one.id)).unblocks).toBe(2);
   });
+
+  test("counts a duplicate blocker as its original when it counts what an issue unblocks", async () => {
+    const one = issue("x", "Ready to plan");
+    const behindOpen = ops("Todo");
+    const open = ops("Todo");
+    const toOpen = ops("Duplicate");
+    tracker.setDuplicate(toOpen.id, open.id);
+    tracker.addBlocker(behindOpen.id, one.id);
+    tracker.addBlocker(behindOpen.id, toOpen.id);
+    const behindOne = ops("Todo");
+    const toOne = ops("Duplicate");
+    tracker.setDuplicate(toOne.id, one.id);
+    tracker.addBlocker(behindOne.id, one.id);
+    tracker.addBlocker(behindOne.id, toOne.id);
+    const behindSecret = ops("Todo");
+    const toSecret = ops("Duplicate");
+    tracker.setDuplicate(toSecret.id, tracker.addIssue({ team: "SEC", title: "Private", status: "Todo", creator: "maintainer" }).id);
+    tracker.addBlocker(behindSecret.id, one.id);
+    tracker.addBlocker(behindSecret.id, toSecret.id);
+    expect((await read(one.id)).unblocks).toBe(1);
+  });
+
+  test("drops a deleted issue from blocking and duplicate relations, so the snapshot still reads", async () => {
+    const blocked = issue("x", "Ready to plan");
+    const deleted = ops("Todo");
+    const duplicate = ops("Duplicate", "Duplicate");
+    const original = ops("Todo");
+    tracker.setDuplicate(duplicate.id, original.id);
+    tracker.addBlocker(blocked.id, deleted.id);
+    tracker.addBlocker(blocked.id, duplicate.id);
+    tracker.addBlocker(deleted.id, blocked.id);
+    tracker.deleteIssue(deleted.id);
+    tracker.deleteIssue(original.id);
+    const snapshotted = await read(blocked.id);
+    expect(snapshotted.blockers).toEqual([expect.objectContaining({ identifier: duplicate.identifier, original: null })]);
+    expect(snapshotted.unblocks).toBe(0);
+  });
 });
