@@ -502,15 +502,13 @@ export class InMemoryTracker implements Tracker {
       const blocker = this.blockerIssue(this.stored(id), repo);
       return blocker.readable ? { ...blocker, original: this.original(this.stored(id), repo) } : blocker;
     });
+    // A duplicate blocker counts as its original, so a duplicate of this issue is this issue.
+    const isThis = (id: string) => id === issue.id || this.countsAs(this.stored(id)) === issue;
     const unblocks = [...this.issues.values()].filter(
       (other) =>
-        other.blockers.includes(issue.id) &&
+        other.blockers.some(isThis) &&
         this.open(other) &&
-        other.blockers.every((id) => {
-          // A duplicate blocker counts as its original, so a duplicate of this issue is this issue.
-          const counted = this.countsAs(this.stored(id));
-          return id === issue.id || counted === issue || !this.open(counted);
-        }),
+        other.blockers.every((id) => isThis(id) || !this.open(this.countsAs(this.stored(id)))),
     ).length;
     return { blockers, unblocks };
   }
@@ -521,8 +519,12 @@ export class InMemoryTracker implements Tracker {
     return original === null ? null : this.blockerIssue(original, repo);
   }
 
-  /** The issue a blocker counts as: its original when it has one, and itself otherwise. */
+  /**
+   * The issue a blocker counts as: its original when it has one, and itself otherwise. The app can't read an
+   * unreadable blocker's relations, so that blocker counts as itself.
+   */
   private countsAs(issue: StoredIssue): StoredIssue {
+    if (!this.team(issue.team).readable) return issue;
     return this.storedOriginal(issue) ?? issue;
   }
 

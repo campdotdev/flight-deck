@@ -535,7 +535,21 @@ describe("snapshot blockers and unblocks", () => {
     tracker.setDuplicate(toSecret.id, tracker.addIssue({ team: "SEC", title: "Private", status: "Todo", creator: "maintainer" }).id);
     tracker.addBlocker(behindSecret.id, one.id);
     tracker.addBlocker(behindSecret.id, toSecret.id);
-    expect((await read(one.id)).unblocks).toBe(1);
+    const onlyByDuplicate = ops("Todo");
+    const alsoToOne = ops("Duplicate");
+    tracker.setDuplicate(alsoToOne.id, one.id);
+    tracker.addBlocker(onlyByDuplicate.id, alsoToOne.id);
+    expect((await read(one.id)).unblocks).toBe(2);
+  });
+
+  test("doesn't follow the duplicate relation of a blocker the app can't read", async () => {
+    const one = issue("x", "Ready to plan");
+    const behindSecret = ops("Todo");
+    const secret = tracker.addIssue({ team: "SEC", title: "Private", status: "Todo", creator: "maintainer" });
+    tracker.setDuplicate(secret.id, ops("Done").id);
+    tracker.addBlocker(behindSecret.id, one.id);
+    tracker.addBlocker(behindSecret.id, secret.id);
+    expect((await read(one.id)).unblocks).toBe(0);
   });
 
   test("drops a deleted issue from blocking and duplicate relations, so the snapshot still reads", async () => {
