@@ -3,8 +3,9 @@
 // Tracker and Harness ports and the state file, so scenarios test it there.
 //
 // Each kind of exit has its handler in `exits/`, and each comment the runner writes on its own has its text in
-// `../outbox/runner-comments/`. Trouble causes live in `trouble/`, and step 8 in `stale-takes.ts`. Later tickets
-// add moved-out issues, usage, holds, and the start order.
+// `../outbox/runner-comments/`. Step 4, moved out, is in `moved-out.ts`, trouble causes in `trouble/`, step 8 in
+// `stale-takes.ts`, and every hold, the trouble ones too, comes through `holds.ts`. Later tickets add usage and
+// the start order.
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -15,14 +16,17 @@ import { hasWorkspace, othersCanRead, readConfig, readCredentials, writeEtc, typ
 import { Lifecycle } from "../lifecycle/index.ts";
 import { Outbox } from "../outbox/index.ts";
 import { failedTwice, type FailedExit } from "../outbox/runner-comments/failed-twice.ts";
+import { stopPause } from "../outbox/runner-comments/stop.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerText } from "../outbox/runner-comments/index.ts";
 import { invalidRecord, newerRecord, noRecord } from "../outbox/runner-comments/record.ts";
 import { durationMs, readRecord, resolveSlots, RUNNER_SCHEMA, type RecordResult, type RepoRecord } from "../record/index.ts";
-import { State, type IssueMemory, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusHold, type StatusRepo } from "../state/index.ts";
+import { State, type IssueMemory, type OpenPause, type Reply, type SessionEntry, type Stage, type Status, type StatusRepo, type StopCause } from "../state/index.ts";
 import { FACTORY_ROLES, QUEUE_ROLES, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult, type SessionJson } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
 import { EXITS, type ExitContext } from "./exits/index.ts";
+import { movedOut, stillWorking } from "./moved-out.ts";
+import { currentHolds, holdsRepo, runnerState, type HoldContext } from "./holds.ts";
 import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
 import { staleTakes } from "./stale-takes.ts";
 import { Trouble } from "./trouble/trouble.ts";
@@ -87,6 +91,14 @@ export class Poll {
   private readonly exits: QueuedExit[] = [];
   /** The `[machine_user]` that `etc/` was last written from, or `null` before this runner's first write. */
   private etcFor: string | null = null;
+  /** Whether what the runner does at its start finished, at its first tick or a later one. */
+  private started = false;
+  /** Each running session's repo with the statuses its take read, by session ID, read once per runner. */
+  private readonly takeRepos = new Map<string, TrackerRepo>();
+  /** The sessions whose stop this runner asked the Harness for, by session ID. A failed request isn't here. */
+  private readonly stopsSent = new Set<string>();
+  /** `tick`, `hold`, `start`, and `stop` run one at a time, in the order they're called. */
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(options: PollOptions) {
     this.folders = options.folders;
@@ -100,11 +112,131 @@ export class Poll {
   }
 
   /** Runs one poll for every registered repo. */
-  async tick(now: Date): Promise<void> {
+  tick(now: Date): Promise<void> {
+    return this.serial(() => this.poll(now));
+  }
+
+  /**
+   * `flight-deck hold`: running sessions finish, and no new one starts until `start` (ADR 0021). It writes the
+   * hold marker, and leaves a `stop`'s marker as it is.
+   */
+  hold(now: Date): Promise<void> {
+    return this.serial(async () => {
+      const marker = await this.state.holdMarker();
+      if (marker !== null) return;
+      await this.state.writeHoldMarker({ by: "hold", since: now.toISOString() });
+      await this.state.log(now, "held by flight-deck hold");
+    });
+  }
+
+  /**
+   * `flight-deck start`: ends the `maintainer` and `stop` holds, by removing the hold marker (ADR 0021). A runner
+   * that started under a `stop` marker first finishes what it does at its start, so no entry the stop left
+   * outlives the marker without its pause. Until that finishes, `start` throws and the marker stays.
+   */
+  start(now: Date): Promise<void> {
+    return this.serial(async () => {
+      if ((await this.state.holdMarker()) === null) return;
+      const config = await readConfig(this.folders);
+      const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
+      await this.ensureStarted(now, config, workspace);
+      const stopped = (await this.state.holdMarker())?.by === "stop";
+      if (!this.started || (stopped && !(await this.stopEach(now, config, workspace)))) {
+        throw new Error("a stopped session's issue isn't paused yet, so the stop stays: try again after the next poll");
+      }
+      await this.state.writeHoldMarker(null);
+      await this.state.log(now, "hold ended by flight-deck start");
+    });
+  }
+
+  /**
+   * `flight-deck stop` (spec 1's "Holds", ADRs 0005, 0007, and 0021). It writes the hold marker naming `stop`,
+   * replacing a hold's, and asks the Harness to stop every running session, whose `stopped` exit pauses its
+   * issue at the next tick. It pauses the issue of each `retry_waiting` entry now, with the same ⚪ text. An
+   * `apply_waiting` entry keeps retrying, because a held runner still applies outboxes. Last, it revokes the
+   * runner's Linear token in each workspace it serves. Each tick under the marker retries an entry this missed.
+   */
+  stop(now: Date): Promise<void> {
+    return this.serial(async () => {
+      await this.state.writeHoldMarker({ by: "stop", since: now.toISOString() });
+      await this.state.log(now, "stopped by flight-deck stop");
+      const config = await readConfig(this.folders);
+      const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
+      // Before the runner's start finishes, its start pauses every entry under the marker.
+      if (this.started) await this.stopEach(now, config, workspace);
+      await this.revokeRunnerTokens(now, config);
+    });
+  }
+
+  /**
+   * Revokes the runner's own token in every workspace `login linear` signed in to. Any of them may hold one,
+   * because a session's take, a registration's copy of `[tracker]`, or any record since can name it. Each revoke
+   * runs even when one before it fails, and then the first failure throws.
+   */
+  private async revokeRunnerTokens(now: Date, config: Config): Promise<void> {
+    let failed: unknown = null;
+    for (const name of Object.keys(config.linear)) {
+      try {
+        await this.tracker.revokeRunnerToken(name);
+      } catch (error) {
+        await this.state.log(now, `runner token for ${name} not revoked: ${(error as Error).message}`);
+        failed ??= error;
+      }
+    }
+    if (failed !== null) throw failed;
+  }
+
+  /**
+   * Under a `stop` marker, asks the Harness to stop each running session and pauses each `retry_waiting` issue.
+   * Each entry goes on its own: one that throws, such as on a failed Linear read, stays as it was, and the next
+   * tick under the marker tries it again.
+   */
+  private async stopEach(now: Date, config: Config, workspace: Workspace): Promise<boolean> {
+    let finished = true;
+    for (const entry of await this.state.sessions()) {
+      try {
+        if (entry.state === "running") await this.stopSession(now, entry, "stop");
+        if (entry.state === "retry_waiting") await this.pauseStopped(now, config, entry, { session: entry.id, attempt: entry.attempt }, workspace);
+      } catch (error) {
+        await this.state.log(now, `${entry.id} ${entry.issue}: stop failed, retrying next poll: ${(error as Error).message}`);
+        finished = false;
+      }
+    }
+    return finished;
+  }
+
+  /**
+   * Asks the Harness to stop a running session, and records why in its entry, for its `stopped` exit. The first
+   * cause stays. The request goes once, and a request that failed goes again at the next call. The exit comes
+   * later, and the next tick handles it.
+   */
+  private async stopSession(now: Date, entry: SessionEntry, cause: StopCause): Promise<void> {
+    if (this.stopsSent.has(entry.id)) return;
+    if (entry.pid === null || entry.pid_started_at === null) {
+      await this.state.log(now, `${entry.id} ${entry.issue}: no process to stop`);
+      return;
+    }
+    if (entry.stop_cause === undefined) {
+      await this.state.writeSessions((await this.state.sessions()).map((each) => (each.id === entry.id ? { ...each, stop_cause: cause } : each)));
+    }
+    await this.state.log(now, `${entry.id} ${entry.issue}: stopping (${entry.stop_cause ?? cause})`);
+    await this.harness.stop({ session: entry.id, uuid: entry.claude_uuid ?? "", pid: entry.pid, pidStartedAt: entry.pid_started_at });
+    this.stopsSent.add(entry.id);
+  }
+
+  private serial<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(work, work);
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  private async poll(now: Date): Promise<void> {
     const config = await readConfig(this.folders);
     await this.writeEtc(config);
     const workspace = new Workspace({ folders: this.folders, git: config.paths.git });
+    await this.ensureStarted(now, config, workspace);
     await this.handleExits(now, config, workspace);
+    if (this.started && (await this.state.holdMarker())?.by === "stop") await this.stopEach(now, config, workspace);
     const trouble = await Trouble.load(this.state);
     const credentials = await this.checkCredentials(trouble);
 
@@ -144,6 +276,68 @@ export class Poll {
     if (machineUser === this.etcFor) return;
     await writeEtc(this.folders, config.machine_user);
     this.etcFor = machineUser;
+  }
+
+  // The runner's start.
+
+  /**
+   * Runs what the runner does at its start, until it finishes. An entry whose pause a Linear error cut short gets
+   * its pause at a later tick, and the rest of each tick still runs.
+   */
+  private async ensureStarted(now: Date, config: Config, workspace: Workspace): Promise<void> {
+    if (!this.started) this.started = await this.atStart(now, config, workspace);
+  }
+
+  /**
+   * What the runner does at its start, before its first poll. Under a `stop` marker, written by a `flight-deck
+   * stop` the runner didn't answer, it treats each session in its list as stopped, not failed: it pauses the
+   * issue with the ⚪ stop text and uses no retry (spec 1, "The runner's socket"). An `apply_waiting` entry
+   * keeps retrying, as after a `stop` the runner answered. Each entry goes on its own, and it returns whether
+   * every entry finished.
+   */
+  private async atStart(now: Date, config: Config, workspace: Workspace): Promise<boolean> {
+    if ((await this.state.holdMarker())?.by !== "stop") return true;
+    let finished = true;
+    // FLD-108 kills any live session first, with its process groups, because its output pipe died with the old runner.
+    for (const entry of await this.state.sessions()) {
+      if (entry.state === "apply_waiting") continue;
+      const facts: RunnerFacts = { session: entry.id, attempt: entry.attempt };
+      if (entry.started_at !== null) facts.transcript = paths.transcript(this.folders, entry.repo, entry.id);
+      try {
+        await this.pauseStopped(now, config, entry, facts, workspace);
+      } catch (error) {
+        await this.state.log(now, `${entry.id} ${entry.issue}: stop pause failed, retrying next poll: ${(error as Error).message}`);
+        finished = false;
+      }
+    }
+    return finished;
+  }
+
+  /** Ends an entry that has no session to wait for, and pauses its issue with the ⚪ stop text. */
+  private async pauseStopped(now: Date, config: Config, entry: SessionEntry, facts: RunnerFacts, workspace: Workspace): Promise<void> {
+    const repo = await this.entryRepo(config, entry, workspace);
+    if (repo === null) {
+      await this.state.log(now, `${entry.id} ${entry.issue}: stopped, and ${entry.repo} isn't registered or has no Linear sign-in`);
+      return this.finish(entry, workspace);
+    }
+    await this.runnerPause(now, repo, entry, stopPause(), facts, workspace);
+  }
+
+  /**
+   * The repo as the entry's issue reads it: with the record its take read, as an exit uses. A `retry_waiting`
+   * entry's session folder went with its workspace, so it uses the last valid record Poll read, which its retry
+   * would start from. Either falls back to the registration's copy.
+   */
+  private async entryRepo(config: Config, entry: SessionEntry, workspace: Workspace): Promise<TrackerRepo | null> {
+    const registration = config.repos.find((repo) => repo.name === entry.repo);
+    if (registration === undefined) return null;
+    if (entry.state === "retry_waiting") return trackerRepo(config, registration, (await this.state.lastRecord(registration.name))?.record ?? null);
+    // Step 4 asks at each poll, and a session's take never changes, so it reads the take's record once.
+    const cached = this.takeRepos.get(entry.id);
+    if (cached !== undefined) return cached;
+    const repo = await this.sessionRepo(config, registration, entry.id, workspace);
+    if (repo !== null) this.takeRepos.set(entry.id, repo);
+    return repo;
   }
 
   // Exits.
@@ -227,6 +421,8 @@ export class Poll {
 
   /** The session is over: its workspace goes, and so does its entry. */
   private async finish(entry: SessionEntry, workspace: Workspace): Promise<void> {
+    this.takeRepos.delete(entry.id);
+    this.stopsSent.delete(entry.id);
     await workspace.dispose({ session: entry.id, worktree: entry.worktree });
     await this.dropEntry(entry.id);
   }
@@ -238,6 +434,8 @@ export class Poll {
    * issue with the second failure's text (ADRs 0002 and 0019).
    */
   private async fail(now: Date, repo: TrackerRepo, entry: SessionEntry, failure: FailedExit, facts: RunnerFacts, workspace: Workspace): Promise<void> {
+    // A session that failed before `flight-deck stop` reached it pauses as stopped, and uses no retry.
+    if (entry.stop_cause === "stop") return this.runnerPause(now, repo, entry, stopPause(), facts, workspace);
     if (entry.attempt < MAX_ATTEMPTS) {
       await workspace.dispose({ session: entry.id, worktree: entry.worktree });
       const waiting: SessionEntry = {
@@ -264,16 +462,16 @@ export class Poll {
    * working status, the maintainer moved it, and nothing is posted.
    */
   private async runnerPause(now: Date, repo: TrackerRepo, entry: SessionEntry, text: RunnerText, facts: RunnerFacts, workspace: Workspace): Promise<void> {
-    // Linear first: a read that fails leaves the entry, so the exit runs again at the next poll.
-    const issue = await this.tracker.issue({ id: entry.issue_id, repo });
+    // Linear first: a read that fails leaves the entry, so the exit runs again at the next poll. A deleted,
+    // archived, or moved issue counts as moved out too.
+    const issue = await stillWorking(this.tracker, repo, entry);
     await this.finish(entry, workspace);
-    const working = WORKING[entry.stage];
-    if (working === undefined || issue.role !== working) {
-      await this.state.log(now, `${entry.id} ${entry.issue}: left ${working}, no pause posted`);
+    if (issue === null || issue.role === null) {
+      await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, no pause posted`);
       return;
     }
     const comment = runnerComment(text, facts, { version: this.version, statuses: repo.statuses });
-    const result = await this.comments(now).post({ ...issue, role: working }, comment);
+    const result = await this.comments(now).post({ ...issue, role: issue.role }, comment);
     await this.state.log(now, `${entry.id} ${entry.issue}: runner pause ${result}: ${comment.statusLine}`);
   }
 
@@ -335,7 +533,19 @@ export class Poll {
       try {
         // A runner comment Linear didn't take yet goes first, and nothing else happens to its issue this poll.
         for (const issue of await this.pendingComments(now, tracker, snapshot)) blocked.add(issue);
-        // 5. Answers. FLD-104 adds step 4, moved out.
+        // 4. Moved out.
+        await movedOut({
+          now,
+          repo: tracker,
+          snapshot,
+          state: this.state,
+          workspace,
+          folders: this.folders,
+          tracker: this.tracker,
+          takeRepo: async (entry) => (await this.entryRepo(config, entry, workspace)) ?? tracker,
+          stop: (entry) => this.stopSession(now, entry, "moved_out"),
+        });
+        // 5. Answers.
         const handled = await this.answers(now, tracker, snapshot, blocked);
         for (const issue of blocked) handled.add(issue);
         // The cursor moves only once every comment it passes is in issue memory.
@@ -357,7 +567,7 @@ export class Poll {
           version: this.version,
         });
       } catch (error) {
-        await this.state.log(now, `${registration.name}: runner comments, answers, flags, subscriptions, or stale takes failed: ${(error as Error).message}`);
+        await this.state.log(now, `${registration.name}: runner comments, moved out, answers, flags, subscriptions, or stale takes failed: ${(error as Error).message}`);
         snapshot = null;
       }
     }
@@ -555,7 +765,7 @@ export class Poll {
     const busy = new Set(sessions.map((entry) => entry.issue_id));
     let free = config.concurrency_cap - sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
 
-    // Before each start, Claude Code's version, and nothing starts while a cause holds every session (ADR 0015).
+    // Before each start, Claude Code's version (ADR 0015).
     const work = sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
     if (trouble.isOpen("claude_code_version", "runner") || (free > 0 && work)) {
       let version: string;
@@ -569,26 +779,25 @@ export class Poll {
       if (tooOld(version)) trouble.open("claude_code_version", "runner", { scope: "runner", repos: [], facts: { version, minVersion: MIN_VERSION } });
       else trouble.clear("claude_code_version", "runner", { version });
     }
-    if (trouble.stopsRunner()) return;
+    // A held runner starts nothing, and a hold on a workspace or a repo stops only its own starts (ADR 0021). The
+    // holds include each trouble cause open this poll, the version's too.
+    const holds = await currentHolds(this.holdContext(now, config, trouble));
+    const startable = repos.filter((poll) => poll.tracker !== null && !holdsRepo(holds, poll.tracker));
 
     // A retry waiting for a free place starts before any new take.
     for (const entry of sessions.filter((each) => each.state === "retry_waiting")) {
       if (free <= 0) break;
-      const poll = repos.find((each) => each.registration.name === entry.repo);
+      const poll = startable.find((each) => each.registration.name === entry.repo);
       if (poll === undefined || !poll.fetch.ok || poll.snapshot === null || poll.blocked.has(entry.issue_id)) continue;
       const issue = poll.snapshot.issues.find((each) => each.id === entry.issue_id);
-      if (issue === undefined || issue.role !== WORKING[entry.stage]) {
-        // The issue left its working status while the retry waited. FLD-104's step 4 handles a move out in full.
-        await this.state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, retry dropped`);
-        await this.dropEntry(entry.id);
-        continue;
-      }
+      // Step 4 dropped the retry of an issue that left its working status.
+      if (issue === undefined || issue.role !== WORKING[entry.stage]) continue;
       free--;
-      await this.start(now, config, poll, issue, workspace, entry);
+      await this.startSession(now, config, poll, issue, workspace, entry);
     }
 
     const candidates: { poll: RepoPoll; issue: SnapshotIssue }[] = [];
-    for (const poll of repos) {
+    for (const poll of startable) {
       if (!poll.fetch.ok || poll.snapshot === null) continue;
       for (const issue of poll.snapshot.issues) {
         if (issue.role === "ready_to_plan" && !hasSpec(issue) && !busy.has(issue.id) && !poll.blocked.has(issue.id)) candidates.push({ poll, issue });
@@ -598,7 +807,7 @@ export class Poll {
     for (const { poll, issue } of candidates) {
       if (free <= 0) break;
       free--;
-      await this.start(now, config, poll, issue, workspace);
+      await this.startSession(now, config, poll, issue, workspace);
     }
   }
 
@@ -606,7 +815,7 @@ export class Poll {
    * Starts a session: a take, or, with `retry`, the fresh session that takes a `retry_waiting` entry's place.
    * A retry restarts in place, so the issue already sits in the working status and no take happens.
    */
-  private async start(now: Date, config: Config, poll: RepoPoll, issue: SnapshotIssue, workspace: Workspace, retry?: SessionEntry): Promise<void> {
+  private async startSession(now: Date, config: Config, poll: RepoPoll, issue: SnapshotIssue, workspace: Workspace, retry?: SessionEntry): Promise<void> {
     if (!poll.fetch.ok || poll.tracker === null) return;
     const registration = poll.registration;
     const repo = poll.tracker;
@@ -783,6 +992,10 @@ export class Poll {
     }
   }
 
+  private holdContext(now: Date, config: Config, trouble: Trouble): HoldContext {
+    return { now, state: this.state, config, trouble };
+  }
+
   private async dropEntry(id: string): Promise<void> {
     await this.state.writeSessions((await this.state.sessions()).filter((each) => each.id !== id));
   }
@@ -807,11 +1020,12 @@ export class Poll {
     const at = now.toISOString();
     await this.state.writeHeartbeat(now);
     const sessions = await this.state.sessions();
+    const holds = await currentHolds(this.holdContext(now, config, trouble));
     const status: Status = {
       version: this.version,
       heartbeat_at: at,
       polled_at: at,
-      runner: runnerStatus(trouble.holds()),
+      runner: { state: runnerState(holds), holds },
       sessions: sessions.map((entry) => ({
         id: entry.id,
         repo: entry.repo,
@@ -865,11 +1079,6 @@ function trackerRepo(config: Config, registration: Registration, record: RepoRec
   // Step 2 opens `linear_login` for a workspace `login linear` hasn't signed in.
   if (linear === undefined) return null;
   return { name: registration.name, workspace: tracker.workspace, team: tracker.team, statuses: tracker.statuses, maintainer: linear.maintainer_id };
-}
-
-/** The runner's state and holds. Only a hold scoped to the runner makes it `held` (spec 1, "`status.json`"). */
-function runnerStatus(holds: StatusHold[]): Status["runner"] {
-  return { state: holds.some((hold) => hold.scope === "runner") ? "held" : "working", holds };
 }
 
 /**

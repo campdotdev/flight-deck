@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { sessionParts } from "../../folders/index.ts";
 import { Outbox, type ApplyResult } from "../../outbox/index.ts";
+import { onTeam } from "../moved-out.ts";
 import { WORKING } from "../stages.ts";
 import type { ExitContext, ExitHandler } from "./context.ts";
 
@@ -21,10 +22,11 @@ const RESULTS: ResultHandlers = {
 };
 
 export const exited: ExitHandler = async (context) => {
-  const issue = await context.tracker.issue({ id: context.entry.issue_id, repo: context.repo });
+  // A deleted, archived, or moved issue counts as moved out too.
+  const issue = await onTeam(context.tracker, context.repo, context.entry);
   // An apply whose move landed before a lost response or a failed write after it runs again, so the writes after
   // the move still land. The Outbox's check refuses any other status the maintainer moved the issue to.
-  if (issue.role !== WORKING[context.entry.stage] && !(await Outbox.moved(context.sessionFolder, issue.role))) {
+  if (issue === null || (issue.role !== WORKING[context.entry.stage] && !(await Outbox.moved(context.sessionFolder, issue.role)))) {
     await context.log(`left ${WORKING[context.entry.stage]}, outbox discarded`);
     return context.finish();
   }
