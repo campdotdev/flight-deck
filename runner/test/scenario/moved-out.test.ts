@@ -104,6 +104,31 @@ describe("an issue moved out of Planning", () => {
     expect((await world.status()).sessions).toEqual([]);
   });
 
+  test("stops a later session at the same poll when an earlier one's stop request fails", async () => {
+    const first = world.issue({ title: "Save button is blue" });
+    const second = world.issue({ title: "Cancel button is green" });
+    world.send(first);
+    world.send(second);
+    world.harness.script(first.identifier, {});
+    world.harness.script(second.identifier, {});
+    await world.tick();
+    const one = world.harness.started[0]!.session.id;
+    const two = world.harness.started[1]!.session.id;
+    const stop = world.harness.stop.bind(world.harness);
+    let failures = 1;
+    world.harness.stop = async (handle) => {
+      if (handle.session === one && failures-- > 0) throw new Error("kill failed");
+      return stop(handle);
+    };
+
+    world.tracker.setStatus(first.id, STATUSES.backlog[0]);
+    world.tracker.setStatus(second.id, STATUSES.backlog[0]);
+    await world.tick();
+    expect(world.harness.stops).toEqual([two]);
+    await world.tick();
+    expect(world.harness.stops).toEqual([two, one]);
+  });
+
   test("leaves a session alone while its issue stays in Planning", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     await running(issue);
