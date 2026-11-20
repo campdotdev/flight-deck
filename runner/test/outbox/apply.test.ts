@@ -1,13 +1,23 @@
 // Outbox.apply at its own interface: the rule a refused outbox names, which a scenario sees only once a
 // second failed session posts it (FLD-98), and a second apply on the same folder.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Outbox } from "../../src/outbox/index.ts";
 import type { Role } from "../../src/record/index.ts";
 import { State } from "../../src/state/index.ts";
-import { InMemoryTracker, type IssueRef, type RelationKind, type StatusType, type StoredIssue, type TrackerRepo } from "../../src/tracker/index.ts";
+import {
+  InMemoryTracker,
+  type FiledIssue,
+  type IssueDraft,
+  type IssueRef,
+  type RelationKind,
+  type StatusType,
+  type StoredIssue,
+  type TrackerRepo,
+  type UploadFile,
+} from "../../src/tracker/index.ts";
 
 const STATUSES: Record<Role, [string, StatusType]> = {
   intake: ["Triage", "triage"],
@@ -41,6 +51,10 @@ const VERSION = "0.1.0";
 /** A Tracker whose first `relate` fails, as a lost connection would. */
 class FlakyTracker extends InMemoryTracker {
   failRelate = true;
+  /** Lose the response of the next `file`, after the issue is filed. */
+  loseFile = false;
+  /** Runs before each upload. */
+  beforeUpload: (file: UploadFile) => Promise<void> = async () => {};
   override async relate(issue: IssueRef, other: IssueRef, kind: RelationKind): Promise<void> {
     if (this.failRelate) {
       this.failRelate = false;
@@ -48,11 +62,24 @@ class FlakyTracker extends InMemoryTracker {
     }
     return super.relate(issue, other, kind);
   }
+  override async file(draft: IssueDraft, role: Role): Promise<FiledIssue> {
+    const filed = await super.file(draft, role);
+    if (this.loseFile) {
+      this.loseFile = false;
+      throw new Error("socket hang up");
+    }
+    return filed;
+  }
+  override async upload(file: UploadFile): Promise<string> {
+    await this.beforeUpload(file);
+    return super.upload(file);
+  }
 }
 
 let root: string;
 let tracker: FlakyTracker;
 let issue: StoredIssue;
+let state: State;
 let outbox: Outbox;
 
 beforeEach(async () => {
@@ -62,7 +89,7 @@ beforeEach(async () => {
   tracker.addUser({ id: "maintainer", name: "Hunter" });
   tracker.addTeam({ key: "SHA", name: "Shaders", statuses: Object.values(STATUSES).map(([name, type]) => ({ name, type })) });
   issue = tracker.addIssue({ team: "SHA", title: "Save button is blue", description: "It should be red.", status: "Planning", creator: "maintainer" });
-  const state = new State({ data: join(root, "data"), config: join(root, "config"), sessionRoot: join(root, "sessions"), home: root });
+  state = new State({ data: join(root, "data"), config: join(root, "config"), sessionRoot: join(root, "sessions"), home: root });
   outbox = new Outbox({ version: VERSION, state, clock: () => now, repo: () => repo });
 });
 
@@ -110,6 +137,23 @@ describe("a refused outbox names the rule", () => {
     ["a duplicate with a handoff file", () => duplicate("SHA-2", { "brief.md": BRIEF }), "a move to duplicate holds no handoff file, but the outbox holds brief.md"],
     ["a duplicate with no of", () => ({ "outcome.json": JSON.stringify({ version: VERSION, stage: "plan", move: "duplicate" }) }), "a move to duplicate needs of, an issue identifier"],
     ["an image not in media/", () => brief({ "brief.md": `${BRIEF}\n\n![Before](before.png)` }), "brief.md names the image before.png, which media/ doesn't hold"],
+    ["an image with code in its alt text not in media/", () => brief({ "brief.md": `${BRIEF}\n\n![Save \`button\`](before.png)` }), "brief.md names the image before.png, which media/ doesn't hold"],
+    [
+      "an image URL with code in its alt text",
+      () => brief({ "summary.md": `${SUMMARY}\n\n![Save \`button\`](https://example.com/before.png)` }),
+      "summary.md names the image https://example.com/before.png, which isn't a bare file name in media/",
+    ],
+    ["a reference image with code in its alt text", () => brief({ "brief.md": `${BRIEF}\n\n![Save \`button\`][before]` }), "brief.md shows an image by reference or HTML, so it names no file in media/: use ![alt](file)"],
+    [
+      "an image with brackets in its alt text",
+      () => brief({ "brief.md": `${BRIEF}\n\n![Save [before]](before.png)`, "media/before.png": "png" }),
+      "brief.md shows an image whose alt text the runner can't read, such as one with brackets: use ![alt](file) with plain alt text",
+    ],
+    [
+      "an image URL with brackets in its alt text",
+      () => brief({ "summary.md": `${SUMMARY}\n\n![Save [before]](https://example.com/before.png)` }),
+      "summary.md shows an image whose alt text the runner can't read, such as one with brackets: use ![alt](file) with plain alt text",
+    ],
     [
       "an image URL",
       () => brief({ "summary.md": `${SUMMARY}\n\n![Before](https://uploads.linear.app/x/before.png)` }),
@@ -117,9 +161,26 @@ describe("a refused outbox names the rule", () => {
     ],
     ["a follow-up's file name", () => brief({ "follow-ups/one.md": "# One\n\nx" }), "follow-ups/one.md isn't named follow-ups/<n>.md"],
     ["a follow-up with no title", () => brief({ "follow-ups/1.md": "One\n\nx" }), "follow-ups/1.md doesn't open with # <title>"],
+    [
+      "a follow-up's HTML image",
+      () => brief({ "follow-ups/1.md": '# One\n\n<img src="https://example.com/x.png">' }),
+      "follow-ups/1.md shows an image by reference or HTML, so it names no file in media/: use ![alt](file)",
+    ],
   ])("%s", async (_, files, rule) => {
     const result = await outbox.apply(await session(files()), { identity: tracker });
     expect(result).toEqual({ result: "failed", rule, writes: [] });
+    expect(tracker.writes).toEqual([]);
+  });
+
+  test.each(["media", "follow-ups"])("a %s symlink to a folder outside the outbox", async (folder) => {
+    const outside = join(root, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, folder === "media" ? "before.png" : "1.md"), folder === "media" ? "png" : "# Secret\n\nx");
+    const files = folder === "media" ? brief({ "brief.md": `${BRIEF}\n\n![Before](before.png)` }) : brief();
+    const sessionFolder = await session(files);
+    await symlink(outside, join(sessionFolder, "outbox", folder));
+    const result = await outbox.apply(sessionFolder, { identity: tracker });
+    expect(result).toEqual({ result: "failed", rule: `${folder} isn't a folder`, writes: [] });
     expect(tracker.writes).toEqual([]);
   });
 
@@ -138,6 +199,52 @@ describe("a refused outbox names the rule", () => {
   ])("a duplicate of %s", async (_, of, rule) => {
     const result = await outbox.apply(await session(duplicate(of())), { identity: tracker });
     expect(result).toEqual({ result: "failed", rule, writes: [] });
+  });
+});
+
+describe("an image", () => {
+  test("uploads the bytes the check read, though the session swaps the file for a symlink after", async () => {
+    const outside = join(root, "secret.png");
+    await writeFile(outside, "secret");
+    const folder = await session(brief({ "brief.md": `${BRIEF}\n\n![One](one.png) ![Two](two.png)`, "media/one.png": "one", "media/two.png": "two" }));
+    tracker.beforeUpload = async () => {
+      await rm(join(folder, "outbox", "media", "two.png"));
+      await symlink(outside, join(folder, "outbox", "media", "two.png"));
+    };
+    await outbox.apply(folder, { identity: tracker });
+    expect([...tracker.uploads.values()].map((data) => new TextDecoder().decode(data))).toEqual(["one", "two"]);
+  });
+
+  test("in a brief reaches issue memory as the description holds it, with its upload URL", async () => {
+    const folder = await session(brief({ "brief.md": `${BRIEF}\n\n![Before](before.png)`, "media/before.png": "png" }));
+    await outbox.apply(folder, { identity: tracker });
+    const [url] = tracker.uploads.keys();
+    expect((await state.issueMemory(repo.name, issue.id)).brief).toBe(`${BRIEF}\n\n![Before](${url})`);
+  });
+});
+
+describe("image syntax in code", () => {
+  test("in an image's alt text leaves the image an image, uploaded and embedded", async () => {
+    const folder = await session(brief({ "brief.md": `${BRIEF}\n\n![Save \`button\`](before.png)`, "media/before.png": "png" }));
+    await outbox.apply(folder, { identity: tracker });
+    const [url] = tracker.uploads.keys();
+    expect(tracker.stored(issue.id).description).toContain(`![Save \`button\`](${url})`);
+  });
+
+  test("a code span holding an image's closing bracket makes it no image", async () => {
+    const text = "Not an image: ![Save `button](before.png)`.";
+    const result = await outbox.apply(await session(brief({ "brief.md": `${BRIEF}\n\n${text}` })), { identity: tracker });
+    expect(result).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
+    expect(tracker.stored(issue.id).description).toContain(text);
+  });
+
+  test("needs no file in media/, and the description and comment keep it as written", async () => {
+    const code = "```md\n![Before](before.png)\n```\n\nThe docs write `![alt](before.png)`.";
+    const result = await outbox.apply(await session(brief({ "brief.md": `${BRIEF}\n\n${code}` })), { identity: tracker });
+    expect(result).toEqual({ result: "applied", writes: ["writeBrief", "post", "move"] });
+    expect(tracker.stored(issue.id).description).toContain(code);
+    const comment = tracker.writes.find((write) => write.kind === "comment");
+    expect(comment?.kind === "comment" && comment.body).toContain(code);
   });
 });
 
@@ -169,6 +276,45 @@ describe("a second apply on the same folder", () => {
     const result = await outbox.apply(folder, { identity: tracker });
     expect(result).toEqual({ result: "applied", writes: ["relate follow-ups/1.md"] });
     expect(tracker.writes.slice(landed.length)).toEqual([{ kind: "relate", issue: "SHA-2", other: issue.identifier, relation: "related" }]);
+  });
+
+  test("a duplicate whose mark landed finishes its follow-ups, though the original closed since", async () => {
+    const original = tracker.addIssue({ team: "SHA", title: "Save is blue", status: "Backlog", creator: "maintainer" });
+    const folder = await session(duplicate(original.identifier, { "follow-ups/1.md": "# Cancel is blue too\n\nx" }));
+    await expect(outbox.apply(folder, { identity: tracker })).rejects.toThrow("socket hang up");
+    tracker.setStatus(original.id, "Done");
+    const result = await outbox.apply(folder, { identity: tracker });
+    expect(result).toEqual({ result: "applied", writes: ["relate follow-ups/1.md"] });
+  });
+
+  test("a follow-up whose create landed but whose response was lost is filed once", async () => {
+    const folder = await session(brief({ "follow-ups/1.md": "# Cancel is blue too\n\nx" }));
+    tracker.failRelate = false;
+    tracker.loseFile = true;
+    await expect(outbox.apply(folder, { identity: tracker })).rejects.toThrow("socket hang up");
+    const landed = tracker.writes.length;
+
+    const result = await outbox.apply(folder, { identity: tracker });
+    expect(result).toEqual({ result: "applied", writes: ["file follow-ups/1.md", "relate follow-ups/1.md"] });
+    expect(tracker.writes.slice(landed)).toEqual([{ kind: "relate", issue: "SHA-2", other: issue.identifier, relation: "related" }]);
+  });
+
+  test.each<[string, (id: string) => void]>([
+    ["deleted", (id) => tracker.deleteIssue(id)],
+    [
+      "moved to another team",
+      (id) => {
+        tracker.addTeam({ key: "OTH", name: "Other", statuses: [{ name: "Todo", type: "unstarted" }] });
+        tracker.moveToTeam(id, "OTH", "Todo");
+      },
+    ],
+  ])("a duplicate whose mark landed finishes its follow-ups, though the original was %s since", async (_, change) => {
+    const original = tracker.addIssue({ team: "SHA", title: "Save is blue", status: "Backlog", creator: "maintainer" });
+    const folder = await session(duplicate(original.identifier, { "follow-ups/1.md": "# Cancel is blue too\n\nx" }));
+    await expect(outbox.apply(folder, { identity: tracker })).rejects.toThrow("socket hang up");
+    change(original.id);
+    const result = await outbox.apply(folder, { identity: tracker });
+    expect(result).toEqual({ result: "applied", writes: ["relate follow-ups/1.md"] });
   });
 
   test("a dry run makes no write and lists each one", async () => {
