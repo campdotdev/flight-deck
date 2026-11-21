@@ -374,6 +374,9 @@ export class Poll {
     const sessions = await this.state.sessions();
     const entry = sessions.find((each) => each.id === session);
     if (entry === undefined) return;
+    // Spending needs only the exit and the launch's budget, so it counts even when the repo is gone.
+    if (queued.counted !== true) await this.usage.spent(now, exit, entry.budget_usd);
+    queued.counted = true;
     const registration = config.repos.find((repo) => repo.name === entry.repo);
     const repo = registration === undefined ? null : await this.sessionRepo(config, registration, entry.id, workspace);
     if (repo === null) {
@@ -387,8 +390,6 @@ export class Poll {
       return;
     }
     await this.tracker.revoke({ id: entry.id, repo });
-    if (queued.counted !== true) await this.usage.spent(now, exit, entry.budget_usd);
-    queued.counted = true;
 
     const sessionFolder = paths.sessionFolder(this.folders, entry.id);
     const outbox = new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => (name === entry.repo ? repo : null) });

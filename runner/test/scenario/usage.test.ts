@@ -522,6 +522,22 @@ describe("on an API key", () => {
     expect(status.runner.holds).toEqual([]);
   });
 
+  test("a session whose repo is unregistered before its exit still counts its cost", async () => {
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+    sendBriefed("First");
+    await world.tick();
+    const registration = world.config.repos.pop()!;
+    await world.writeConfig();
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 }, { costUsd: 3 });
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+
+    world.config.repos.push(registration);
+    await world.writeConfig();
+    await world.tick();
+    expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 3, month_usd: 3, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+  });
+
   test("spending survives a restart", async () => {
     await useApiKey({ session_budget_usd: 5, daily_cap_usd: 8, monthly_cap_usd: 1000 });
     sendBriefed("First");
