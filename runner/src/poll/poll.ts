@@ -33,7 +33,7 @@ import { MAX_ATTEMPTS, WORKING } from "./stages.ts";
 import { staleTakes } from "./stale-takes.ts";
 import { Trouble } from "./trouble/trouble.ts";
 import { MIN_VERSION, tooOld } from "./trouble/version.ts";
-import { Usage } from "./usage.ts";
+import { launchAuth, Usage } from "./usage.ts";
 
 export interface PollOptions {
   folders: Folders;
@@ -374,9 +374,11 @@ export class Poll {
     const sessions = await this.state.sessions();
     const entry = sessions.find((each) => each.id === session);
     if (entry === undefined) return;
-    // Spending needs only the exit and the launch's budget, so it counts even when the repo is gone.
+    // Spending and a plan limit's hold need only the exit and the launch, so they land before the repo lookup and
+    // the token revoke, even when the repo is gone. The hold only extends, so a retried exit can set it again.
     if (queued.counted !== true) await this.usage.spent(now, exit, entry.budget_usd);
     queued.counted = true;
+    if (exit.kind === "rate_limited") await this.usage.rateLimited(now, launchAuth(entry), exit.resetsAt);
     const registration = config.repos.find((repo) => repo.name === entry.repo);
     const repo = registration === undefined ? null : await this.sessionRepo(config, registration, entry.id, workspace);
     if (repo === null) {

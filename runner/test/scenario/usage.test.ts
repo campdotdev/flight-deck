@@ -149,6 +149,21 @@ describe("on an API key, a session that exits rate_limited", () => {
     expect((await world.status()).runner).toEqual({ state: "working", holds: [] });
   });
 
+  test("holds the runner even when its repo is unregistered before the exit", async () => {
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    const resetsAt = later(2 * HOUR).toISOString();
+    world.harness.script(issue.identifier, { exit: { kind: "rate_limited", resetsAt } });
+    await world.tick();
+    world.config.repos.pop();
+    await world.writeConfig();
+    await world.tick();
+    const status = await world.status();
+    expect(status.sessions).toEqual([]);
+    expect(status.runner).toEqual({ state: "held", holds: [{ cause: "rate_limit", scope: "runner", name: null, since: world.now.toISOString(), until: resetsAt }] });
+  });
+
   test("whose issue read fails stays queued, requeues at the next poll, and counts its budget once", async () => {
     await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
     const issue = world.issue({ title: "Save button is blue" });
