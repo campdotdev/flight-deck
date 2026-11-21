@@ -356,20 +356,26 @@ export class Poll {
    * The repo as the entry's issue reads it: with the record its take read, as an exit uses. A `retry_waiting`
    * entry's session folder went with its workspace, so it uses the last valid record Poll read, which its retry
    * would start from. Either falls back to the registration's copy.
+   *
+   * An entry in the kept folder is one of two. A kept outbox's own take read the repo `keptTakes` holds. The
+   * session whose outbox was just kept, waiting on its Linear-write pause, keeps its first take's record, which
+   * the kept folder's `session.json` still names.
    */
   private async entryRepo(config: Config, entry: SessionEntry, workspace: Workspace): Promise<TrackerRepo | null> {
     const registration = config.repos.find((repo) => repo.name === entry.repo);
     if (registration === undefined) return null;
-    // A retry's take comes later, and so does a kept outbox's, so both read the last valid record.
-    if (this.appliesKept(entry)) {
-      const taken = this.keptTakes.get(entry.id);
-      if (taken !== undefined) return taken;
+    const kept = this.appliesKept(entry);
+    const taken = kept ? this.keptTakes.get(entry.id) : undefined;
+    if (taken !== undefined) return taken;
+    // A retry's take comes later, so it reads the last valid record. So does a kept outbox's take after a restart.
+    if (entry.state === "retry_waiting" || (kept && entry.apply?.phase !== "pause")) {
+      return trackerRepo(config, registration, (await this.state.lastRecord(registration.name))?.record ?? null);
     }
-    if (entry.state === "retry_waiting" || this.appliesKept(entry)) return trackerRepo(config, registration, (await this.state.lastRecord(registration.name))?.record ?? null);
     // Step 4 asks at each poll, and a session's take never changes, so it reads the take's record once.
     const cached = this.takeRepos.get(entry.id);
     if (cached !== undefined) return cached;
-    const repo = await this.sessionRepo(config, registration, entry.id, workspace);
+    const folder = entry.apply?.folder ?? paths.sessionFolder(this.folders, entry.id);
+    const repo = await this.sessionRepo(config, registration, folder, workspace);
     if (repo !== null) this.takeRepos.set(entry.id, repo);
     return repo;
   }
@@ -403,7 +409,7 @@ export class Poll {
     queued.counted = true;
     if (exit.kind === "rate_limited") await this.usage.rateLimited(now, launchAuth(entry), exit.resetsAt);
     const registration = config.repos.find((repo) => repo.name === entry.repo);
-    const repo = registration === undefined ? null : await this.sessionRepo(config, registration, entry.id, workspace);
+    const repo = registration === undefined ? null : await this.sessionRepo(config, registration, paths.sessionFolder(this.folders, entry.id), workspace);
     if (repo === null) {
       // Linear's revoke takes only the token, but `Tracker.revoke` takes a repo, and with no registration or no
       // `login linear` for the workspace, Poll can't build one. The token stays live until it expires, as one a
@@ -445,12 +451,13 @@ export class Poll {
    * The repo as the take saw it: the record at the commit `session.json` names, which the take read and found
    * valid. The default branch's record or the registration's copy may name other statuses by now, and reading
    * the issue's status with those would discard a finished outbox or move the issue to the wrong status.
-   * A session folder or commit that can't be read falls back to the registration's copy.
+   * `folder` is the session folder, or the kept folder, which holds a copy of `session.json`. A folder or commit
+   * that can't be read falls back to the registration's copy.
    */
-  private async sessionRepo(config: Config, registration: Registration, session: string, workspace: Workspace): Promise<TrackerRepo | null> {
+  private async sessionRepo(config: Config, registration: Registration, folder: string, workspace: Workspace): Promise<TrackerRepo | null> {
     let record: RepoRecord | null = null;
     try {
-      const json = JSON.parse(await readFile(sessionParts(paths.sessionFolder(this.folders, session)).sessionJson, "utf8")) as SessionJson;
+      const json = JSON.parse(await readFile(sessionParts(folder).sessionJson, "utf8")) as SessionJson;
       const text = await workspace.show(registration, json.commit, RECORD_PATH);
       const read = text === null ? null : readRecord(text);
       if (read?.ok === true) record = read.record;

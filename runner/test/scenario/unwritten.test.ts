@@ -412,6 +412,24 @@ describe("after 3 hours", () => {
     expect(world.harness.started).toHaveLength(1);
   }, 30_000);
 
+  test.each([
+    ["", false],
+    [", after a restart", true],
+  ])("a pause that waits keeps the take's statuses while the default branch's record changes%s", async (_, restart) => {
+    const issue = world.issue({ title: "Save button is blue" });
+    // The pause's first try at 3 hours fails too, so it waits for its next try.
+    world.tracker.refuse("post", { times: 18 });
+    await runSession(issue);
+    await world.push({ ".flight-deck/record.toml": SHADERS_RECORD.replace('planning = "Planning"', `planning = "${UNMAPPED_STATUS}"`) });
+    await tickAt(UNTIL_KEPT);
+    expect(existsSync(join(kept(issue), "outbox", "outcome.json"))).toBe(true);
+    if (restart) world.restart();
+    await tickAt([1]);
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    expect(existsSync(join(kept(issue), "outbox", "outcome.json"))).toBe(true);
+    expect((await world.status()).sessions).toEqual([]);
+  }, 30_000);
+
   test("a hand move back to Ready to plan applies the kept outbox too", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     await keep(issue);
