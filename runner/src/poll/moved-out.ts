@@ -2,6 +2,7 @@
 // working status, or was deleted, archived, or moved to another team, the runner stops the session and
 // discards its outbox. Pushed commits and other writes stay. The maintainer moved the issue, so the runner
 // posts nothing and uses no retry.
+import { Outbox } from "../outbox/index.ts";
 import type { SessionEntry, State } from "../state/index.ts";
 import { IssueNotFoundError, type Snapshot, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
 import { WORKING } from "./stages.ts";
@@ -69,6 +70,9 @@ async function movedOutEntry(context: MovedOutContext, entry: SessionEntry): Pro
       // and the writes after it keep retrying. A `pause` entry's issue may sit in Paused while the Linear-write
       // pause's comment waits, and its kept outbox must outlive that, so `ApplyWaiting` settles it (FLD-100).
       if (entry.apply !== undefined && entry.apply.phase !== "apply") break;
+      // A move that landed before a lost response left the issue in the move's status, and the next try applies
+      // the writes after it, as an exit's apply does.
+      if (entry.apply !== undefined && (await Outbox.moved(entry.apply.folder, sameTeam ? (issue?.role ?? null) : null))) break;
       await context.discard(entry);
       break;
     case "starting":

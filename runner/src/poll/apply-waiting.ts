@@ -15,13 +15,14 @@ import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { paths, sessionParts, type Folders } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
-import type { ApplyResult, Outbox } from "../outbox/index.ts";
+import { Outbox, type ApplyResult } from "../outbox/index.ts";
 import type { FailedExit } from "../outbox/runner-comments/failed-twice.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerWriteResult } from "../outbox/runner-comments/index.ts";
 import { linearWrite } from "../outbox/runner-comments/linear-write.ts";
 import type { ApplyWait, SessionEntry, State } from "../state/index.ts";
 import { isUnavailable, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson, Workspace } from "../workspace/index.ts";
+import { onTeam } from "./moved-out.ts";
 import { WORKING } from "./stages.ts";
 
 /** The waits between tries: the next poll, then 1, 2, 4, and 8 minutes. Every 15 minutes after that. */
@@ -188,9 +189,11 @@ export class ApplyWaiting {
   private async apply(now: Date, outbox: Outbox, repo: TrackerRepo, entry: SessionEntry, workspace: Workspace): Promise<void> {
     const wait = entry.apply!;
     if (wait.phase === "apply") {
-      // An issue the maintainer moved before the move landed: the outbox is discarded (ADR 0007).
-      const issue = await this.tracker.issue({ id: entry.issue_id, repo });
-      if (issue.role !== WORKING[entry.stage]) {
+      // An issue the maintainer moved before the move landed: the outbox is discarded (ADR 0007). A deleted,
+      // archived, or moved issue counts as moved out too. As at an exit, an outbox whose move landed before a lost
+      // response is applied again, so the writes after the move still land.
+      const issue = await onTeam(this.tracker, repo, entry);
+      if (issue === null || (issue.role !== WORKING[entry.stage] && !(await Outbox.moved(wait.folder, issue.role)))) {
         await this.log(now, entry, `left ${WORKING[entry.stage]}, outbox discarded`);
         return this.discard(entry, workspace);
       }
@@ -248,9 +251,9 @@ export class ApplyWaiting {
 
   /** Posts the Linear-write pause, unless the maintainer moved the issue out of its working status. */
   private async postPause(now: Date, repo: TrackerRepo, entry: SessionEntry): Promise<void> {
-    const issue = await this.tracker.issue({ id: entry.issue_id, repo });
+    const issue = await onTeam(this.tracker, repo, entry);
     const working = WORKING[entry.stage];
-    if (working === undefined || issue.role !== working) return this.moved(now, repo, entry);
+    if (issue === null || working === undefined || issue.role !== working) return this.moved(now, repo, entry);
     const comment = runnerComment(linearWrite(entry.apply!.folder), this.facts(entry), { version: this.options.version, statuses: repo.statuses });
     const result = await this.comments(now).post({ ...issue, role: working }, comment);
     await this.paused(now, repo, entry, result);
@@ -259,11 +262,12 @@ export class ApplyWaiting {
   /** Tries the Linear-write pause again: the comment's pending writes, or the whole pause if none was made. */
   private async retryPause(now: Date, repo: TrackerRepo, entry: SessionEntry): Promise<void> {
     const tried = await this.tried(now, entry);
-    const issue = await this.tracker.issue({ id: entry.issue_id, repo });
+    // A deleted, archived, or moved issue reads as `null`, which drops the pending comment as a moved issue does.
+    const issue = await onTeam(this.tracker, repo, entry);
     const memory = await this.state.issueMemory(repo.name, entry.issue_id);
     if (memory.pending === null) {
-      if (issue.role === WORKING[entry.stage]) return this.postPause(now, repo, tried);
-      if (issue.role === "paused") return this.dropEntry(entry.id);
+      if (issue?.role === WORKING[entry.stage]) return this.postPause(now, repo, tried);
+      if (issue?.role === "paused") return this.dropEntry(entry.id);
       return this.moved(now, repo, entry);
     }
     await this.paused(now, repo, tried, (await this.comments(now).retry(repo, entry.issue_id, issue)) ?? "landed");

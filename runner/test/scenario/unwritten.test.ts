@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { StoredIssue } from "../../src/tracker/index.ts";
+import { TrackerUnavailable, type StoredIssue } from "../../src/tracker/index.ts";
 import { outbox, World } from "./world.ts";
 
 let world: World;
@@ -220,6 +220,23 @@ describe("a write after the move", () => {
     expect((await world.status()).sessions).toEqual([]);
   });
 
+  test("whose move's response was lost lands at the next poll, though the issue left Planning", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    // The move lands, and its response is lost, as a dropped connection would on the real adapter.
+    const move = world.tracker.move.bind(world.tracker);
+    let lost = 1;
+    world.tracker.move = async (ref, to) => {
+      await move(ref, to);
+      if (to === "ready_to_build" && lost-- > 0) throw new TrackerUnavailable("network");
+    };
+    const id = await runSession(issue, WITH_FOLLOW_UP);
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    expect((await world.status()).sessions.map(({ id, state }) => ({ id, state }))).toEqual([{ id, state: "apply_waiting" }]);
+    await world.tick();
+    expect(afterTake(issue).map((write) => write.kind)).toEqual(["description", "comment", "move", "file", "relate"]);
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
   test("is dropped after 3 hours, with no pause", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     world.tracker.refuse("file", { times: 17 });
@@ -251,6 +268,18 @@ describe("an issue the maintainer moves while its apply waits", () => {
     expect(afterTake(issue).map((write) => write.kind)).toEqual(["description"]);
     expect((await world.status()).sessions).toEqual([]);
     expect(existsSync(join(world.folders.sessionRoot, "sessions", id))).toBe(false);
+  });
+
+  test("loses it when the issue was deleted", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.tracker.refuse("post", { times: 1 });
+    const id = await runSession(issue);
+    world.tracker.deleteIssue(issue.id);
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+    expect(existsSync(join(world.folders.sessionRoot, "sessions", id))).toBe(false);
+    const log = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
+    expect(log).toContain(`${id} ${issue.identifier}: left planning, outbox discarded`);
   });
 
   test("loses it at step 4 of the next poll, before its next try comes", async () => {
