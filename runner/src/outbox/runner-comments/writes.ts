@@ -71,14 +71,16 @@ export class RunnerComments {
   }
 
   /**
-   * Tries the issue's pending comment again, unless the last try was at this poll. `issue` is the issue as this
-   * poll's snapshot read it, or `null` when the snapshot no longer holds it. When the issue moved before the
-   * pause's move landed, the comment is dropped, because the maintainer moved it.
+   * Tries the issue's pending comment again, unless the last try was at this poll or its `not_before` hasn't
+   * come. `issue` is the issue as this poll read it, or `null` when the snapshot no longer holds it. When the
+   * issue moved before the pause's move landed, the comment is dropped, because the maintainer moved it.
    */
-  async retry(repo: TrackerRepo, uuid: string, issue: SnapshotIssue | null): Promise<RunnerWriteResult | null> {
+  async retry(repo: TrackerRepo, uuid: string, issue: Pick<SnapshotIssue, "status_since"> & { role: Role | null } | null): Promise<RunnerWriteResult | null> {
     const memory = await this.state.issueMemory(repo.name, uuid);
     let pending = memory.pending;
-    if (pending === null || pending.tried_at >= this.clock().toISOString()) return pending === null ? null : "pending";
+    const now = this.clock().toISOString();
+    if (pending === null) return null;
+    if (pending.tried_at >= now || (pending.not_before !== undefined && now < pending.not_before)) return "pending";
     // A move can land without its response. A posted pause whose issue already sits in Paused is that move, as
     // the Outbox reads its own.
     if (pending.pause !== null && pending.landed.includes("post") && !pending.landed.includes("move") && issue?.role === "paused") {

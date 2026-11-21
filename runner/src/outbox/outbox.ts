@@ -7,7 +7,7 @@ import { sessionParts } from "../folders/index.ts";
 import { Lifecycle } from "../lifecycle/index.ts";
 import type { Role } from "../record/index.ts";
 import { readJson, writeJson, type OpenPause, type State } from "../state/index.ts";
-import { IssueNotFoundError, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
+import { IssueNotFoundError, isUnavailable, type IssueRef, type Tracker, type TrackerIssue, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson } from "../workspace/index.ts";
 import { duplicateLine, followUpFooter, handoffComment, opening, sessionFooter, statusPhrase } from "./comment.ts";
 import { readEnvelope } from "./envelope.ts";
@@ -29,6 +29,11 @@ export interface ApplyOptions {
   identity: Tracker;
   /** Make no write. The result lists each one. */
   dryRun?: boolean;
+  /**
+   * A kept outbox's replay, after a `retry` cleared the issue's flag. A pause whose comment landed before the
+   * outbox was kept gets its flag back, with no second comment.
+   */
+  replay?: boolean;
 }
 
 export interface OutboxOptions {
@@ -90,7 +95,23 @@ export class Outbox {
     }
   }
 
+  /**
+   * Checks the outbox, then makes each write that `applied.json` doesn't record yet. A read or write Linear
+   * doesn't take (`TrackerUnavailable`) stops it with `unwritten` and the writes that landed, so a later apply
+   * on the same folder finishes the rest.
+   */
   async apply(sessionFolder: string, options: ApplyOptions): Promise<ApplyResult> {
+    const writes: string[] = [];
+    try {
+      return await this.applyWrites(sessionFolder, options, writes);
+    } catch (error) {
+      if (isUnavailable(error)) return { result: "unwritten", writes };
+      throw error;
+    }
+  }
+
+  /** `apply`, pushing each write's name onto `writes` as it lands. */
+  private async applyWrites(sessionFolder: string, options: ApplyOptions, writes: string[]): Promise<ApplyResult> {
     const session = JSON.parse(await readFile(sessionParts(sessionFolder).sessionJson, "utf8")) as SessionJson;
     const repo = this.options.repo(session.repo);
     if (repo === null) return { result: "failed", rule: `${session.repo} isn't registered on this Mac`, writes: [] };
@@ -206,7 +227,13 @@ export class Outbox {
         async (applied) => {
           const filed = applied.filed[followUp.name];
           if (filed === undefined) return `applied.json lost the issue filed for ${followUp.name}`;
-          await tracker.relate({ id: filed, repo }, ref, "related");
+          try {
+            await tracker.relate({ id: filed, repo }, ref, "related");
+          } catch (error) {
+            // A follow-up deleted since it was filed can't be related, and every other write still lands.
+            if (!(error instanceof IssueNotFoundError)) throw error;
+            await state.log(this.options.clock(), `${issue.identifier}: the issue filed for ${followUp.name} is gone, so it isn't related`);
+          }
           return null;
         },
       ],
@@ -247,7 +274,24 @@ export class Outbox {
           async () => {
             // The issue first, so issue memory is read just before the write, with any reply a poll saved meanwhile.
             const read = await tracker.issue(ref);
-            const memory = await state.issueMemory(session.repo, issue.id);
+            // Only while the issue still sits in Paused, so a later hand move keeps the maintainer's choice.
+            const unflagged = (await state.issueMemory(session.repo, issue.id)).flag === null || read.assignee !== repo.maintainer;
+            const reflag = options.replay === true && read.role === "paused" && unflagged;
+            if (reflag) await tracker.flag(ref);
+            const opened = await state.issueMemory(session.repo, issue.id);
+            const memory = reflag
+              ? {
+                  ...opened,
+                  flag: opened.flag ?? {
+                    cause: "pause" as const,
+                    status_line: opening(phrase, envelope.summary).statusLine,
+                    since: this.options.clock().toISOString(),
+                    issue: issue.identifier,
+                    title: issue.title,
+                    url: issue.url,
+                  },
+                }
+              : opened;
             const pause = ownPause(memory.pause) ?? {
               answers,
               session: session.session,
@@ -289,7 +333,6 @@ export class Outbox {
       ];
     }
 
-    const writes: string[] = [];
     for (const [name, write] of [...uploadSteps, ...steps]) {
       if (applied.writes.includes(name)) continue;
       if (options.dryRun !== true) {

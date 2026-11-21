@@ -25,6 +25,7 @@ import { State, type IssueMemory, type OpenPause, type Reply, type SessionEntry,
 import { FACTORY_ROLES, QUEUE_ROLES, type BlockerIssue, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import { Workspace, type FetchResult, type SessionJson } from "../workspace/index.ts";
 import { answerOf } from "./answers.ts";
+import { ApplyWaiting } from "./apply-waiting.ts";
 import { blockerTest } from "./blockers.ts";
 import { EXITS, type ExitContext } from "./exits/index.ts";
 import { movedOut, stillWorking } from "./moved-out.ts";
@@ -94,6 +95,7 @@ export class Poll {
   private readonly path: string;
   private readonly lifecycle: Lifecycle;
   private readonly state: State;
+  private readonly applyWaiting: ApplyWaiting;
   private readonly usage: Usage;
   /** Exits queue as they happen, and the next tick handles them first. */
   private readonly exits: QueuedExit[] = [];
@@ -103,6 +105,12 @@ export class Poll {
   private started = false;
   /** Each running session's repo with the statuses its take read, by session ID, read once per runner. */
   private readonly takeRepos = new Map<string, TrackerRepo>();
+  /**
+   * The repo each kept outbox's take read, by entry. The default branch's record can change while the replay
+   * waits, and its retries and step 4 keep the statuses the take moved the issue with. A restart falls back to the
+   * last valid record.
+   */
+  private readonly keptTakes = new Map<string, TrackerRepo>();
   /** The sessions whose stop this runner asked the Harness for, by session ID. A failed request isn't here. */
   private readonly stopsSent = new Set<string>();
   /** `tick`, `hold`, `start`, and `stop` run one at a time, in the order they're called. */
@@ -118,6 +126,14 @@ export class Poll {
     this.lifecycle = new Lifecycle(options.tracker);
     this.state = new State(options.folders);
     this.usage = new Usage(this.state);
+    this.applyWaiting = new ApplyWaiting({
+      folders: options.folders,
+      version: options.version,
+      tracker: options.tracker,
+      state: this.state,
+      outbox: (now, repo) => new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => (name === repo.name ? repo : null) }),
+      fail: (now, repo, entry, failure, facts, workspace) => this.fail(now, repo, entry, failure, facts, workspace),
+    });
   }
 
   /** Runs one poll for every registered repo. */
@@ -246,6 +262,8 @@ export class Poll {
     await this.ensureStarted(now, config, workspace);
     await this.handleExits(now, config, workspace);
     if (this.started && (await this.state.holdMarker())?.by === "stop") await this.stopEach(now, config, workspace);
+    // Outboxes Linear didn't take, each on its backoff, with no session.
+    await this.applyWaiting.retry(now, (entry) => this.entryRepo(config, entry, workspace), workspace);
     const trouble = await Trouble.load(this.state);
     const credentials = await this.checkCredentials(trouble);
 
@@ -338,15 +356,26 @@ export class Poll {
    * The repo as the entry's issue reads it: with the record its take read, as an exit uses. A `retry_waiting`
    * entry's session folder went with its workspace, so it uses the last valid record Poll read, which its retry
    * would start from. Either falls back to the registration's copy.
+   *
+   * An entry in the kept folder is one of two. A kept outbox's own take read the repo `keptTakes` holds. The
+   * session whose outbox was just kept, waiting on its Linear-write pause, keeps its first take's record, which
+   * the kept folder's `session.json` still names.
    */
   private async entryRepo(config: Config, entry: SessionEntry, workspace: Workspace): Promise<TrackerRepo | null> {
     const registration = config.repos.find((repo) => repo.name === entry.repo);
     if (registration === undefined) return null;
-    if (entry.state === "retry_waiting") return trackerRepo(config, registration, (await this.state.lastRecord(registration.name))?.record ?? null);
+    const kept = this.appliesKept(entry);
+    const taken = kept ? this.keptTakes.get(entry.id) : undefined;
+    if (taken !== undefined) return taken;
+    // A retry's take comes later, so it reads the last valid record. So does a kept outbox's take after a restart.
+    if (entry.state === "retry_waiting" || (kept && entry.apply?.phase !== "pause")) {
+      return trackerRepo(config, registration, (await this.state.lastRecord(registration.name))?.record ?? null);
+    }
     // Step 4 asks at each poll, and a session's take never changes, so it reads the take's record once.
     const cached = this.takeRepos.get(entry.id);
     if (cached !== undefined) return cached;
-    const repo = await this.sessionRepo(config, registration, entry.id, workspace);
+    const folder = entry.apply?.folder ?? paths.sessionFolder(this.folders, entry.id);
+    const repo = await this.sessionRepo(config, registration, folder, workspace);
     if (repo !== null) this.takeRepos.set(entry.id, repo);
     return repo;
   }
@@ -380,7 +409,7 @@ export class Poll {
     queued.counted = true;
     if (exit.kind === "rate_limited") await this.usage.rateLimited(now, launchAuth(entry), exit.resetsAt);
     const registration = config.repos.find((repo) => repo.name === entry.repo);
-    const repo = registration === undefined ? null : await this.sessionRepo(config, registration, entry.id, workspace);
+    const repo = registration === undefined ? null : await this.sessionRepo(config, registration, paths.sessionFolder(this.folders, entry.id), workspace);
     if (repo === null) {
       // Linear's revoke takes only the token, but `Tracker.revoke` takes a repo, and with no registration or no
       // `login linear` for the workspace, Poll can't build one. The token stays live until it expires, as one a
@@ -422,12 +451,13 @@ export class Poll {
    * The repo as the take saw it: the record at the commit `session.json` names, which the take read and found
    * valid. The default branch's record or the registration's copy may name other statuses by now, and reading
    * the issue's status with those would discard a finished outbox or move the issue to the wrong status.
-   * A session folder or commit that can't be read falls back to the registration's copy.
+   * `folder` is the session folder, or the kept folder, which holds a copy of `session.json`. A folder or commit
+   * that can't be read falls back to the registration's copy.
    */
-  private async sessionRepo(config: Config, registration: Registration, session: string, workspace: Workspace): Promise<TrackerRepo | null> {
+  private async sessionRepo(config: Config, registration: Registration, folder: string, workspace: Workspace): Promise<TrackerRepo | null> {
     let record: RepoRecord | null = null;
     try {
-      const json = JSON.parse(await readFile(sessionParts(paths.sessionFolder(this.folders, session)).sessionJson, "utf8")) as SessionJson;
+      const json = JSON.parse(await readFile(sessionParts(folder).sessionJson, "utf8")) as SessionJson;
       const text = await workspace.show(registration, json.commit, RECORD_PATH);
       const read = text === null ? null : readRecord(text);
       if (read?.ok === true) record = read.record;
@@ -435,6 +465,11 @@ export class Poll {
       // Falls back to the registration's copy below.
     }
     return trackerRepo(config, registration, record);
+  }
+
+  /** Whether the entry applies a kept outbox, whose folder isn't its session folder. */
+  private appliesKept(entry: SessionEntry): boolean {
+    return entry.apply !== undefined && entry.apply.folder !== paths.sessionFolder(this.folders, entry.id);
   }
 
   /** The session is over: its workspace goes, and so does its entry. */
@@ -551,18 +586,18 @@ export class Poll {
       try {
         // A runner comment Linear didn't take yet goes first, and nothing else happens to its issue this poll.
         for (const issue of await this.pendingComments(now, tracker, snapshot)) blocked.add(issue);
-        // 4. Moved out.
+        // 4. Moved out, with the kept outboxes of issues that left Paused.
         await movedOut({
           now,
           repo: tracker,
           snapshot,
           state: this.state,
-          workspace,
-          folders: this.folders,
           tracker: this.tracker,
           takeRepo: async (entry) => (await this.entryRepo(config, entry, workspace)) ?? tracker,
           stop: (entry) => this.stopSession(now, entry, "moved_out"),
+          discard: (entry, role) => this.applyWaiting.movedOut(now, entry, role, workspace),
         });
+        await this.applyWaiting.forget(now, tracker, snapshot);
         // 5. Answers.
         const handled = await this.answers(now, tracker, snapshot, blocked);
         for (const issue of blocked) handled.add(issue);
@@ -586,7 +621,7 @@ export class Poll {
           version: this.version,
         });
       } catch (error) {
-        await this.state.log(now, `${registration.name}: runner comments, moved out, answers, flags, subscriptions, or stale takes failed: ${(error as Error).message}`);
+        await this.state.log(now, `${registration.name}: runner comments, moved out, kept outboxes, answers, flags, subscriptions, or stale takes failed: ${(error as Error).message}`);
         snapshot = null;
       }
     }
@@ -799,7 +834,8 @@ export class Poll {
     const running = sessions
       .filter((entry) => entry.state === "starting" || entry.state === "running")
       .map((entry) => (counted.has(entry.id) ? 0 : (entry.budget_usd ?? 0)));
-    const busy = new Set(sessions.map((entry) => entry.issue_id));
+    // An entry whose apply waits after the move has handed off, so its issue can be taken again.
+    const busy = new Set(sessions.filter((entry) => entry.apply?.phase !== "after_move").map((entry) => entry.issue_id));
     for (const poll of repos) await this.blockers(now, poll, busy);
     /** The budget each start this poll launches with. */
     const budget = config.auth === "api_key" ? (config.api?.session_budget_usd ?? 0) : 0;
@@ -809,6 +845,7 @@ export class Poll {
     // The cap test runs before the holds are read, so a cap that fits again ends its `api_cap` hold, and one that
     // doesn't holds the runner from this poll.
     await this.usage.fits(now, config, running);
+    await this.keptOutboxes(now, config, repos, workspace, trouble, busy);
 
     // Before each start, Claude Code's version (ADR 0015).
     const work = sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
@@ -846,9 +883,8 @@ export class Poll {
     for (const poll of startable) {
       if (!poll.fetch.ok || poll.snapshot === null) continue;
       for (const issue of poll.snapshot.issues) {
-        if (issue.role === "ready_to_plan" && !hasSpec(issue) && !busy.has(issue.id) && !poll.blocked.has(issue.id) && blockerTest(issue).kind === "take") {
-          candidates.push({ poll, issue });
-        }
+        if (!takeable(poll, issue, busy)) continue;
+        candidates.push({ poll, issue });
       }
     }
     // Priority, then how many issues each one unblocks, then age, across every repo (ADR 0002).
@@ -860,6 +896,33 @@ export class Poll {
       free--;
       running.push(budget);
       await this.startSession(now, config, poll, issue, workspace);
+    }
+  }
+
+  /**
+   * The takes that apply a kept outbox instead of starting a session. They take no place under the cap and need
+   * no Claude Code, so they come before the version check, and a hold on Claude Code's version doesn't stop them.
+   * Every other hold does. Each issue it takes, or whose take throws, joins `busy`, so no session starts for it
+   * this poll, and a throw skips only its own issue.
+   */
+  private async keptOutboxes(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace, trouble: Trouble, busy: Set<string>): Promise<void> {
+    const holds = (await currentHolds(this.holdContext(now, config, trouble))).filter((hold) => hold.cause !== "claude_code_version");
+    for (const poll of repos) {
+      if (poll.tracker === null || holdsRepo(holds, poll.tracker) || !poll.fetch.ok || poll.snapshot === null) continue;
+      for (const issue of poll.snapshot.issues) {
+        if (!takeable(poll, issue, busy)) continue;
+        try {
+          if (await this.applyWaiting.applyKept(now, poll.tracker, issue, workspace)) busy.add(issue.id);
+        } catch (error) {
+          busy.add(issue.id);
+          await this.state.log(now, `${issue.identifier}: kept outbox not applied, retrying next poll: ${(error as Error).message}`);
+        }
+        // An entry that waits after the take keeps the take's statuses.
+        if (!busy.has(issue.id)) continue;
+        for (const entry of await this.state.sessions()) {
+          if (entry.issue_id === issue.id && this.appliesKept(entry)) this.keptTakes.set(entry.id, poll.tracker);
+        }
+      }
     }
   }
 
@@ -1141,6 +1204,11 @@ function freshReplies(snapshot: Snapshot, uuid: string, after: string, known: re
   return snapshot.comments
     .filter((comment) => comment.issue === uuid && comment.created_at > after && !ids.has(comment.id))
     .map(({ id, author, created_at, body, synced }) => ({ id, author, created_at, body, synced }));
+}
+
+/** Whether a take may start the issue: a sent issue in Ready to plan, not busy or blocked, whose blockers allow it. */
+function takeable(poll: RepoPoll, issue: SnapshotIssue, busy: Set<string>): boolean {
+  return issue.role === "ready_to_plan" && !hasSpec(issue) && !busy.has(issue.id) && !poll.blocked.has(issue.id) && blockerTest(issue).kind === "take";
 }
 
 /** The repo as the Tracker needs it: the record's `[tracker]` when it's valid, or else the registration's copy. */
