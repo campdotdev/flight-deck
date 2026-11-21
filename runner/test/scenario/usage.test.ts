@@ -276,6 +276,18 @@ describe("the plan-limit hold", () => {
     expect((await world.status()).runner.holds).toEqual([]);
   });
 
+  test("doesn't hold the runner once config.toml pays with an API key", async () => {
+    sendReporting("First", usageEvent([0.8, later(3 * HOUR)], [0.3, later(100 * HOUR)]));
+    await world.tick();
+    expect((await world.status()).runner.holds.map(({ cause }) => cause)).toEqual(["plan_limit"]);
+
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+    sendBriefed("Second");
+    await world.tick();
+    expect(world.harness.started).toHaveLength(2);
+    expect((await world.status()).runner).toEqual({ state: "working", holds: [] });
+  });
+
   test("shows no usage before the first rate_limit_event", async () => {
     await world.tick();
     expect((await world.status()).usage).toEqual({ auth: "subscription", five_hour: null, weekly: null });
@@ -414,6 +426,28 @@ describe("on an API key", () => {
     await world.tick();
     expect(world.harness.started).toHaveLength(2);
     expect((await world.status()).runner.holds).toEqual([]);
+  });
+
+  test("a lowered budget keeps each running session's launch budget, in the cap test and its spending", async () => {
+    await useApiKey({ session_budget_usd: 10, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+    world.config.concurrency_cap = 5;
+    await world.writeConfig();
+    sendBriefed("First");
+    sendBriefed("Second");
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+
+    // The running session may still spend the 10 its launch carried, so a budget of 1 doesn't fit beside it.
+    world.config.api = { session_budget_usd: 1, daily_cap_usd: 10, monthly_cap_usd: 1000 };
+    await world.writeConfig();
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+
+    // It ended with no result event, so it counts the 10, not the 1.
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 });
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+    expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 10, month_usd: 10, daily_cap_usd: 10, monthly_cap_usd: 1000 });
   });
 
   test("spending survives a restart", async () => {

@@ -17,9 +17,17 @@ const WINDOWS = [
   { window: "seven_day", key: "weekly" },
 ] as const;
 
-/** `plan_limit`, `rate_limit`, and `api_cap`: each usage hold in `state/holds.json` that hasn't reached its end. */
-export const usageHolds: HoldSource = async ({ now, state }) =>
-  (await state.holds()).holds.filter((hold) => holding(hold, now)).map(({ cause, since, until }) => ({ cause, scope: "runner", name: null, since, until }));
+/** The usage holds each way of paying puts on the runner, so a hold from the other way never holds it. */
+const CAUSES: Record<Config["auth"], readonly StoredHold["cause"][]> = { subscription: ["plan_limit"], api_key: ["rate_limit", "api_cap"] };
+
+/**
+ * `plan_limit`, `rate_limit`, and `api_cap`: each usage hold in `state/holds.json` that hasn't reached its end,
+ * for the way `config.toml` pays now. A `plan_limit` hold doesn't hold the runner once it pays with an API key.
+ */
+export const usageHolds: HoldSource = async ({ now, state, config }) =>
+  (await state.holds()).holds
+    .filter((hold) => CAUSES[config.auth].includes(hold.cause) && holding(hold, now))
+    .map(({ cause, since, until }) => ({ cause, scope: "runner", name: null, since, until }));
 
 export class Usage {
   /** The last `rate_limit_event` a session reported since step 11 of the last poll. */
@@ -62,29 +70,32 @@ export class Usage {
 
   /**
    * On an API key, a session ended: its `result` event's `total_cost_usd` counts toward the day and the
-   * month, or its whole `session_budget_usd` when it ended with no `result` event, because its cost is unknown.
+   * month, or its whole budget when it ended with no `result` event, because its cost is unknown. The budget is
+   * the one its launch carried, `budgetUsd`, or `session_budget_usd` for a session that recorded none.
    */
-  async spent(now: Date, config: Config, exit: Exit): Promise<void> {
+  async spent(now: Date, config: Config, exit: Exit, budgetUsd?: number): Promise<void> {
     if (config.auth !== "api_key" || config.api === undefined) return;
-    const usd = exit.costUsd ?? config.api.session_budget_usd;
+    const usd = exit.costUsd ?? budgetUsd ?? config.api.session_budget_usd;
     const spend = spendAt(await this.state.spend(), now);
     await this.state.writeSpend({ ...spend, day_usd: spend.day_usd + usd, month_usd: spend.month_usd + usd });
   }
 
   /**
    * The cap test before each start (spec 1, "Holds"): on an API key, a start goes ahead only when each cap's
-   * remaining amount covers the `session_budget_usd` of every running session plus this one, so spending never
-   * passes a cap. A start that wouldn't fit holds under `api_cap` until the next local day, or the next local
-   * month when the monthly cap is the one short. A start that fits ends the hold, so a raised cap or a session
-   * that cost less than its budget frees the runner at once.
+   * remaining amount covers the budget of every running session plus this one's `session_budget_usd`, so
+   * spending never passes a cap. `running` holds each running session's budget, the one its launch carried, or
+   * undefined for a session that recorded none, which counts `session_budget_usd`. So lowering the budget never
+   * shrinks what a running session may still spend. A start that wouldn't fit holds under `api_cap` until the
+   * next local day, or the next local month when the monthly cap is the one short. A start that fits ends the
+   * hold, so a raised cap or a session that cost less than its budget frees the runner at once.
    */
-  async fits(now: Date, config: Config, running: number): Promise<boolean> {
+  async fits(now: Date, config: Config, running: readonly (number | undefined)[]): Promise<boolean> {
     let day = true;
     let month = true;
     if (config.auth === "api_key" && config.api !== undefined) {
       const { session_budget_usd, daily_cap_usd, monthly_cap_usd } = config.api;
       const spend = spendAt(await this.state.spend(), now);
-      const needed = session_budget_usd * (running + 1);
+      const needed = running.reduce<number>((sum, budget) => sum + (budget ?? session_budget_usd), session_budget_usd);
       day = daily_cap_usd - spend.day_usd >= needed;
       month = monthly_cap_usd - spend.month_usd >= needed;
     }

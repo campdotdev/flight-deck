@@ -387,7 +387,7 @@ export class Poll {
       return;
     }
     await this.tracker.revoke({ id: entry.id, repo });
-    if (queued.counted !== true) await this.usage.spent(now, config, exit);
+    if (queued.counted !== true) await this.usage.spent(now, config, exit, entry.budget_usd);
     queued.counted = true;
 
     const sessionFolder = paths.sessionFolder(this.folders, entry.id);
@@ -790,10 +790,11 @@ export class Poll {
 
   private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace, trouble: Trouble): Promise<void> {
     const sessions = await this.state.sessions();
-    let running = sessions.filter((entry) => entry.state === "starting" || entry.state === "running").length;
+    // Each running session's budget, the one its launch carried (spec 1, "Holds").
+    const running = sessions.filter((entry) => entry.state === "starting" || entry.state === "running").map((entry) => entry.budget_usd);
     const busy = new Set(sessions.map((entry) => entry.issue_id));
     for (const poll of repos) await this.blockers(now, poll, busy);
-    let free = config.concurrency_cap - running;
+    let free = config.concurrency_cap - running.length;
     /** Whether one more session may start: a free place under the cap, and on an API key, room under each cap. */
     const room = async () => free > 0 && (await this.usage.fits(now, config, running));
     // The cap test runs before the holds are read, so a cap that fits again ends its `api_cap` hold, and one that
@@ -828,7 +829,7 @@ export class Poll {
       // Step 4 dropped the retry of an issue that left its working status.
       if (issue === undefined || issue.role !== WORKING[entry.stage]) continue;
       free--;
-      running++;
+      running.push(config.api?.session_budget_usd);
       await this.startSession(now, config, poll, issue, workspace, entry);
     }
 
@@ -848,7 +849,7 @@ export class Poll {
     for (const { poll, issue } of candidates) {
       if (!(await room())) break;
       free--;
-      running++;
+      running.push(config.api?.session_budget_usd);
       await this.startSession(now, config, poll, issue, workspace);
     }
   }
@@ -906,6 +907,9 @@ export class Poll {
       started_at: null,
       deadline: null,
       state: "starting",
+      // The budget `buildLaunch` passes as `--max-budget-usd`, from the same `config.toml`, so the cap test and the
+      // spending count keep it after the maintainer changes `session_budget_usd`.
+      ...(config.auth === "api_key" && config.api !== undefined ? { budget_usd: config.api.session_budget_usd } : {}),
     };
 
     // 1. The entry first, then the take, so the issue never sits in Planning unseen (ADR 0002). A retry's fresh
