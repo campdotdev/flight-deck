@@ -29,6 +29,11 @@ export interface ApplyOptions {
   identity: Tracker;
   /** Make no write. The result lists each one. */
   dryRun?: boolean;
+  /**
+   * A kept outbox's replay, after a `retry` cleared the issue's flag. A pause whose comment landed before the
+   * outbox was kept gets its flag back, with no second comment.
+   */
+  replay?: boolean;
 }
 
 export interface OutboxOptions {
@@ -222,7 +227,13 @@ export class Outbox {
         async (applied) => {
           const filed = applied.filed[followUp.name];
           if (filed === undefined) return `applied.json lost the issue filed for ${followUp.name}`;
-          await tracker.relate({ id: filed, repo }, ref, "related");
+          try {
+            await tracker.relate({ id: filed, repo }, ref, "related");
+          } catch (error) {
+            // A follow-up deleted since it was filed can't be related, and every other write still lands.
+            if (!(error instanceof IssueNotFoundError)) throw error;
+            await state.log(this.options.clock(), `${issue.identifier}: the issue filed for ${followUp.name} is gone, so it isn't related`);
+          }
           return null;
         },
       ],
@@ -263,7 +274,22 @@ export class Outbox {
           async () => {
             // The issue first, so issue memory is read just before the write, with any reply a poll saved meanwhile.
             const read = await tracker.issue(ref);
-            const memory = await state.issueMemory(session.repo, issue.id);
+            const reflag = options.replay === true && (await state.issueMemory(session.repo, issue.id)).flag === null;
+            if (reflag) await tracker.flag(ref);
+            const opened = await state.issueMemory(session.repo, issue.id);
+            const memory = reflag
+              ? {
+                  ...opened,
+                  flag: {
+                    cause: "pause" as const,
+                    status_line: opening(phrase, envelope.summary).statusLine,
+                    since: this.options.clock().toISOString(),
+                    issue: issue.identifier,
+                    title: issue.title,
+                    url: issue.url,
+                  },
+                }
+              : opened;
             const pause = ownPause(memory.pause) ?? {
               answers,
               session: session.session,

@@ -231,6 +231,10 @@ export class ApplyWaiting {
       await this.log(now, entry, "the issue is gone, writes after the move dropped");
       return this.discard(entry, workspace);
     }
+    // An entry kept past its 3 hours, because Linear didn't answer the listing then, lists and drops its writes.
+    if (wait.phase === "after_move" && wait.dropping === true) {
+      return this.dropAfterMove(now, outbox, await this.tried(now, entry), workspace);
+    }
     if (wait.phase === "apply") {
       if (issue !== null && this.untaken(entry, issue.role)) return this.leaveKept(now, entry);
       // An issue the maintainer moved before the move landed: the outbox is discarded (ADR 0007). As at an exit,
@@ -245,7 +249,8 @@ export class ApplyWaiting {
         wait = entry.apply!;
       }
     }
-    const result = await outbox.apply(wait.folder, { identity: this.tracker });
+    const replay = wait.folder === paths.kept(this.folders, entry.repo, entry.issue_id);
+    const result = await outbox.apply(wait.folder, { identity: this.tracker, replay });
     await this.log(now, entry, `outbox ${JSON.stringify(result)}`);
     switch (result.result) {
       case "applied":
@@ -272,8 +277,9 @@ export class ApplyWaiting {
   private async dropAfterMove(now: Date, outbox: Outbox, entry: SessionEntry, workspace: Workspace): Promise<void> {
     const rest = await outbox.apply(entry.apply!.folder, { identity: this.tracker, dryRun: true });
     if (rest.result === "unwritten") {
-      // The writes still to land need a Linear read to list, so the entry waits for a try Linear answers.
-      await this.writeEntry(entry);
+      // The writes still to land need a Linear read to list, so the entry waits for a try Linear answers, and
+      // that try only lists them.
+      await this.writeEntry({ ...entry, apply: { ...entry.apply!, dropping: true } });
       await this.log(now, entry, "Linear didn't answer, so the writes after the move wait to be listed and dropped");
       return;
     }
@@ -286,18 +292,27 @@ export class ApplyWaiting {
     const wait = entry.apply!;
     const kept = paths.kept(this.folders, repo.name, entry.issue_id);
     if (wait.folder !== kept) {
+      // An earlier take of the kept folder whose writes after its move still wait is past its own 3 hours, and
+      // this handoff replaces the folder, so that entry's writes go first.
+      for (const other of await this.state.sessions()) {
+        if (other.id === entry.id || other.apply?.folder !== kept) continue;
+        await this.log(now, other, "writes after the move dropped: a newer handoff takes the kept folder");
+        await this.dropEntry(other.id);
+      }
       await rm(kept, { recursive: true, force: true });
       await mkdir(kept, { recursive: true });
       for (const name of KEPT_FILES) {
         const from = join(wait.folder, name);
         if (existsSync(from)) await cp(from, join(kept, name), { recursive: true });
       }
-      await workspace.dispose({ session: entry.id, worktree: entry.worktree });
     }
+    // Issue memory and the entry name the kept copy before the session folder goes, so a failed write leaves a
+    // folder a later try can still read.
     const memory = await this.state.issueMemory(repo.name, entry.issue_id);
     await this.state.writeIssueMemory(repo.name, entry.issue_id, { ...memory, kept: { session: entry.id, at: now.toISOString() } });
     const pausing: SessionEntry = { ...entry, apply: { folder: kept, phase: "pause", since: wait.since, tried_at: now.toISOString(), tries: 1 } };
     await this.writeEntry(pausing);
+    if (wait.folder !== kept) await workspace.dispose({ session: entry.id, worktree: entry.worktree });
     await this.log(now, entry, `Linear didn't take the outbox for 3 hours, kept in ${kept}`);
     await this.postPause(now, repo, pausing);
   }
@@ -312,8 +327,10 @@ export class ApplyWaiting {
     }
     if (issue === null || working === undefined || issue.role !== working) return this.moved(now, repo, entry, issue?.role ?? null);
     const comment = runnerComment(linearWrite(entry.apply!.folder), this.facts(entry), { version: this.options.version, statuses: repo.statuses });
+    const posting: SessionEntry = { ...entry, apply: { ...entry.apply!, posted: true } };
+    await this.writeEntry(posting);
     const result = await this.comments(now).post({ ...issue, role: working }, comment);
-    await this.paused(now, repo, entry, result, working);
+    await this.paused(now, repo, posting, result, working);
   }
 
   /** Tries the Linear-write pause again: the comment's pending writes, or the whole pause if none was made. */
@@ -324,12 +341,14 @@ export class ApplyWaiting {
     const memory = await this.state.issueMemory(repo.name, entry.issue_id);
     if (memory.pending === null) {
       if (issue?.role === WORKING[entry.stage]) return this.postPause(now, repo, tried);
-      if (issue?.role === "paused") return this.dropEntry(entry.id);
-      // No pause was posted, so an issue in the outbox's move status got there through the move itself.
-      if (issue !== null && (await Outbox.moved(entry.apply!.folder, issue.role))) {
+      // A posted pause that left issue memory landed, as through the poll's own comment retry.
+      if (tried.apply!.posted === true && issue?.role === "paused") return this.dropEntry(entry.id);
+      // With no pause posted, an issue in the outbox's move status, Paused included, got there through the move.
+      if (tried.apply!.posted !== true && issue !== null && (await Outbox.moved(entry.apply!.folder, issue.role))) {
         await this.handedOff(now, tried);
         return;
       }
+      if (issue?.role === "paused") return this.dropEntry(entry.id);
       return this.moved(now, repo, entry, issue?.role ?? null);
     }
     await this.paused(now, repo, tried, (await this.comments(now).retry(repo, entry.issue_id, issue)) ?? "landed", issue?.role ?? null);
@@ -403,10 +422,12 @@ export class ApplyWaiting {
     await this.dropEntry(entry.id);
   }
 
+  /** Deletes the kept folder the entry applied, unless a newer handoff took it over since. */
   private async discardKept(entry: SessionEntry): Promise<void> {
     if (entry.apply?.folder !== paths.kept(this.folders, entry.repo, entry.issue_id)) return;
-    await rm(entry.apply.folder, { recursive: true, force: true });
     const memory = await this.state.issueMemory(entry.repo, entry.issue_id);
+    if (memory.kept !== null && memory.kept.session !== entry.id) return;
+    await rm(entry.apply.folder, { recursive: true, force: true });
     await this.state.writeIssueMemory(entry.repo, entry.issue_id, { ...memory, kept: null });
   }
 

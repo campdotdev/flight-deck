@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { TrackerUnavailable, type StoredIssue } from "../../src/tracker/index.ts";
-import { outbox, UNMAPPED_STATUS, World } from "./world.ts";
+import { outbox, SHADERS_RECORD, UNMAPPED_STATUS, World } from "./world.ts";
 
 let world: World;
 
@@ -17,6 +17,17 @@ afterEach(async () => {
 });
 
 const BRIEF = outbox.brief({ summary: "Brief ready: the Save button turns red", brief: "## Summary\n\nRed." });
+const PAUSE = outbox.pause({ summary: "Which red?\n\nThere are two.", pause: "## Question\n\nWhich red?", answers: [], needs: "help" });
+
+/** Makes the move to `to` land and lose its response once, as a dropped connection would on the real adapter. */
+function loseMove(to: string): void {
+  const move = world.tracker.move.bind(world.tracker);
+  let lost = 1;
+  world.tracker.move = async (ref, role) => {
+    await move(ref, role);
+    if (role === to && lost-- > 0) throw new TrackerUnavailable("network");
+  };
+}
 
 /** The writes after the issue's last move to Planning. */
 function afterTake(issue: StoredIssue) {
@@ -325,6 +336,65 @@ describe("after 3 hours", () => {
     expect(world.tracker.stored(issue.id).status).toBe("Planning");
   }, 30_000);
 
+  test("a kept pause whose comment landed gets its flag back at the replay, with no second comment", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { outbox: PAUSE, exit: { kind: "exited", code: 0 } });
+    await world.tick();
+    // The pause's comment lands, and its move to Paused fails for 3 hours.
+    world.tracker.refuse("move", { times: 17 });
+    await world.tick();
+    await tickAt(UNTIL_KEPT);
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    world.reply(issue, "retry");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    expect(world.tracker.stored(issue.id).assignee).toBe(world.maintainer.id);
+    const flags = (await world.status()).flags;
+    expect(flags.map((flag) => flag.issue)).toEqual([issue.identifier]);
+    expect(flags[0]!.status_line).toContain("Which red?");
+    expect(world.tracker.writes.filter((write) => write.kind === "comment")).toHaveLength(2);
+    expect(world.harness.started).toHaveLength(1);
+  }, 30_000);
+
+  test("a newer handoff kept while an older take of the kept folder still waits retires the older one", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    await keep(issue, 0, WITH_FOLLOW_UP);
+    world.reply(issue, "retry");
+    await world.tick();
+    // The kept take's comment and move land, and its follow-up waits after the move.
+    world.tracker.refuse("file", { times: 100 });
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    // A new take runs a session whose comment Linear refuses too.
+    world.send(issue);
+    world.harness.script(issue.identifier, { outbox: BRIEF, exit: { kind: "exited", code: 0 } });
+    world.tracker.refuse("post", { times: 100 });
+    await world.tick();
+    await world.tick();
+    expect(world.harness.started).toHaveLength(2);
+    // The older entry's 3 hours end 2 minutes before the newer one's, and Linear answers no read across both.
+    const start = world.now.getTime();
+    const at = (minutes: number) => world.tick(new Date(start + minutes * 60_000));
+    for (const minutes of [15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165]) await at(minutes);
+    const restore = breakReads(issue);
+    await at(178);
+    await at(180);
+    restore();
+    world.tracker.accept("post");
+    await at(181);
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    world.reply(issue, "retry");
+    await world.tick();
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    expect(world.harness.started).toHaveLength(2);
+    const log = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
+    expect(log).toContain("writes after the move dropped: a newer handoff takes the kept folder");
+  }, 30_000);
+
   test("a hand move back to Ready to plan applies the kept outbox too", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     await keep(issue);
@@ -430,11 +500,52 @@ describe("a write after the move", () => {
     expect(before).toContain(`${id} ${issue.identifier}: Linear didn't answer, so the writes after the move wait to be listed and dropped`);
     expect((await world.status()).sessions.map(({ id, state }) => ({ id, state }))).toEqual([{ id, state: "apply_waiting" }]);
     restore();
+    // Linear takes the follow-up again, but its 3 hours ran out, so the try only lists and drops it.
+    world.tracker.accept("file");
     await tickAt([15]);
+    expect(afterTake(issue).map((write) => write.kind)).toEqual(["description", "comment", "move"]);
     const log = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
     expect(log).toContain(`${id} ${issue.identifier}: file follow-ups/1.md dropped: Linear didn't take it for 3 hours`);
     expect((await world.status()).sessions).toEqual([]);
     expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+  }, 30_000);
+
+  test("relates no follow-up deleted since it was filed, and the other writes still land", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.tracker.refuse("relate");
+    await runSession(issue, WITH_FOLLOW_UP);
+    world.tracker.deleteIssue(world.tracker.stored("SHA-2").id);
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+    const log = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
+    expect(log).toContain(`${issue.identifier}: the issue filed for follow-ups/1.md is gone, so it isn't related`);
+  });
+
+  test("is found though the default branch's record no longer maps the move's status", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    loseMove("ready_to_build");
+    world.send(issue);
+    world.harness.script(issue.identifier, { outbox: WITH_FOLLOW_UP, exit: { kind: "exited", code: 0 } });
+    await world.tick();
+    await world.push({ ".flight-deck/record.toml": SHADERS_RECORD.replace('ready_to_build = "Ready to build"', `ready_to_build = "${UNMAPPED_STATUS}"`) });
+    await world.tick();
+    await world.tick();
+    expect(world.tracker.writes.filter((write) => write.kind === "file")).toHaveLength(1);
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
+  test("a pause whose move's response was lost finishes, though Linear didn't answer its reads for 3 hours", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    loseMove("paused");
+    await runSession(issue, { ...PAUSE, "follow-ups/1.md": "# Cancel is blue too\n\nx" });
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    const restore = breakReads(issue);
+    await tickAt(UNTIL_KEPT);
+    expect(existsSync(join(kept(issue), "outbox", "outcome.json"))).toBe(true);
+    restore();
+    await tickAt([1, 2, 3]);
+    expect(world.tracker.writes.filter((write) => write.kind === "file")).toHaveLength(1);
+    expect((await world.status()).sessions).toEqual([]);
   }, 30_000);
 
   test("is dropped when the issue was deleted", async () => {

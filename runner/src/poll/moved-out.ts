@@ -70,7 +70,8 @@ async function movedOutEntry(context: MovedOutContext, entry: SessionEntry): Pro
       await drop(state, entry);
       break;
     case "apply_waiting": {
-      const role = sameTeam ? (issue?.role ?? null) : null;
+      // The role with the statuses the take read: the snapshot's, or a read when the snapshot can't say.
+      const role = sameTeam && issue !== undefined ? issue.role : ((await onTeam(context.tracker, take, entry))?.role ?? null);
       // Before the status move landed, the outbox is discarded (ADR 0007). Once it landed, the stage handed off,
       // and the writes after it keep retrying. A `pause` entry's issue may sit in Paused while the Linear-write
       // pause's comment waits, and its kept outbox must outlive that, so `ApplyWaiting` settles it (FLD-100).

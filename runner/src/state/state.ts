@@ -65,6 +65,10 @@ export interface ApplyWait {
   tried_at: string;
   /** The tries so far in this phase. */
   tries: number;
+  /** In the `pause` phase, set once the Linear-write pause's comment went to issue memory to post. */
+  posted?: boolean;
+  /** In the `after_move` phase, set once the 3 hours ran out, while the writes left wait for Linear to list them. */
+  dropping?: boolean;
 }
 
 export type StopCause = "stop" | "moved_out";
