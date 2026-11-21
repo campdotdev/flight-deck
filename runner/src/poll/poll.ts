@@ -863,8 +863,14 @@ export class Poll {
       if (!poll.fetch.ok || poll.snapshot === null) continue;
       for (const issue of poll.snapshot.issues) {
         if (issue.role !== "ready_to_plan" || hasSpec(issue) || busy.has(issue.id) || poll.blocked.has(issue.id) || blockerTest(issue).kind !== "take") continue;
-        // A kept outbox is applied instead of a session, and takes no place under the cap.
-        if (poll.tracker !== null && (await this.applyWaiting.applyKept(now, this.outbox(now, config), poll.tracker, issue, workspace))) continue;
+        // A kept outbox is applied instead of a session, and takes no place under the cap. One that throws starts
+        // nothing for its issue this poll, and the other issues still go.
+        try {
+          if (poll.tracker !== null && (await this.applyWaiting.applyKept(now, this.outbox(now, config), poll.tracker, issue, workspace))) continue;
+        } catch (error) {
+          await this.state.log(now, `${issue.identifier}: kept outbox not applied, retrying next poll: ${(error as Error).message}`);
+          continue;
+        }
         candidates.push({ poll, issue });
       }
     }

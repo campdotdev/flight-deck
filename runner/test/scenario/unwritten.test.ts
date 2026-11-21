@@ -75,6 +75,35 @@ describe("the backoff", () => {
     expect(afterTake(issue).map((write) => write.kind)).toEqual(["description", "comment", "move"]);
   }, 30_000);
 
+  test("a try that throws for another reason waits for the next poll, and the other entries still go", async () => {
+    const first = world.issue({ title: "Save button is blue" });
+    const second = world.issue({ title: "Checkout crashes" });
+    world.tracker.refuse("post", { times: 2 });
+    for (const issue of [first, second]) {
+      world.send(issue);
+      world.harness.script(issue.identifier, { outbox: BRIEF, exit: { kind: "exited", code: 0 } });
+    }
+    await world.tick();
+    await world.tick();
+    expect((await world.status()).sessions.map(({ issue, state }) => ({ issue, state }))).toEqual([
+      { issue: first.identifier, state: "apply_waiting" },
+      { issue: second.identifier, state: "apply_waiting" },
+    ]);
+    const read = world.tracker.issue.bind(world.tracker);
+    let broken = 1;
+    world.tracker.issue = async (ref) => {
+      if (ref.id === first.id && broken-- > 0) throw new Error("socket hang up");
+      return read(ref);
+    };
+    await world.tick();
+    expect(world.tracker.stored(first.id).status).toBe("Planning");
+    expect(world.tracker.stored(second.id).status).toBe("Ready to build");
+    expect((await world.status()).sessions.map(({ issue, state }) => ({ issue, state }))).toEqual([{ issue: first.identifier, state: "apply_waiting" }]);
+    await world.tick();
+    expect(world.tracker.stored(first.id).status).toBe("Ready to build");
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
   test("an apply_waiting entry takes no place under the cap", async () => {
     world.config.concurrency_cap = 1;
     await world.writeConfig();
@@ -166,6 +195,28 @@ describe("after 3 hours", () => {
     expect(world.harness.started).toHaveLength(1);
     expect((await world.status()).sessions).toEqual([]);
     expect(existsSync(kept(issue))).toBe(false);
+  }, 30_000);
+
+  test("a take of the kept outbox that throws keeps it for the next take, and the tick still runs", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    await keep(issue);
+    world.reply(issue, "retry");
+    await world.tick();
+    const move = world.tracker.move.bind(world.tracker);
+    let broken = 1;
+    world.tracker.move = async (ref, to) => {
+      if (to === "planning" && broken-- > 0) throw new Error("socket hang up");
+      await move(ref, to);
+    };
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
+    expect((await world.status()).sessions).toEqual([]);
+    expect(existsSync(join(kept(issue), "outbox", "outcome.json"))).toBe(true);
+    const log = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
+    expect(log).toContain(`${issue.identifier}: kept outbox not applied, retrying next poll: socket hang up`);
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    expect(world.harness.started).toHaveLength(1);
   }, 30_000);
 
   test("a hand move back to Ready to plan applies the kept outbox too", async () => {

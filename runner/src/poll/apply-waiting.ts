@@ -89,20 +89,31 @@ export class ApplyWaiting {
     this.lifecycle = new Lifecycle(options.tracker);
   }
 
-  /** Tries each `apply_waiting` entry whose next try has come, in list order. */
+  /**
+   * Tries each `apply_waiting` entry whose next try has come, in list order. An entry whose try throws for any
+   * reason but Linear's stays as it was and is tried again at the next poll, and the entries after it still go.
+   */
   async retry(now: Date, outbox: Outbox, repoOf: (name: string) => TrackerRepo | null, workspace: Workspace): Promise<void> {
     for (const entry of await this.state.sessions()) {
       if (entry.state !== "apply_waiting" || entry.apply === undefined || !due(entry.apply, now)) continue;
       const repo = repoOf(entry.repo);
       if (repo === null) continue;
       try {
-        if (entry.apply.phase === "pause") await this.retryPause(now, repo, entry);
-        else await this.apply(now, outbox, repo, entry, workspace);
+        await this.tryOnce(now, outbox, repo, entry, workspace);
       } catch (error) {
-        if (!isUnavailable(error)) throw error;
-        await this.log(now, entry, `Linear didn't answer: ${error.message}`);
-        await this.tried(now, entry);
+        await this.log(now, entry, `apply try failed, retrying next poll: ${(error as Error).message}`);
       }
+    }
+  }
+
+  private async tryOnce(now: Date, outbox: Outbox, repo: TrackerRepo, entry: SessionEntry, workspace: Workspace): Promise<void> {
+    try {
+      if (entry.apply!.phase === "pause") await this.retryPause(now, repo, entry);
+      else await this.apply(now, outbox, repo, entry, workspace);
+    } catch (error) {
+      if (!isUnavailable(error)) throw error;
+      await this.log(now, entry, `Linear didn't answer: ${error.message}`);
+      await this.tried(now, entry);
     }
   }
 
@@ -151,9 +162,11 @@ export class ApplyWaiting {
         return true;
       }
     } catch (error) {
+      // The entry goes on any failed take, so no later try reads the issue outside Planning and discards the
+      // kept outbox.
+      await this.dropEntry(entry.id);
       if (!isUnavailable(error)) throw error;
       await this.log(now, entry, `take of the kept outbox waits: ${error.message}`);
-      await this.dropEntry(entry.id);
       return true;
     }
     await this.log(now, entry, "took the issue to apply its kept outbox");
