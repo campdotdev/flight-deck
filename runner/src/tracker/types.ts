@@ -45,7 +45,40 @@ export interface SnapshotIssue extends IssueRef {
   /** Linear's priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. */
   priority: number;
   created_at: string;
+  /** Every issue that blocks this one, on any team. Read only for an issue in `ready_to_plan`, and empty otherwise. */
+  blockers: Blocker[];
+  /**
+   * The open issues, in any status, that this one blocks and that have no other open blocker. Read only for an
+   * issue in `ready_to_plan`, and 0 otherwise.
+   */
+  unblocks: number;
 }
+
+/** An issue a blocker test can read, on any team. */
+export interface ReadableIssue {
+  readable: true;
+  identifier: string;
+  title: string;
+  url: string;
+  /** The team's name for its status. */
+  status: string;
+  status_type: StatusType;
+}
+
+/** An issue the Flight Deck app can see but not read, such as one on a private team. It counts as open. */
+export interface UnreadableIssue {
+  readable: false;
+  identifier: string;
+}
+
+export type BlockerIssue = ReadableIssue | UnreadableIssue;
+
+/**
+ * An issue that blocks a snapshot issue. `original` is set for a blocker with a `duplicate` relation, whatever its
+ * status type: the issue the relation points to, followed through further duplicates to the first that isn't one.
+ * It is `null` for a blocker with no such relation, and for a chain that loops back (ADRs 0002 and 0004).
+ */
+export type Blocker = UnreadableIssue | (ReadableIssue & { original: BlockerIssue | null });
 
 export interface Snapshot {
   /** Every issue in a factory status or in the `intake` role. */
