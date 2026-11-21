@@ -16,38 +16,68 @@ export interface MovedOutContext {
   state: State;
   workspace: Workspace;
   folders: Folders;
+  tracker: Tracker;
+  /**
+   * The repo with the statuses the entry's take read. The default branch's record may have renamed the
+   * working status since, and the snapshot maps statuses with that record.
+   */
+  takeRepo(entry: SessionEntry): Promise<TrackerRepo>;
   /** Asks the Harness to stop a running session because its issue moved out. Its `stopped` exit disposes it. */
   stop(entry: SessionEntry): Promise<void>;
 }
 
+/**
+ * Each entry goes on its own: one whose Linear read or stop request throws stays as it was, and the entries after
+ * it are still checked. Then the first failure throws, so the repo's starts wait for the next poll.
+ */
 export async function movedOut(context: MovedOutContext): Promise<void> {
-  const { now, repo, snapshot, state, workspace } = context;
+  const { now, repo, state } = context;
+  let failed: unknown = null;
   for (const entry of await state.sessions()) {
     if (entry.repo !== repo.name) continue;
-    const issue = snapshot.issues.find((each) => each.id === entry.issue_id);
-    if (issue !== undefined && issue.role === WORKING[entry.stage]) continue;
-    const log = (message: string) => state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, ${message}`);
-    switch (entry.state) {
-      case "running":
-        await context.stop(entry);
-        break;
-      case "retry_waiting":
-        // The failed session's workspace already went, so only the entry is left.
-        await log("retry dropped");
-        await drop(state, entry);
-        break;
-      case "apply_waiting":
-        // Once the move landed, the stage handed off, and the writes after it keep retrying (FLD-100).
-        if (await moveLanded(paths.sessionFolder(context.folders, entry.id))) break;
-        await log("outbox discarded");
-        await workspace.dispose({ session: entry.id, worktree: entry.worktree });
-        await drop(state, entry);
-        break;
-      case "starting":
-      case "shutdown":
-        // A restart handles these (FLD-108). A live runner never leaves an entry `starting` between ticks.
-        break;
+    try {
+      await movedOutEntry(context, entry);
+    } catch (error) {
+      await state.log(now, `${entry.id} ${entry.issue}: moved-out check failed, retrying next poll: ${(error as Error).message}`);
+      failed ??= error;
     }
+  }
+  if (failed !== null) throw failed;
+}
+
+async function movedOutEntry(context: MovedOutContext, entry: SessionEntry): Promise<void> {
+  const { now, repo, snapshot, state, workspace } = context;
+  // The issue still sits in the status the take called the stage's working status. A snapshot holds only the
+  // team's issues that aren't archived, so it answers only for a take on the snapshot's team.
+  const take = await context.takeRepo(entry);
+  const working = WORKING[entry.stage];
+  const sameTeam = take.workspace === repo.workspace && take.team === repo.team;
+  const issue = snapshot.issues.find((each) => each.id === entry.issue_id);
+  if (sameTeam && issue !== undefined && working !== undefined && issue.status === take.statuses[working]) return;
+  // A status the default branch's record doesn't map leaves the issue out of the snapshot, and a record that
+  // names another team polls that team, so a read with the take's team and statuses confirms the move.
+  if ((!sameTeam || issue === undefined) && (await stillWorking(context.tracker, take, entry)) !== null) return;
+  const log = (message: string) => state.log(now, `${entry.id} ${entry.issue}: left ${WORKING[entry.stage]}, ${message}`);
+  switch (entry.state) {
+    case "running":
+      await context.stop(entry);
+      break;
+    case "retry_waiting":
+      // The failed session's workspace already went, so only the entry is left.
+      await log("retry dropped");
+      await drop(state, entry);
+      break;
+    case "apply_waiting":
+      // Once the move landed, the stage handed off, and the writes after it keep retrying (FLD-100).
+      if (await moveLanded(paths.sessionFolder(context.folders, entry.id))) break;
+      await log("outbox discarded");
+      await workspace.dispose({ session: entry.id, worktree: entry.worktree });
+      await drop(state, entry);
+      break;
+    case "starting":
+    case "shutdown":
+      // A restart handles these (FLD-108). A live runner never leaves an entry `starting` between ticks.
+      break;
   }
 }
 
@@ -56,6 +86,16 @@ export async function movedOut(context: MovedOutContext): Promise<void> {
  * Returns `null` once it was deleted, archived, moved to another team, or moved out of the working status.
  */
 export async function stillWorking(tracker: Tracker, repo: TrackerRepo, entry: SessionEntry): Promise<TrackerIssue | null> {
+  const issue = await onTeam(tracker, repo, entry);
+  const working = WORKING[entry.stage];
+  return issue !== null && working !== undefined && issue.role === working ? issue : null;
+}
+
+/**
+ * Re-reads the issue, and returns it while it's still on the repo's team and not archived, in any status.
+ * Returns `null` once it was deleted, archived, or moved to another team. Any other failed read throws.
+ */
+export async function onTeam(tracker: Tracker, repo: TrackerRepo, entry: SessionEntry): Promise<TrackerIssue | null> {
   let issue: TrackerIssue;
   try {
     issue = await tracker.issue({ id: entry.issue_id, repo });
@@ -63,8 +103,7 @@ export async function stillWorking(tracker: Tracker, repo: TrackerRepo, entry: S
     if (error instanceof IssueNotFoundError) return null;
     throw error;
   }
-  const working = WORKING[entry.stage];
-  return working !== undefined && issue.role === working && issue.team === repo.team && !issue.archived ? issue : null;
+  return issue.team === repo.team && !issue.archived ? issue : null;
 }
 
 /** Whether the outbox's status move landed, from the writes `applied.json` records. */

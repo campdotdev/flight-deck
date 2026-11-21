@@ -70,6 +70,26 @@ describe("follow-up issues", () => {
     expect((await world.status()).flags.map((flag) => flag.issue)).toEqual([issue.identifier]);
   });
 
+  test("are filed at the next poll when the move's response was lost, though the issue left Planning", async () => {
+    const issue = world.issue({ title: "Save button is blue", description: "It should be red." });
+    // The move lands, and its response is lost, as a dropped connection would on the real adapter.
+    const move = world.tracker.move.bind(world.tracker);
+    let lost = 1;
+    world.tracker.move = async (ref, to) => {
+      await move(ref, to);
+      if (to === "ready_to_build" && lost-- > 0) throw new Error("socket hang up");
+    };
+    await planned(issue, { ...outbox.brief({ summary: SUMMARY, brief: BRIEF }), ...FOLLOW_UPS });
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    expect(world.tracker.writes.filter((write) => write.kind === "file")).toEqual([]);
+    // The exit stays queued, and the next poll applies the outbox again.
+    await world.tick();
+    const writes = world.tracker.writes;
+    const last = writes.findIndex((write) => write.kind === "move" && write.status === "Ready to build");
+    expect(writes.slice(last + 1)).toEqual(filed(issue, "SHA-2", "SHA-3"));
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
   test("are filed after a duplicate mark", async () => {
     const original = world.issue({ title: "Save button is blue", status: "Backlog" });
     const issue = world.issue({ title: "Blue Save button" });

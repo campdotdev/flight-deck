@@ -32,14 +32,16 @@ function scan(text: string): { lines: Map<string, number>; first: Path | undefin
   let first: Path | undefined;
   const tableArrays = new Map<string, number>(); // an array of tables to its entry count
   let table: Path = [];
-  let pos = 0;
+  // Bun accepts a byte-order mark, which would otherwise read as an empty first key.
+  let pos = text.startsWith("﻿") ? 1 : 0;
   let line = 1;
 
-  const mark = (path: Path) => {
+  const mark = (path: Path, header = false) => {
     first ??= path;
     for (let k = 1; k <= path.length; k++) {
       const id = JSON.stringify(path.slice(0, k));
-      if (!lines.has(id)) lines.set(id, line);
+      // A table's own header replaces the line that an earlier child header implied for it.
+      if (!lines.has(id) || (header && k === path.length)) lines.set(id, line);
     }
   };
 
@@ -92,8 +94,10 @@ function scan(text: string): { lines: Map<string, number>; first: Path | undefin
   const skipMultiline = (fence: string) => {
     pos += 3;
     while (pos < text.length && !text.startsWith(fence, pos)) {
+      // A backslash escapes the next character, which may be the newline a line-ending backslash trims.
+      if (fence === '"""' && text[pos] === "\\") pos++;
       if (text[pos] === "\n") line++;
-      pos += fence === '"""' && text[pos] === "\\" ? 2 : 1;
+      pos++;
     }
     pos += 3;
     // A closing fence may carry up to two quotes of the string's own.
@@ -143,7 +147,7 @@ function scan(text: string): { lines: Map<string, number>; first: Path | undefin
       } else {
         table = resolve(keys);
       }
-      mark(table);
+      mark(table, true);
     } else {
       const keys = readKey();
       pos++; // "="

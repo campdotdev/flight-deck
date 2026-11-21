@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { StoredIssue } from "../../src/tracker/index.ts";
-import { outbox, STATUSES, World } from "./world.ts";
+import { outbox, SHADERS_RECORD, STATUSES, UNMAPPED_STATUS, World } from "./world.ts";
 
 let world: World;
 
@@ -104,10 +104,70 @@ describe("an issue moved out of Planning", () => {
     expect((await world.status()).sessions).toEqual([]);
   });
 
+  test("stops a later session at the same poll when an earlier one's stop request fails", async () => {
+    const first = world.issue({ title: "Save button is blue" });
+    const second = world.issue({ title: "Cancel button is green" });
+    world.send(first);
+    world.send(second);
+    world.harness.script(first.identifier, {});
+    world.harness.script(second.identifier, {});
+    await world.tick();
+    const one = world.harness.started[0]!.session.id;
+    const two = world.harness.started[1]!.session.id;
+    const stop = world.harness.stop.bind(world.harness);
+    let failures = 1;
+    world.harness.stop = async (handle) => {
+      if (handle.session === one && failures-- > 0) throw new Error("kill failed");
+      return stop(handle);
+    };
+
+    world.tracker.setStatus(first.id, STATUSES.backlog[0]);
+    world.tracker.setStatus(second.id, STATUSES.backlog[0]);
+    await world.tick();
+    expect(world.harness.stops).toEqual([two]);
+    await world.tick();
+    expect(world.harness.stops).toEqual([two, one]);
+  });
+
   test("leaves a session alone while its issue stays in Planning", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     await running(issue);
     await world.tick();
+    await world.tick();
+    expect(world.harness.stops).toEqual([]);
+    expect((await world.status()).sessions.map(({ state }) => state)).toEqual(["running"]);
+  });
+
+  test("stops a session whose issue moves into the status a newer record calls Planning", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const session = await running(issue);
+    await world.push({ ".flight-deck/record.toml": SHADERS_RECORD.replace('planning = "Planning"', `planning = "${UNMAPPED_STATUS}"`) });
+    await world.tick();
+    // The snapshot now calls the new status Planning, but the take didn't, so the issue left its working status.
+    world.tracker.setStatus(issue.id, UNMAPPED_STATUS);
+    await world.tick();
+    expect(world.harness.stops).toEqual([session]);
+  });
+
+  test("stops a session whose issue moves to the team a newer record names, and not before", async () => {
+    world.tracker.addTeam({ key: "OTH", name: "Other", statuses: [...Object.values(STATUSES), [UNMAPPED_STATUS, "backlog"] as const].map(([name, type]) => ({ name, type })) });
+    const issue = world.issue({ title: "Save button is blue" });
+    const session = await running(issue);
+    await world.push({ ".flight-deck/record.toml": SHADERS_RECORD.replace(/^team = "SHA"$/m, 'team = "OTH"') });
+    // The new record polls the other team, whose snapshot lacks the issue, and the take's team still holds it.
+    await world.tick();
+    expect(world.harness.stops).toEqual([]);
+    // The other team has a status of the same name, but the take's team was Shaders.
+    world.tracker.moveToTeam(issue.id, "OTH", STATUSES.planning[0]);
+    await world.tick();
+    expect(world.harness.stops).toEqual([session]);
+  });
+
+  test("leaves a session alone when the default branch's record renames its working status", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    await running(issue);
+    // The issue stays in Planning, which the new record no longer maps to `planning`, so the snapshot misses it.
+    await world.push({ ".flight-deck/record.toml": SHADERS_RECORD.replace('planning = "Planning"', `planning = "${UNMAPPED_STATUS}"`) });
     await world.tick();
     expect(world.harness.stops).toEqual([]);
     expect((await world.status()).sessions.map(({ state }) => state)).toEqual(["running"]);

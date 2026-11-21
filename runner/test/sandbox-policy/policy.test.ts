@@ -91,11 +91,12 @@ describe("a cache refresh's sandbox-runtime settings", () => {
     ]);
   });
 
-  test("write the scratch worktree, its deps/, its temp folder, and the cache, and never the clone's .git/", () => {
+  test("write the scratch worktree, its deps/, its temp folder, its home/, and the cache, and never the clone's .git/", () => {
     expect(refresh.filesystem.allowWrite).toEqual([
       "/Users/Shared/flight-deck/hunter/worktrees/cache-campdotdev-shaders",
       "/Users/Shared/flight-deck/hunter/sessions/def456/deps",
       "/Users/Shared/flight-deck/hunter/sessions/def456/tmp",
+      "/Users/Shared/flight-deck/hunter/sessions/def456/home",
       "/Users/Shared/flight-deck/hunter/cache/campdotdev/shaders",
     ]);
     expect(refresh.filesystem.denyWrite).toEqual(session.filesystem.denyWrite);

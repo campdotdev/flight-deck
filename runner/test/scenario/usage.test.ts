@@ -291,7 +291,7 @@ function nextLocal(unit: "day" | "month"): Date {
 function sendBriefed(title: string): StoredIssue {
   const issue = world.issue({ title });
   world.send(issue);
-  world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: "Brief ready", brief: "## Brief\n" }) });
+  world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: "Brief ready", brief: "## Summary\n\nBrief ready.\n" }) });
   return issue;
 }
 
