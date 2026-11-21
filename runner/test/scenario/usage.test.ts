@@ -499,6 +499,29 @@ describe("on an API key", () => {
     expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 0, month_usd: 0, daily_cap_usd: 10, monthly_cap_usd: 1000 });
   });
 
+  test("a session whose exit waits for another try reserves no budget once its cost counted", async () => {
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+    world.config.concurrency_cap = 5;
+    await world.writeConfig();
+    const first = sendBriefed("First");
+    await world.tick();
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 }, { costUsd: 1 });
+    sendBriefed("Second");
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 1;
+    world.tracker.issue = async (ref) => {
+      if (ref.id === first.id && failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    // The first session's exit stays queued with its cost counted. 9 is left, and one budget fits.
+    await world.tick();
+    const status = await world.status();
+    expect(status.sessions).toHaveLength(2);
+    expect(status.usage).toMatchObject({ day_usd: 1 });
+    expect(world.harness.started).toHaveLength(2);
+    expect(status.runner.holds).toEqual([]);
+  });
+
   test("spending survives a restart", async () => {
     await useApiKey({ session_budget_usd: 5, daily_cap_usd: 8, monthly_cap_usd: 1000 });
     sendBriefed("First");

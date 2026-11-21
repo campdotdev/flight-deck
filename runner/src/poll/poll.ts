@@ -791,7 +791,11 @@ export class Poll {
   private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace, trouble: Trouble): Promise<void> {
     const sessions = await this.state.sessions();
     // Each running session's budget, the one its launch carried, or 0 for one on a subscription (spec 1, "Holds").
-    const running = sessions.filter((entry) => entry.state === "starting" || entry.state === "running").map((entry) => entry.budget_usd ?? 0);
+    // A session whose exit waits for its handler to run again reserves 0 too, because its cost already counted.
+    const counted = new Set(this.exits.filter((queued) => queued.counted === true).map((queued) => queued.session));
+    const running = sessions
+      .filter((entry) => entry.state === "starting" || entry.state === "running")
+      .map((entry) => (counted.has(entry.id) ? 0 : (entry.budget_usd ?? 0)));
     const busy = new Set(sessions.map((entry) => entry.issue_id));
     for (const poll of repos) await this.blockers(now, poll, busy);
     /** The budget each start this poll launches with. */
