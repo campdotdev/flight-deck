@@ -170,6 +170,22 @@ describe("a trial", () => {
     expect(await world.trialRecord()).toBeNull();
   });
 
+  test("on an API key, counts its cost toward the caps, and a rate_limited exit holds under rate_limit", async () => {
+    world.config.auth = "api_key";
+    world.config.api = { session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 };
+    await world.writeConfig();
+    world.harness.script("", { ...PASSES, costUsd: 1.5 });
+    expect((await runTrial()).result).toBe("passed");
+    expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 1.5, month_usd: 1.5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+
+    world.harness.script("", { exit: { kind: "rate_limited", resetsAt: null } });
+    expect((await runTrial()).result).toBe("failed");
+    // No result event, so it counts its whole budget.
+    const status = await world.status();
+    expect(status.usage).toMatchObject({ day_usd: 6.5, month_usd: 6.5 });
+    expect(status.runner.holds.map((hold) => hold.cause)).toEqual(["rate_limit"]);
+  });
+
   test("runs with no repo registered, as install's first trial does", async () => {
     world.config.repos = [];
     await world.writeConfig();

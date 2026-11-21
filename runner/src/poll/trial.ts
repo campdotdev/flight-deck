@@ -142,6 +142,8 @@ export class Trials {
       started_at: null,
       deadline: null,
       state: "starting",
+      // On an API key, the budget its launch carries, so its cost counts and a `rate_limited` exit holds the key.
+      ...(input.auth.kind === "api_key" ? { budget_usd: input.auth.sessionBudgetUsd } : {}),
     };
     await state.writeSessions([...sessions, entry]);
     this.attached.set(id, this.waiters.splice(0));
