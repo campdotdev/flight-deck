@@ -125,6 +125,7 @@ export class Poll {
       version: options.version,
       tracker: options.tracker,
       state: this.state,
+      outbox: (now, repo) => new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => (name === repo.name ? repo : null) }),
       fail: (now, repo, entry, failure, facts, workspace) => this.fail(now, repo, entry, failure, facts, workspace),
     });
   }
@@ -256,7 +257,7 @@ export class Poll {
     await this.handleExits(now, config, workspace);
     if (this.started && (await this.state.holdMarker())?.by === "stop") await this.stopEach(now, config, workspace);
     // Outboxes Linear didn't take, each on its backoff, with no session.
-    await this.applyWaiting.retry(now, this.outbox(now, config), (name) => repoNamed(config, name), workspace);
+    await this.applyWaiting.retry(now, (entry) => this.entryRepo(config, entry, workspace), workspace);
     const trouble = await Trouble.load(this.state);
     const credentials = await this.checkCredentials(trouble);
 
@@ -353,7 +354,8 @@ export class Poll {
   private async entryRepo(config: Config, entry: SessionEntry, workspace: Workspace): Promise<TrackerRepo | null> {
     const registration = config.repos.find((repo) => repo.name === entry.repo);
     if (registration === undefined) return null;
-    if (entry.state === "retry_waiting") return trackerRepo(config, registration, (await this.state.lastRecord(registration.name))?.record ?? null);
+    // A retry's take comes later, and so does a kept outbox's, so both read the last valid record.
+    if (entry.state === "retry_waiting" || this.appliesKept(entry)) return trackerRepo(config, registration, (await this.state.lastRecord(registration.name))?.record ?? null);
     // Step 4 asks at each poll, and a session's take never changes, so it reads the take's record once.
     const cached = this.takeRepos.get(entry.id);
     if (cached !== undefined) return cached;
@@ -448,8 +450,9 @@ export class Poll {
     return trackerRepo(config, registration, record);
   }
 
-  private outbox(now: Date, config: Config): Outbox {
-    return new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => repoNamed(config, name) });
+  /** Whether the entry applies a kept outbox, whose folder isn't its session folder. */
+  private appliesKept(entry: SessionEntry): boolean {
+    return entry.apply !== undefined && entry.apply.folder !== paths.sessionFolder(this.folders, entry.id);
   }
 
   /** The session is over: its workspace goes, and so does its entry. */
@@ -575,7 +578,7 @@ export class Poll {
           tracker: this.tracker,
           takeRepo: async (entry) => (await this.entryRepo(config, entry, workspace)) ?? tracker,
           stop: (entry) => this.stopSession(now, entry, "moved_out"),
-          discard: (entry) => this.applyWaiting.movedOut(now, entry, workspace),
+          discard: (entry, role) => this.applyWaiting.movedOut(now, entry, role, workspace),
         });
         await this.applyWaiting.forget(now, tracker, snapshot);
         // 5. Answers.
@@ -825,6 +828,7 @@ export class Poll {
     // The cap test runs before the holds are read, so a cap that fits again ends its `api_cap` hold, and one that
     // doesn't holds the runner from this poll.
     await this.usage.fits(now, config, running);
+    await this.keptOutboxes(now, config, repos, workspace, trouble, busy);
 
     // Before each start, Claude Code's version (ADR 0015).
     const work = sessions.some((entry) => entry.state === "retry_waiting") || repos.some((poll) => poll.snapshot?.issues.some((issue) => issue.role === "ready_to_plan"));
@@ -862,15 +866,7 @@ export class Poll {
     for (const poll of startable) {
       if (!poll.fetch.ok || poll.snapshot === null) continue;
       for (const issue of poll.snapshot.issues) {
-        if (issue.role !== "ready_to_plan" || hasSpec(issue) || busy.has(issue.id) || poll.blocked.has(issue.id) || blockerTest(issue).kind !== "take") continue;
-        // A kept outbox is applied instead of a session, and takes no place under the cap. One that throws starts
-        // nothing for its issue this poll, and the other issues still go.
-        try {
-          if (poll.tracker !== null && (await this.applyWaiting.applyKept(now, this.outbox(now, config), poll.tracker, issue, workspace))) continue;
-        } catch (error) {
-          await this.state.log(now, `${issue.identifier}: kept outbox not applied, retrying next poll: ${(error as Error).message}`);
-          continue;
-        }
+        if (!takeable(poll, issue, busy)) continue;
         candidates.push({ poll, issue });
       }
     }
@@ -883,6 +879,28 @@ export class Poll {
       free--;
       running.push(budget);
       await this.startSession(now, config, poll, issue, workspace);
+    }
+  }
+
+  /**
+   * The takes that apply a kept outbox instead of starting a session. They take no place under the cap and need
+   * no Claude Code, so they come before the version check, and a hold on Claude Code's version doesn't stop them.
+   * Every other hold does. Each issue it takes, or whose take throws, joins `busy`, so no session starts for it
+   * this poll, and a throw skips only its own issue.
+   */
+  private async keptOutboxes(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace, trouble: Trouble, busy: Set<string>): Promise<void> {
+    const holds = (await currentHolds(this.holdContext(now, config, trouble))).filter((hold) => hold.cause !== "claude_code_version");
+    for (const poll of repos) {
+      if (poll.tracker === null || holdsRepo(holds, poll.tracker) || !poll.fetch.ok || poll.snapshot === null) continue;
+      for (const issue of poll.snapshot.issues) {
+        if (!takeable(poll, issue, busy)) continue;
+        try {
+          if (await this.applyWaiting.applyKept(now, poll.tracker, issue, workspace)) busy.add(issue.id);
+        } catch (error) {
+          busy.add(issue.id);
+          await this.state.log(now, `${issue.identifier}: kept outbox not applied, retrying next poll: ${(error as Error).message}`);
+        }
+      }
     }
   }
 
@@ -1166,10 +1184,9 @@ function freshReplies(snapshot: Snapshot, uuid: string, after: string, known: re
     .map(({ id, author, created_at, body, synced }) => ({ id, author, created_at, body, synced }));
 }
 
-/** A registered repo by name, with the registration's `[tracker]`, or `null`. */
-function repoNamed(config: Config, name: string): TrackerRepo | null {
-  const registration = config.repos.find((repo) => repo.name === name);
-  return registration === undefined ? null : trackerRepo(config, registration, null);
+/** Whether a take may start the issue: a sent issue in Ready to plan, not busy or blocked, whose blockers allow it. */
+function takeable(poll: RepoPoll, issue: SnapshotIssue, busy: Set<string>): boolean {
+  return issue.role === "ready_to_plan" && !hasSpec(issue) && !busy.has(issue.id) && !poll.blocked.has(issue.id) && blockerTest(issue).kind === "take";
 }
 
 /** The repo as the Tracker needs it: the record's `[tracker]` when it's valid, or else the registration's copy. */

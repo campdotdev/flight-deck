@@ -19,6 +19,7 @@ import { Outbox, type ApplyResult } from "../outbox/index.ts";
 import type { FailedExit } from "../outbox/runner-comments/failed-twice.ts";
 import { RunnerComments, runnerComment, type RunnerFacts, type RunnerWriteResult } from "../outbox/runner-comments/index.ts";
 import { linearWrite } from "../outbox/runner-comments/linear-write.ts";
+import type { Role } from "../record/index.ts";
 import type { ApplyWait, SessionEntry, State } from "../state/index.ts";
 import { isUnavailable, type Snapshot, type SnapshotIssue, type Tracker, type TrackerRepo } from "../tracker/index.ts";
 import type { SessionJson, Workspace } from "../workspace/index.ts";
@@ -58,11 +59,21 @@ function nextTry(wait: ApplyWait): number {
   return Date.parse(wait.tried_at) + (BACKOFF_MS[Math.max(0, wait.tries - 1)] ?? EVERY_MS);
 }
 
-/** Whether the entry's next try has come: its backoff ran out, or the 3 hours did, for one last try. */
+/**
+ * Whether the entry's next try has come: its backoff ran out, or the 3 hours did, for one last try. A try that
+ * can't settle the entry then, because Linear didn't answer, waits for the backoff again.
+ */
 function due(wait: ApplyWait, now: Date): boolean {
   const at = now.getTime();
-  if (at <= Date.parse(wait.tried_at)) return false;
-  return at >= nextTry(wait) || (wait.phase !== "pause" && at >= Date.parse(wait.since) + GIVE_UP_MS);
+  const tried = Date.parse(wait.tried_at);
+  if (at <= tried) return false;
+  const deadline = Date.parse(wait.since) + GIVE_UP_MS;
+  return at >= nextTry(wait) || (wait.phase !== "pause" && at >= deadline && tried < deadline);
+}
+
+/** Whether the entry's 3 hours ran out, so its outbox is kept, or the writes after the move are dropped. */
+function expired(wait: ApplyWait, now: Date): boolean {
+  return now.getTime() >= Date.parse(wait.since) + GIVE_UP_MS;
 }
 
 export interface ApplyWaitingOptions {
@@ -72,6 +83,8 @@ export interface ApplyWaitingOptions {
   /** The Tracker adapter, as the Flight Deck app. */
   tracker: Tracker;
   state: State;
+  /** An Outbox that maps the session's repo to `repo`, the statuses its take read. */
+  outbox(now: Date, repo: TrackerRepo): Outbox;
   /** A failed session, as an exit's: the first failure waits as `retry_waiting`, and a second pauses the issue. */
   fail(now: Date, repo: TrackerRepo, entry: SessionEntry, failure: FailedExit, facts: RunnerFacts, workspace: Workspace): Promise<void>;
 }
@@ -93,13 +106,14 @@ export class ApplyWaiting {
    * Tries each `apply_waiting` entry whose next try has come, in list order. An entry whose try throws for any
    * reason but Linear's stays as it was and is tried again at the next poll, and the entries after it still go.
    */
-  async retry(now: Date, outbox: Outbox, repoOf: (name: string) => TrackerRepo | null, workspace: Workspace): Promise<void> {
+  async retry(now: Date, repoOf: (entry: SessionEntry) => Promise<TrackerRepo | null>, workspace: Workspace): Promise<void> {
     for (const entry of await this.state.sessions()) {
       if (entry.state !== "apply_waiting" || entry.apply === undefined || !due(entry.apply, now)) continue;
-      const repo = repoOf(entry.repo);
-      if (repo === null) continue;
       try {
-        await this.tryOnce(now, outbox, repo, entry, workspace);
+        // The repo with the statuses the entry's take read, as an exit's handling reads it.
+        const repo = await repoOf(entry);
+        if (repo === null) continue;
+        await this.tryOnce(now, this.options.outbox(now, repo), repo, entry, workspace);
       } catch (error) {
         await this.log(now, entry, `apply try failed, retrying next poll: ${(error as Error).message}`);
       }
@@ -113,7 +127,14 @@ export class ApplyWaiting {
     } catch (error) {
       if (!isUnavailable(error)) throw error;
       await this.log(now, entry, `Linear didn't answer: ${error.message}`);
-      await this.tried(now, entry);
+      const tried = await this.tried(now, entry);
+      const wait = tried.apply!;
+      // A pause's comment waits for the entry's next try, so the poll's own comment retry doesn't try it first.
+      if (wait.phase === "pause") return this.holdComment(tried);
+      // A read Linear didn't answer still ends the 3 hours: the outbox is kept, or the writes after the move go.
+      if (!expired(wait, now)) return;
+      if (wait.phase === "after_move") return this.dropAfterMove(now, outbox, tried, workspace);
+      return this.keep(now, repo, tried, workspace);
     }
   }
 
@@ -121,10 +142,12 @@ export class ApplyWaiting {
    * At a take: when issue memory holds a kept outbox, takes the issue and applies the kept outbox instead of
    * starting a session. Returns whether it did, so the caller starts nothing for the issue.
    */
-  async applyKept(now: Date, outbox: Outbox, repo: TrackerRepo, issue: SnapshotIssue, workspace: Workspace): Promise<boolean> {
+  async applyKept(now: Date, repo: TrackerRepo, issue: SnapshotIssue, workspace: Workspace): Promise<boolean> {
     const memory = await this.state.issueMemory(repo.name, issue.id);
     if (memory.kept === null) return false;
     const folder = paths.kept(this.folders, repo.name, issue.id);
+    // An earlier take of it still tries the writes after its move, so this take starts a fresh session.
+    if ((await this.state.sessions()).some((each) => each.apply?.folder === folder)) return false;
     if (!existsSync(sessionParts(folder).sessionJson)) {
       await this.forgetKept(now, repo.name, issue.id, `${issue.identifier}: the kept outbox is gone, the take starts a session`);
       return false;
@@ -162,15 +185,14 @@ export class ApplyWaiting {
         return true;
       }
     } catch (error) {
-      // The entry goes on any failed take, so no later try reads the issue outside Planning and discards the
-      // kept outbox.
-      await this.dropEntry(entry.id);
+      // A take whose response was lost may have landed, so the entry stays. Its next try reads the issue: in Ready
+      // to plan, the take didn't land, and the entry goes with the kept outbox left for the next take.
       if (!isUnavailable(error)) throw error;
       await this.log(now, entry, `take of the kept outbox waits: ${error.message}`);
       return true;
     }
     await this.log(now, entry, "took the issue to apply its kept outbox");
-    await this.apply(now, outbox, repo, entry, workspace);
+    await this.apply(now, this.options.outbox(now, repo), repo, entry, workspace);
     return true;
   }
 
@@ -192,23 +214,35 @@ export class ApplyWaiting {
    * Step 4, moved out: the maintainer moved the issue before the status move landed, so the outbox is
    * discarded at this poll, not at its next try (ADR 0007). Only an `apply`-phase entry gets here.
    */
-  async movedOut(now: Date, entry: SessionEntry, workspace: Workspace): Promise<void> {
+  async movedOut(now: Date, entry: SessionEntry, role: Role | null, workspace: Workspace): Promise<void> {
+    if (this.untaken(entry, role)) return this.leaveKept(now, entry);
     await this.log(now, entry, `left ${WORKING[entry.stage]}, outbox discarded`);
     await this.discard(entry, workspace);
   }
 
   // One try.
 
-  private async apply(now: Date, outbox: Outbox, repo: TrackerRepo, entry: SessionEntry, workspace: Workspace): Promise<void> {
-    const wait = entry.apply!;
+  private async apply(now: Date, outbox: Outbox, repo: TrackerRepo, start: SessionEntry, workspace: Workspace): Promise<void> {
+    let entry = start;
+    let wait = entry.apply!;
+    // A deleted, archived, or moved issue takes no more writes, in either phase.
+    const issue = await onTeam(this.tracker, repo, entry);
+    if (issue === null && wait.phase === "after_move") {
+      await this.log(now, entry, "the issue is gone, writes after the move dropped");
+      return this.discard(entry, workspace);
+    }
     if (wait.phase === "apply") {
-      // An issue the maintainer moved before the move landed: the outbox is discarded (ADR 0007). A deleted,
-      // archived, or moved issue counts as moved out too. As at an exit, an outbox whose move landed before a lost
-      // response is applied again, so the writes after the move still land.
-      const issue = await onTeam(this.tracker, repo, entry);
+      if (issue !== null && this.untaken(entry, issue.role)) return this.leaveKept(now, entry);
+      // An issue the maintainer moved before the move landed: the outbox is discarded (ADR 0007). As at an exit,
+      // an outbox whose move landed before a lost response is applied again, so the writes after the move land.
       if (issue === null || (issue.role !== WORKING[entry.stage] && !(await Outbox.moved(wait.folder, issue.role)))) {
         await this.log(now, entry, `left ${WORKING[entry.stage]}, outbox discarded`);
         return this.discard(entry, workspace);
+      }
+      // The move landed, so the stage handed off, whatever this try writes.
+      if (issue.role !== WORKING[entry.stage]) {
+        entry = await this.handedOff(now, entry);
+        wait = entry.apply!;
       }
     }
     const result = await outbox.apply(wait.folder, { identity: this.tracker });
@@ -237,6 +271,12 @@ export class ApplyWaiting {
   /** After 3 hours past the move: logs each write still to land and drops them, with no pause. */
   private async dropAfterMove(now: Date, outbox: Outbox, entry: SessionEntry, workspace: Workspace): Promise<void> {
     const rest = await outbox.apply(entry.apply!.folder, { identity: this.tracker, dryRun: true });
+    if (rest.result === "unwritten") {
+      // The writes still to land need a Linear read to list, so the entry waits for a try Linear answers.
+      await this.writeEntry(entry);
+      await this.log(now, entry, "Linear didn't answer, so the writes after the move wait to be listed and dropped");
+      return;
+    }
     for (const write of rest.writes) await this.log(now, entry, `${write} dropped: Linear didn't take it for 3 hours`);
     await this.discard(entry, workspace);
   }
@@ -266,10 +306,14 @@ export class ApplyWaiting {
   private async postPause(now: Date, repo: TrackerRepo, entry: SessionEntry): Promise<void> {
     const issue = await onTeam(this.tracker, repo, entry);
     const working = WORKING[entry.stage];
-    if (issue === null || working === undefined || issue.role !== working) return this.moved(now, repo, entry);
+    if (issue !== null && issue.role !== working && (await Outbox.moved(entry.apply!.folder, issue.role))) {
+      await this.handedOff(now, entry);
+      return;
+    }
+    if (issue === null || working === undefined || issue.role !== working) return this.moved(now, repo, entry, issue?.role ?? null);
     const comment = runnerComment(linearWrite(entry.apply!.folder), this.facts(entry), { version: this.options.version, statuses: repo.statuses });
     const result = await this.comments(now).post({ ...issue, role: working }, comment);
-    await this.paused(now, repo, entry, result);
+    await this.paused(now, repo, entry, result, working);
   }
 
   /** Tries the Linear-write pause again: the comment's pending writes, or the whole pause if none was made. */
@@ -281,25 +325,31 @@ export class ApplyWaiting {
     if (memory.pending === null) {
       if (issue?.role === WORKING[entry.stage]) return this.postPause(now, repo, tried);
       if (issue?.role === "paused") return this.dropEntry(entry.id);
-      return this.moved(now, repo, entry);
+      // No pause was posted, so an issue in the outbox's move status got there through the move itself.
+      if (issue !== null && (await Outbox.moved(entry.apply!.folder, issue.role))) {
+        await this.handedOff(now, tried);
+        return;
+      }
+      return this.moved(now, repo, entry, issue?.role ?? null);
     }
-    await this.paused(now, repo, tried, (await this.comments(now).retry(repo, entry.issue_id, issue)) ?? "landed");
+    await this.paused(now, repo, tried, (await this.comments(now).retry(repo, entry.issue_id, issue)) ?? "landed", issue?.role ?? null);
   }
 
   /** After a try of the pause: a landed pause ends the entry, and a pending one waits for the backoff's next try. */
-  private async paused(now: Date, repo: TrackerRepo, entry: SessionEntry, result: RunnerWriteResult): Promise<void> {
+  private async paused(now: Date, repo: TrackerRepo, entry: SessionEntry, result: RunnerWriteResult, role: Role | null): Promise<void> {
     await this.log(now, entry, `Linear-write pause ${result}`);
     if (result === "landed") return this.dropEntry(entry.id);
-    if (result === "dropped") return this.moved(now, repo, entry);
+    if (result === "dropped") return this.moved(now, repo, entry, role);
     // The poll's own retry of pending comments holds off until then.
-    const memory = await this.state.issueMemory(repo.name, entry.issue_id);
-    if (memory.pending === null) return;
-    const notBefore = new Date(nextTry(entry.apply!)).toISOString();
-    await this.state.writeIssueMemory(repo.name, entry.issue_id, { ...memory, pending: { ...memory.pending, not_before: notBefore } });
+    await this.holdComment(entry);
   }
 
-  /** The maintainer moved the issue before the pause landed: the kept outbox goes, and so does the entry. */
-  private async moved(now: Date, repo: TrackerRepo, entry: SessionEntry): Promise<void> {
+  /**
+   * The issue left its working status while the pause waited: the entry goes. In Ready to plan, after a `retry`
+   * or a hand move, the kept outbox stays for the next take. Anywhere else, it goes too.
+   */
+  private async moved(now: Date, repo: TrackerRepo, entry: SessionEntry, role: Role | null): Promise<void> {
+    if (role === "ready_to_plan") return this.leaveKept(now, entry);
     await this.forgetKept(now, repo.name, entry.issue_id, `${entry.id} ${entry.issue}: moved before the Linear-write pause landed, kept outbox deleted`);
     await this.dropEntry(entry.id);
   }
@@ -314,6 +364,36 @@ export class ApplyWaiting {
     const updated = { ...current, apply: { ...wait, tried_at: now.toISOString(), tries: wait.tries + 1 } };
     await this.writeEntry(updated);
     return updated;
+  }
+
+  /**
+   * The outbox's move landed before a lost response: the stage handed off, so the entry tries the writes after the
+   * move, with no pause. Returns the entry as written.
+   */
+  private async handedOff(now: Date, entry: SessionEntry): Promise<SessionEntry> {
+    const updated: SessionEntry = { ...entry, apply: { ...entry.apply!, phase: "after_move" } };
+    await this.writeEntry(updated);
+    await this.log(now, entry, "the move landed, so the writes after it keep trying");
+    return updated;
+  }
+
+  /** Holds the Linear-write pause's pending comment until the entry's next try, so only the entry tries it. */
+  private async holdComment(entry: SessionEntry): Promise<void> {
+    const memory = await this.state.issueMemory(entry.repo, entry.issue_id);
+    if (memory.pending === null) return;
+    const notBefore = new Date(nextTry(entry.apply!)).toISOString();
+    await this.state.writeIssueMemory(entry.repo, entry.issue_id, { ...memory, pending: { ...memory.pending, not_before: notBefore } });
+  }
+
+  /** Whether the entry is a kept outbox's take whose issue sits in Ready to plan, so the take didn't land or was undone. */
+  private untaken(entry: SessionEntry, role: Role | null): boolean {
+    return role === "ready_to_plan" && entry.apply?.folder === paths.kept(this.folders, entry.repo, entry.issue_id);
+  }
+
+  /** Drops the entry and leaves the kept outbox, which the issue's next take applies. */
+  private async leaveKept(now: Date, entry: SessionEntry): Promise<void> {
+    await this.log(now, entry, "in Ready to plan, the kept outbox waits for the next take");
+    await this.dropEntry(entry.id);
   }
 
   /** The outbox is applied or discarded: the session folder goes, a kept outbox goes, and the entry goes. */

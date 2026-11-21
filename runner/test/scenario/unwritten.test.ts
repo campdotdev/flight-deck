@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { TrackerUnavailable, type StoredIssue } from "../../src/tracker/index.ts";
-import { outbox, World } from "./world.ts";
+import { outbox, UNMAPPED_STATUS, World } from "./world.ts";
 
 let world: World;
 
@@ -75,6 +75,17 @@ describe("the backoff", () => {
     expect(afterTake(issue).map((write) => write.kind)).toEqual(["description", "comment", "move"]);
   }, 30_000);
 
+  test("reads the issue's status with the statuses the take read, when the registration's copy names others", async () => {
+    world.config.repos[0]!.tracker.statuses.planning = UNMAPPED_STATUS;
+    await world.writeConfig();
+    const issue = world.issue({ title: "Save button is blue" });
+    world.tracker.refuse("post");
+    await runSession(issue);
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
   test("a try that throws for another reason waits for the next poll, and the other entries still go", async () => {
     const first = world.issue({ title: "Save button is blue" });
     const second = world.issue({ title: "Checkout crashes" });
@@ -129,10 +140,25 @@ function kept(issue: StoredIssue): string {
   return join(world.folders.data, "repos", "campdotdev", "shaders", "kept", issue.id);
 }
 
+/** Whether a read names the issue, by its UUID or, as the Outbox reads it, by its identifier. */
+const reads = (issue: StoredIssue, id: string) => id === issue.id || id === issue.identifier;
+
+/** Makes every read of the issue fail as Linear not answering, until the returned function is called. */
+function breakReads(issue: StoredIssue): () => void {
+  const read = world.tracker.issue.bind(world.tracker);
+  world.tracker.issue = async (ref) => {
+    if (reads(issue, ref.id)) throw new TrackerUnavailable("network");
+    return read(ref);
+  };
+  return () => {
+    world.tracker.issue = read;
+  };
+}
+
 /** Runs a session whose comment Linear refuses for 3 hours, so the runner keeps the outbox and pauses the issue. */
-async function keep(issue: StoredIssue, extraRefusals = 0): Promise<string> {
+async function keep(issue: StoredIssue, extraRefusals = 0, files: Record<string, string> = BRIEF): Promise<string> {
   world.tracker.refuse("post", { times: 17 + extraRefusals });
-  const id = await runSession(issue);
+  const id = await runSession(issue, files);
   await tickAt(UNTIL_KEPT);
   return id;
 }
@@ -210,13 +236,93 @@ describe("after 3 hours", () => {
     };
     await world.tick();
     expect(world.tracker.stored(issue.id).status).toBe("Ready to plan");
-    expect((await world.status()).sessions).toEqual([]);
+    // The entry stays until a read shows whether the take landed.
+    expect((await world.status()).sessions.map(({ issue, state }) => ({ issue, state }))).toEqual([{ issue: issue.identifier, state: "apply_waiting" }]);
     expect(existsSync(join(kept(issue), "outbox", "outcome.json"))).toBe(true);
     const log = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
     expect(log).toContain(`${issue.identifier}: kept outbox not applied, retrying next poll: socket hang up`);
     await world.tick();
     expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
     expect(world.harness.started).toHaveLength(1);
+    expect(existsSync(kept(issue))).toBe(false);
+  }, 30_000);
+
+  test("a take of the kept outbox whose response was lost applies the kept outbox at the next poll", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    await keep(issue);
+    world.reply(issue, "retry");
+    await world.tick();
+    const move = world.tracker.move.bind(world.tracker);
+    let lost = 1;
+    world.tracker.move = async (ref, to) => {
+      await move(ref, to);
+      if (to === "planning" && lost-- > 0) throw new TrackerUnavailable("network");
+    };
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
+    expect(existsSync(join(kept(issue), "outbox", "outcome.json"))).toBe(true);
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    expect(world.harness.started).toHaveLength(1);
+    expect((await world.status()).sessions).toEqual([]);
+    expect(existsSync(kept(issue))).toBe(false);
+  }, 30_000);
+
+  test("a kept outbox is applied while Claude Code's version can't be read", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    await keep(issue);
+    world.reply(issue, "retry");
+    await world.tick();
+    world.harness.version = async () => {
+      throw new Error("claude: command not found");
+    };
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    expect(world.harness.started).toHaveLength(1);
+  }, 30_000);
+
+  test("a hand move to Ready to plan while the pause waits keeps the outbox for the next take", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    // The pause's first try at 3 hours fails, so it waits.
+    await keep(issue, 1);
+    world.tracker.accept("post");
+    world.send(issue);
+    await tickAt([1]);
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    expect(world.harness.started).toHaveLength(1);
+    expect(existsSync(kept(issue))).toBe(false);
+  }, 30_000);
+
+  test("keeps the outbox and pauses at 3 hours though Linear doesn't answer the issue's read then", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.tracker.refuse("post", { times: 17 });
+    const id = await runSession(issue);
+    const start = world.now.getTime();
+    await tickAt(UNTIL_KEPT.slice(0, -1));
+    const restore = breakReads(issue);
+    await world.tick(new Date(start + 180 * 60_000));
+    expect(existsSync(join(kept(issue), "outbox", "outcome.json"))).toBe(true);
+    expect(existsSync(join(world.folders.sessionRoot, "sessions", id))).toBe(false);
+    restore();
+    world.tracker.accept("post");
+    await tickAt([1]);
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    expect((await world.status()).sessions).toEqual([]);
+  }, 30_000);
+
+  test("a new take while a kept outbox's writes after the move still wait starts a fresh session", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    await keep(issue, 0, WITH_FOLLOW_UP);
+    world.reply(issue, "retry");
+    await world.tick();
+    world.tracker.refuse("file", { times: 100 });
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    world.send(issue);
+    world.harness.script(issue.identifier, {});
+    await world.tick();
+    expect(world.harness.started).toHaveLength(2);
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
   }, 30_000);
 
   test("a hand move back to Ready to plan applies the kept outbox too", async () => {
@@ -286,6 +392,61 @@ describe("a write after the move", () => {
     await world.tick();
     expect(afterTake(issue).map((write) => write.kind)).toEqual(["description", "comment", "move", "file", "relate"]);
     expect((await world.status()).sessions).toEqual([]);
+  });
+
+  test("stays after the move once a lost move is found, though the next write fails", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const move = world.tracker.move.bind(world.tracker);
+    let lost = 1;
+    world.tracker.move = async (ref, to) => {
+      await move(ref, to);
+      if (to === "ready_to_build" && lost-- > 0) throw new TrackerUnavailable("network");
+    };
+    const id = await runSession(issue, WITH_FOLLOW_UP);
+    // The try's first read finds the move, and its second, inside the apply, fails.
+    const read = world.tracker.issue.bind(world.tracker);
+    let count = 0;
+    world.tracker.issue = async (ref) => {
+      if (reads(issue, ref.id) && ++count === 2) throw new TrackerUnavailable("network");
+      return read(ref);
+    };
+    await world.tick();
+    const log = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
+    expect(log).toContain(`${id} ${issue.identifier}: the move landed, so the writes after it keep trying`);
+    await tickAt([1]);
+    expect(afterTake(issue).map((write) => write.kind)).toEqual(["description", "comment", "move", "file", "relate"]);
+    expect((await world.status()).sessions).toEqual([]);
+  });
+
+  test("is listed and dropped after 3 hours, though Linear doesn't answer the issue's read then", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.tracker.refuse("file", { times: 17 });
+    const id = await runSession(issue, WITH_FOLLOW_UP);
+    const start = world.now.getTime();
+    await tickAt(UNTIL_KEPT.slice(0, -1));
+    const restore = breakReads(issue);
+    await world.tick(new Date(start + 180 * 60_000));
+    const before = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
+    expect(before).toContain(`${id} ${issue.identifier}: Linear didn't answer, so the writes after the move wait to be listed and dropped`);
+    expect((await world.status()).sessions.map(({ id, state }) => ({ id, state }))).toEqual([{ id, state: "apply_waiting" }]);
+    restore();
+    await tickAt([15]);
+    const log = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
+    expect(log).toContain(`${id} ${issue.identifier}: file follow-ups/1.md dropped: Linear didn't take it for 3 hours`);
+    expect((await world.status()).sessions).toEqual([]);
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+  }, 30_000);
+
+  test("is dropped when the issue was deleted", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.tracker.refuse("file");
+    const id = await runSession(issue, WITH_FOLLOW_UP);
+    world.tracker.deleteIssue(issue.id);
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+    expect(existsSync(join(world.folders.sessionRoot, "sessions", id))).toBe(false);
+    const log = await Bun.file(join(world.folders.data, "state", "runner.log")).text();
+    expect(log).toContain(`${id} ${issue.identifier}: the issue is gone, writes after the move dropped`);
   });
 
   test("is dropped after 3 hours, with no pause", async () => {
