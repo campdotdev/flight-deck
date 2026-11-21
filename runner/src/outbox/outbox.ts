@@ -274,13 +274,15 @@ export class Outbox {
           async () => {
             // The issue first, so issue memory is read just before the write, with any reply a poll saved meanwhile.
             const read = await tracker.issue(ref);
-            const reflag = options.replay === true && (await state.issueMemory(session.repo, issue.id)).flag === null;
+            // Only while the issue still sits in Paused, so a later hand move keeps the maintainer's choice.
+            const unflagged = (await state.issueMemory(session.repo, issue.id)).flag === null || read.assignee !== repo.maintainer;
+            const reflag = options.replay === true && read.role === "paused" && unflagged;
             if (reflag) await tracker.flag(ref);
             const opened = await state.issueMemory(session.repo, issue.id);
             const memory = reflag
               ? {
                   ...opened,
-                  flag: {
+                  flag: opened.flag ?? {
                     cause: "pause" as const,
                     status_line: opening(phrase, envelope.summary).statusLine,
                     since: this.options.clock().toISOString(),

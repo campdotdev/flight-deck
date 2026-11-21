@@ -395,6 +395,23 @@ describe("after 3 hours", () => {
     expect(log).toContain("writes after the move dropped: a newer handoff takes the kept folder");
   }, 30_000);
 
+  test("a kept outbox's take keeps its statuses while the default branch's record changes", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    await keep(issue);
+    world.reply(issue, "retry");
+    await world.tick();
+    // The take lands, and Linear refuses the comment at the take and at the next poll's try.
+    world.tracker.refuse("post", { times: 2 });
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
+    await world.push({ ".flight-deck/record.toml": SHADERS_RECORD.replace('planning = "Planning"', `planning = "${UNMAPPED_STATUS}"`) });
+    await world.tick();
+    expect(existsSync(join(kept(issue), "outbox", "outcome.json"))).toBe(true);
+    await tickAt([1]);
+    expect(world.tracker.stored(issue.id).status).toBe("Ready to build");
+    expect(world.harness.started).toHaveLength(1);
+  }, 30_000);
+
   test("a hand move back to Ready to plan applies the kept outbox too", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     await keep(issue);

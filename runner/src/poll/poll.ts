@@ -105,6 +105,12 @@ export class Poll {
   private started = false;
   /** Each running session's repo with the statuses its take read, by session ID, read once per runner. */
   private readonly takeRepos = new Map<string, TrackerRepo>();
+  /**
+   * The repo each kept outbox's take read, by entry. The default branch's record can change while the replay
+   * waits, and its retries and step 4 keep the statuses the take moved the issue with. A restart falls back to the
+   * last valid record.
+   */
+  private readonly keptTakes = new Map<string, TrackerRepo>();
   /** The sessions whose stop this runner asked the Harness for, by session ID. A failed request isn't here. */
   private readonly stopsSent = new Set<string>();
   /** `tick`, `hold`, `start`, and `stop` run one at a time, in the order they're called. */
@@ -355,6 +361,10 @@ export class Poll {
     const registration = config.repos.find((repo) => repo.name === entry.repo);
     if (registration === undefined) return null;
     // A retry's take comes later, and so does a kept outbox's, so both read the last valid record.
+    if (this.appliesKept(entry)) {
+      const taken = this.keptTakes.get(entry.id);
+      if (taken !== undefined) return taken;
+    }
     if (entry.state === "retry_waiting" || this.appliesKept(entry)) return trackerRepo(config, registration, (await this.state.lastRecord(registration.name))?.record ?? null);
     // Step 4 asks at each poll, and a session's take never changes, so it reads the take's record once.
     const cached = this.takeRepos.get(entry.id);
@@ -899,6 +909,11 @@ export class Poll {
         } catch (error) {
           busy.add(issue.id);
           await this.state.log(now, `${issue.identifier}: kept outbox not applied, retrying next poll: ${(error as Error).message}`);
+        }
+        // An entry that waits after the take keeps the take's statuses.
+        if (!busy.has(issue.id)) continue;
+        for (const entry of await this.state.sessions()) {
+          if (entry.issue_id === issue.id && this.appliesKept(entry)) this.keptTakes.set(entry.id, poll.tracker);
         }
       }
     }
