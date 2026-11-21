@@ -3,6 +3,7 @@ export {
   type Answer,
   type Flag,
   type HoldMarker,
+  type Holds,
   type FlagCause,
   type IssueMemory,
   type LastRecord,
@@ -10,10 +11,14 @@ export {
   type PendingComment,
   type Mode,
   type Reply,
+  type Restart,
+  type RestartCause,
   type SessionEntry,
   type SessionState,
+  type Spend,
   type Stage,
   type StopCause,
+  type StoredHold,
 } from "./state.ts";
 export type * from "./status.ts";
 export type * from "./trouble.ts";

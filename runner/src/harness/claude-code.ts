@@ -208,6 +208,9 @@ export class ClaudeCodeHarness implements Harness {
     const exit: Exit = { ...kind, transcript: run.session.transcript, claudeCodeVersion: run.claudeCodeVersion };
     const error = run.stream.facts.result?.error;
     if (error !== undefined) exit.error = error;
+    // The runner counts a session with no result event at its whole budget, so only a real cost goes here.
+    const costUsd = run.stream.facts.result?.costUsd;
+    if (costUsd !== undefined && costUsd !== null) exit.costUsd = costUsd;
     const details = { code, sawInit: run.stream.facts.sawInit, result: run.stream.facts.result, transcriptError: run.transcriptError, endedAt: new Date().toISOString() };
     // Written as soon as the session ends, so a runner that stops before it handles the exit still finds it (ADR 0002).
     // A failed write loses only that: the clean-up still runs, and the runner still gets the exit.

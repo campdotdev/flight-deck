@@ -1,9 +1,11 @@
-// `rate_limited` (spec 1, "Exits"). FLD-105 replaces this handler with the plan-limit hold, and puts the issue back in
-// ready_to_plan keeping its attempt.
-// Until then the runner logs the exit and ends the session, with no retry and no comment.
+// `rate_limited`: the session hit a plan limit (spec 1, "Exits", ADRs 0002 and 0011). No failure and no comment.
+// `Poll.handleExit` has already held the runner until `resetsAt`, or for 1 minute when the exit carries none, so
+// the hold lands even when the issue's repo is gone. This handler puts the issue back in its queue, where the
+// next take keeps the attempt.
 import type { ExitHandler } from "./context.ts";
+import { requeue } from "./requeue.ts";
 
 export const rateLimited: ExitHandler = async (context) => {
-  await context.log(`exit ${context.exit.kind}`);
-  await context.finish();
+  if (context.exit.kind !== "rate_limited") return;
+  await requeue(context, "rate_limited");
 };

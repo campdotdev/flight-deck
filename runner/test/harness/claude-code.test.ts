@@ -172,7 +172,7 @@ describe("a session that runs to its end", () => {
   test("runs the launch's command line from the worktree with exactly the launch's environment", async () => {
     const h = await makeHarness(await fakeClaude(`cat ${INIT}; cat ${RESULT}`));
     const run = await start(h, "a1b2c3");
-    expect(await run.exit).toEqual({ kind: "exited", code: 0, transcript: run.session.transcript, claudeCodeVersion: "2.1.321" });
+    expect(await run.exit).toEqual({ kind: "exited", code: 0, transcript: run.session.transcript, claudeCodeVersion: "2.1.321", costUsd: 2.0853960000000002 });
 
     const args = (await readFile(join(root, "args"), "utf8")).split("\n").slice(0, -1);
     expect(args).toEqual(run.session.launch.args);
@@ -192,6 +192,16 @@ describe("a session that runs to its end", () => {
     for (const name of ["PWD", "SHLVL", "_", "OLDPWD"]) delete env[name];
     expect(env).toEqual(run.session.launch.environment);
     expect(env.CLAUDE_CODE_RETRY_WATCHDOG).toBeUndefined();
+  });
+
+  test("carries the result event's total_cost_usd as the exit's cost", async () => {
+    const h = await makeHarness(await fakeClaude(`cat ${INIT}; cat ${RESULT}`));
+    expect((await (await start(h, "c0s7a1")).exit).costUsd).toBe(2.0853960000000002);
+  });
+
+  test("gives no cost when the session sent no result event", async () => {
+    const h = await makeHarness(await fakeClaude(`cat ${INIT}; exit 1`));
+    expect(await (await start(h, "c0s7b2")).exit).not.toHaveProperty("costUsd");
   });
 
   test("passes --plugin-dir with the exact version folder, never current", async () => {
