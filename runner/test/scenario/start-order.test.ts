@@ -32,7 +32,7 @@ function startedIssues(): string[] {
 
 describe("the start order", () => {
   test("follows priority, with no priority after Low, then unblocks, then creation time, across every repo", async () => {
-    await world.addRepo({ name: "campdotdev/docs", team: "DOC" });
+    await world.addRepo("campdotdev/docs", "DOC");
     world.config.concurrency_cap = 10;
     await world.writeConfig();
     const none = sent({ title: "No priority" });
@@ -50,7 +50,7 @@ describe("the start order", () => {
 
 describe("the concurrency cap", () => {
   test("holds across two repos, and a freed place goes to the next issue in the order", async () => {
-    await world.addRepo({ name: "campdotdev/docs", team: "DOC" });
+    await world.addRepo("campdotdev/docs", "DOC");
     const first = sent({ title: "Shaders, high", priority: 2 });
     const second = sent({ title: "Docs, high", priority: 2, team: "DOC" });
     const third = sent({ title: "Docs, medium", priority: 3, team: "DOC" });

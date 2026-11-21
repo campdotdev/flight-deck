@@ -5,11 +5,17 @@
 // so a hold survives a restart. `state/spend.json` keeps the day's and the month's spending.
 import type { Exit, RateLimitEvent, RateLimitWindow } from "../harness/index.ts";
 import type { Config } from "../install/index.ts";
-import type { Holds, Spend, State, StatusUsage, StoredHold, UsageWindow } from "../state/index.ts";
+import type { Holds, SessionEntry, Spend, State, StatusUsage, StoredHold, UsageWindow } from "../state/index.ts";
 import type { HoldSource } from "./holds.ts";
 
 /** A `rate_limited` exit with no `resetsAt` holds this long. */
 const NO_RESET_MS = 60_000;
+
+/**
+ * The cap test's allowance for floating-point rounding, far below a cent: 3 × $0.10 sums to $0.30000000000000004,
+ * which must still fit a $0.30 cap.
+ */
+const ROUNDING_USD = 1e-9;
 
 /** Each plan window `[usage]` sets a threshold for: the event's window name, and its `config.toml` key. */
 const WINDOWS = [
@@ -17,9 +23,22 @@ const WINDOWS = [
   { window: "seven_day", key: "weekly" },
 ] as const;
 
-/** `plan_limit`, `rate_limit`, and `api_cap`: each usage hold in `state/holds.json` that hasn't reached its end. */
-export const usageHolds: HoldSource = async ({ now, state }) =>
-  (await state.holds()).holds.filter((hold) => holding(hold, now)).map(({ cause, since, until }) => ({ cause, scope: "runner", name: null, since, until }));
+/** The usage holds each way of paying puts on the runner, so a hold from the other way never holds it. */
+const CAUSES: Record<Config["auth"], readonly StoredHold["cause"][]> = { subscription: ["plan_limit"], api_key: ["rate_limit", "api_cap"] };
+
+/**
+ * `plan_limit`, `rate_limit`, and `api_cap`: each usage hold in `state/holds.json` that hasn't reached its end,
+ * for the way `config.toml` pays now. A `plan_limit` hold doesn't hold the runner once it pays with an API key.
+ */
+export const usageHolds: HoldSource = async ({ now, state, config }) =>
+  (await state.holds()).holds
+    .filter((hold) => CAUSES[config.auth].includes(hold.cause) && holding(hold, now))
+    .map(({ cause, since, until }) => ({ cause, scope: "runner", name: null, since, until }));
+
+/** How a session pays: on an API key when its launch recorded a budget, and on a subscription otherwise. */
+export function launchAuth(entry: SessionEntry): Config["auth"] {
+  return entry.budget_usd === undefined ? "subscription" : "api_key";
+}
 
 export class Usage {
   /** The last `rate_limit_event` a session reported since step 11 of the last poll. */
@@ -34,12 +53,13 @@ export class Usage {
 
   /**
    * A session exited `rate_limited`: hold until `resetsAt`, or for 1 minute when the exit carries none, under
-   * `plan_limit` on a subscription and `rate_limit` on an API key.
+   * `plan_limit` when the session launched on a subscription and `rate_limit` when it launched on an API key. The
+   * launch's `auth` decides, so a limit from one way of paying never holds starts that pay the other way.
    */
-  async rateLimited(now: Date, config: Config, resetsAt: string | null): Promise<void> {
+  async rateLimited(now: Date, auth: Config["auth"], resetsAt: string | null): Promise<void> {
     const until = resetsAt ?? new Date(now.getTime() + NO_RESET_MS).toISOString();
     const holds = await this.state.holds();
-    await this.state.writeHolds(extend(holds, config.auth === "subscription" ? "plan_limit" : "rate_limit", now, until));
+    await this.state.writeHolds(extend(holds, auth === "subscription" ? "plan_limit" : "rate_limit", now, until));
   }
 
   /**
@@ -61,32 +81,36 @@ export class Usage {
   }
 
   /**
-   * On an API key, a session ended: its `result` event's `total_cost_usd` counts toward the day and the
-   * month, or its whole `session_budget_usd` when it ended with no `result` event, because its cost is unknown.
+   * A session that launched on an API key ended: its `result` event's `total_cost_usd` counts toward the day and
+   * the month, or its whole launch budget, `budgetUsd`, when it ended with no `result` event, because its cost is
+   * unknown. The launch decides, not `config.toml` now, so a switch of `auth` while a session runs never drops
+   * its cost or charges a subscription session. A session that launched on a subscription has no `budgetUsd`.
    */
-  async spent(now: Date, config: Config, exit: Exit): Promise<void> {
-    if (config.auth !== "api_key" || config.api === undefined) return;
-    const usd = exit.costUsd ?? config.api.session_budget_usd;
+  async spent(now: Date, exit: Exit, budgetUsd: number | undefined): Promise<void> {
+    if (budgetUsd === undefined) return;
+    const usd = exit.costUsd ?? budgetUsd;
     const spend = spendAt(await this.state.spend(), now);
     await this.state.writeSpend({ ...spend, day_usd: spend.day_usd + usd, month_usd: spend.month_usd + usd });
   }
 
   /**
    * The cap test before each start (spec 1, "Holds"): on an API key, a start goes ahead only when each cap's
-   * remaining amount covers the `session_budget_usd` of every running session plus this one, so spending never
-   * passes a cap. A start that wouldn't fit holds under `api_cap` until the next local day, or the next local
-   * month when the monthly cap is the one short. A start that fits ends the hold, so a raised cap or a session
-   * that cost less than its budget frees the runner at once.
+   * remaining amount covers the budget of every running session plus this one's `session_budget_usd`, so
+   * spending never passes a cap. `running` holds each running session's budget, the one its launch carried, or
+   * 0 for a session that launched on a subscription. So lowering the budget never shrinks what a running session
+   * may still spend. A start that wouldn't fit holds under `api_cap` until the
+   * next local day, or the next local month when the monthly cap is the one short. A start that fits ends the
+   * hold, so a raised cap or a session that cost less than its budget frees the runner at once.
    */
-  async fits(now: Date, config: Config, running: number): Promise<boolean> {
+  async fits(now: Date, config: Config, running: readonly number[]): Promise<boolean> {
     let day = true;
     let month = true;
     if (config.auth === "api_key" && config.api !== undefined) {
       const { session_budget_usd, daily_cap_usd, monthly_cap_usd } = config.api;
       const spend = spendAt(await this.state.spend(), now);
-      const needed = session_budget_usd * (running + 1);
-      day = daily_cap_usd - spend.day_usd >= needed;
-      month = monthly_cap_usd - spend.month_usd >= needed;
+      const needed = running.reduce((sum, budget) => sum + budget, session_budget_usd);
+      day = daily_cap_usd - spend.day_usd + ROUNDING_USD >= needed;
+      month = monthly_cap_usd - spend.month_usd + ROUNDING_USD >= needed;
     }
     const holds = await this.state.holds();
     if (day && month) {

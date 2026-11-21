@@ -83,6 +83,8 @@ export interface StoredIssue {
 }
 
 export interface NewIssue {
+  /** The issue's UUID, when the caller chooses it. */
+  id?: string;
   team: string;
   title: string;
   /** A status name on the team. */
@@ -182,7 +184,7 @@ export class InMemoryTracker implements Tracker {
     const subscribers = [input.creator];
     if (input.assignee !== undefined && input.assignee !== input.creator) subscribers.push(input.assignee);
     const issue: StoredIssue = {
-      id: this.newId("issue"),
+      id: input.id ?? this.newId("issue"),
       identifier: `${team.key}-${team.next++}`,
       team: team.key,
       title: input.title,
@@ -245,9 +247,14 @@ export class InMemoryTracker implements Tracker {
     issue.status_since = this.now();
   }
 
-  /** The maintainer deletes the issue. `issue` no longer finds it. */
+  /** An issue the maintainer deletes. Its blocking and duplicate relations go with it. */
   deleteIssue(issueId: string): void {
-    this.issues.delete(this.stored(issueId).id);
+    const { id } = this.stored(issueId);
+    this.issues.delete(id);
+    for (const other of this.issues.values()) {
+      other.blockers = other.blockers.filter((each) => each !== id);
+      if (other.duplicate_of === id) other.duplicate_of = null;
+    }
   }
 
   /** The maintainer archives the issue. A snapshot no longer returns it. */
@@ -255,13 +262,13 @@ export class InMemoryTracker implements Tracker {
     this.stored(issueId).archived = true;
   }
 
-  /** The maintainer moves the issue to another team, into one of that team's statuses. */
-  moveToTeam(issueId: string, team: string, status: string): void {
+  /** An issue the maintainer moves to another team, which gives it that team's next identifier. */
+  moveToTeam(issueId: string, key: string, status: string): void {
     const issue = this.stored(issueId);
-    const to = this.team(team);
-    this.statusOf(to, status);
-    issue.team = to.key;
-    issue.identifier = `${to.key}-${to.next++}`;
+    const team = this.team(key);
+    this.statusOf(team, status);
+    issue.team = team.key;
+    issue.identifier = `${team.key}-${team.next++}`;
     issue.status = status;
     issue.status_since = this.now();
   }
@@ -397,8 +404,9 @@ export class InMemoryTracker implements Tracker {
   async file(draft: IssueDraft, role: Role): Promise<FiledIssue> {
     this.refused("file");
     const status = this.statusFor(draft.repo, role);
+    if (draft.id !== undefined && this.issues.has(draft.id)) throw new Error(`an issue with the UUID ${draft.id} exists`);
     // Filing subscribes the creator, as Linear does.
-    const issue = this.create({ team: draft.repo.team, title: draft.title, description: draft.description, status, creator: this.actor });
+    const issue = this.create({ ...(draft.id === undefined ? {} : { id: draft.id }), team: draft.repo.team, title: draft.title, description: draft.description, status, creator: this.actor });
     this.writes.push({ kind: "file", issue: issue.identifier, title: issue.title, description: issue.description, status });
     return { id: issue.id, repo: draft.repo, identifier: issue.identifier, url: this.url(draft.repo, issue) };
   }
@@ -465,6 +473,7 @@ export class InMemoryTracker implements Tracker {
     return comment;
   }
 
+  /** A snapshot leaves out an issue whose status maps to no role. */
   private snapshotIssue(issue: StoredIssue, repo: TrackerRepo): SnapshotIssue | null {
     const read = this.read(issue, repo);
     return read.role === null ? null : { ...read, role: read.role };
@@ -498,17 +507,34 @@ export class InMemoryTracker implements Tracker {
       const blocker = this.blockerIssue(this.stored(id), repo);
       return blocker.readable ? { ...blocker, original: this.original(this.stored(id), repo) } : blocker;
     });
+    // A blocker counts as its original, so a duplicate of this issue is this issue, and this issue, when it's a
+    // duplicate itself, is its original.
+    const isThis = (id: string) => this.countsAs(this.stored(id)) === issue;
     const unblocks = [...this.issues.values()].filter(
       (other) =>
-        other.blockers.includes(issue.id) &&
+        other.blockers.some(isThis) &&
         this.open(other) &&
-        other.blockers.every((id) => id === issue.id || !this.open(this.stored(id))),
+        other.blockers.every((id) => isThis(id) || !this.open(this.countsAs(this.stored(id)))),
     ).length;
     return { blockers, unblocks };
   }
 
   /** The issue a duplicate relation leads to, through further duplicates, or `null` with none or a loop. */
   private original(issue: StoredIssue, repo: TrackerRepo): BlockerIssue | null {
+    const original = this.storedOriginal(issue);
+    return original === null ? null : this.blockerIssue(original, repo);
+  }
+
+  /**
+   * The issue a blocker counts as: its original when it has one, and itself otherwise. The app can't read an
+   * unreadable blocker's relations, so that blocker counts as itself.
+   */
+  private countsAs(issue: StoredIssue): StoredIssue {
+    if (!this.team(issue.team).readable) return issue;
+    return this.storedOriginal(issue) ?? issue;
+  }
+
+  private storedOriginal(issue: StoredIssue): StoredIssue | null {
     const seen = new Set([issue.id]);
     let current = issue;
     while (current.duplicate_of !== null) {
@@ -518,7 +544,7 @@ export class InMemoryTracker implements Tracker {
       // The app can't read an unreadable issue's relations, so the chain stops there.
       if (!this.team(current.team).readable) break;
     }
-    return current === issue ? null : this.blockerIssue(current, repo);
+    return current === issue ? null : current;
   }
 
   private blockerIssue(issue: StoredIssue, repo: TrackerRepo): BlockerIssue {

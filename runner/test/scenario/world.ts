@@ -31,6 +31,9 @@ export const STATUSES: Record<Role, [string, StatusType]> = {
   duplicate: ["Duplicate", "duplicate"],
 };
 
+/** A status on Shaders' team that the record's `[tracker.statuses]` leaves out, so it maps to no role. */
+export const UNMAPPED_STATUS = "Icebox";
+
 const statusNames = Object.fromEntries(Object.entries(STATUSES).map(([role, [name]]) => [role, name])) as Record<Role, string>;
 
 /** Shaders' schema-1 record, without its `[app]` table, because ports come in a later ticket. */
@@ -106,7 +109,8 @@ export class World {
     this.tracker = new InMemoryTracker({ clock: () => this.now, appUser: this.appUser });
     this.tracker.addUser({ id: this.maintainer.id, name: this.maintainer.name });
     this.tracker.addUser({ id: this.appUser, name: "Flight Deck" });
-    this.tracker.addTeam({ key: "SHA", name: "Shaders", statuses: Object.values(STATUSES).map(([name, type]) => ({ name, type })) });
+    const statuses = [...Object.values(STATUSES), [UNMAPPED_STATUS, "backlog"] as const].map(([name, type]) => ({ name, type }));
+    this.tracker.addTeam({ key: "SHA", name: "Shaders", statuses });
     this.config = {
       auth: "subscription",
       concurrency_cap: 2,
@@ -121,7 +125,7 @@ export class World {
           checkout: join(root, "checkout"),
           package_manager: "/usr/bin/true",
           path: "/usr/bin:/bin:/usr/sbin:/sbin",
-          tracker: { kind: "linear", workspace: "campdotdev", team: "SHA", statuses: statusNames },
+          tracker: { kind: "linear", workspace: "campdotdev", team: "SHA", statuses: { ...statusNames } },
         },
       ],
       linear: { campdotdev: { maintainer_id: this.maintainer.id, maintainer_name: this.maintainer.name, app_user_id: this.appUser } },
@@ -155,20 +159,6 @@ export class World {
     const world = new World(root, folders, versionFolder, remote, commit);
     await world.writeConfig();
     return world;
-  }
-
-  /**
-   * Registers a second repo on its own team, with Shaders' statuses and record, on its own bare remote. Issues on
-   * it are filed with `world.issue({ team, ... })`.
-   */
-  async addRepo(input: { name: string; team: string }): Promise<void> {
-    const slug = input.name.replace("/", "-");
-    const remote = join(this.root, `${slug}.git`);
-    await makeRemote(this.root, remote, SHADERS_RECORD.replace('team = "SHA"', `team = "${input.team}"`));
-    this.tracker.addTeam({ key: input.team, name: input.name, statuses: Object.values(STATUSES).map(([name, type]) => ({ name, type })) });
-    const first = this.config.repos[0]!;
-    this.config.repos.push({ ...first, name: input.name, remote, checkout: join(this.root, `checkout-${slug}`), tracker: { ...first.tracker, team: input.team } });
-    await this.writeConfig();
   }
 
   /** Files an issue as the maintainer, in Backlog unless it says otherwise. */
@@ -250,6 +240,21 @@ export class World {
 
   async writeConfig(): Promise<void> {
     await writeFile(join(this.folders.config, "config.toml"), toToml(this.config as unknown as Record<string, unknown>));
+  }
+
+  /**
+   * Registers a second repo, polled after the ones before it, on its own Linear team with Shaders' statuses. Its
+   * remote's record is Shaders' with the team swapped, since two registrations on one team hold both (ADR 0006).
+   */
+  async addRepo(name: string, team: string): Promise<void> {
+    const statuses = [...Object.values(STATUSES), [UNMAPPED_STATUS, "backlog"] as const].map(([status, type]) => ({ name: status, type }));
+    this.tracker.addTeam({ key: team, name, statuses });
+    const slug = name.replace(/\W/g, "-");
+    const remote = join(this.root, `${slug}.git`);
+    await makeRemote(this.root, remote, SHADERS_RECORD.replace(/^team = "SHA"$/m, `team = "${team}"`));
+    const first = this.config.repos[0]!;
+    this.config.repos.push({ ...first, name, remote, checkout: join(this.root, `checkout-${slug}`), tracker: { ...first.tracker, team } });
+    await this.writeConfig();
   }
 
   /** Commits files on the remote's default branch, and returns the new tip. */

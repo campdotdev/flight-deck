@@ -4,7 +4,7 @@
 // the deadline or on a stop. It holds `caffeinate -i` while any session runs, and at every end kills the process
 // group of anything still running from the worktree or the session's `deps/`.
 import { spawn, type ChildProcess } from "node:child_process";
-import { createWriteStream, writeFileSync } from "node:fs";
+import { createWriteStream, writeFileSync, type WriteStream } from "node:fs";
 import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { constants } from "node:os";
 import { dirname, join } from "node:path";
@@ -38,6 +38,10 @@ interface Run {
   noInit: boolean;
   timedOut: boolean;
   terminating: boolean;
+  /** The process exited, so its exit is settled while the rest of its output drains. */
+  exited: boolean;
+  /** Why the transcript stopped taking writes, when a write failed during the session. */
+  transcriptError: string | null;
   timers: Set<ReturnType<typeof setTimeout>>;
 }
 
@@ -69,7 +73,8 @@ export class ClaudeCodeHarness implements Harness {
     await mkdir(dirname(session.transcript), { recursive: true });
     // Claude Code needs a UUID as its session ID, so the Harness records it beside the transcript (spec 1, "Session IDs").
     await writeFile(transcriptUuid(session.transcript), `${launch.uuid}\n`);
-    const transcript = createWriteStream(session.transcript);
+    // Opened before claude starts, so a transcript that can't be written fails the start rather than the runner.
+    const transcript = await openTranscript(session.transcript);
 
     // Its own process group, so a signal to the runner's group never reaches the session.
     const child = spawn(this.claude, launch.args, {
@@ -82,7 +87,7 @@ export class ClaudeCodeHarness implements Harness {
       child.once("spawn", resolve);
       child.once("error", reject);
     }).catch(async (error: Error) => {
-      await new Promise((done) => transcript.end(done));
+      await endTranscript(transcript);
       throw new Error(`can't start ${this.claude}: ${error.message}`);
     });
     const pid = child.pid;
@@ -98,8 +103,12 @@ export class ClaudeCodeHarness implements Harness {
       noInit: false,
       timedOut: false,
       terminating: false,
+      exited: false,
+      transcriptError: null,
       timers: new Set(),
     };
+    // A failed write, such as a full disk, ends the transcript's writes and nothing else.
+    transcript.on("error", (error) => (run.transcriptError ??= error.message));
     this.running.set(session.id, run);
     this.holdCaffeinate();
 
@@ -110,7 +119,7 @@ export class ClaudeCodeHarness implements Harness {
     let draining = true;
     readLines(child.stdout, (line) => {
       if (!draining) return;
-      transcript.write(`${line}\n`);
+      if (!transcript.destroyed) transcript.write(`${line}\n`);
       this.report(run, run.stream.line(line));
     });
     readLines(child.stderr, (line) => this.report(run, run.stream.stderr(line)));
@@ -127,10 +136,13 @@ export class ClaudeCodeHarness implements Harness {
     });
 
     void exited.then(async ({ code, signal: ended }) => {
+      // The exit is settled now: a deadline or a stop during the drain must not change it.
+      run.exited = true;
+      this.disarm(run);
       // A process the session left behind may hold the pipe open, so the wait for the rest of the output is short.
       await Promise.race([closed, Bun.sleep(this.drainMs)]);
       draining = false;
-      await new Promise((done) => transcript.end(done));
+      await endTranscript(transcript);
       await this.end(run, code ?? 128 + (ended === null ? 0 : (constants.signals[ended] ?? 0)));
     });
 
@@ -139,7 +151,7 @@ export class ClaudeCodeHarness implements Harness {
 
   async stop(handle: Handle): Promise<void> {
     const run = this.running.get(handle.session);
-    if (run === undefined) return;
+    if (run === undefined || run.exited) return;
     run.stopped = true;
     this.terminate(run);
   }
@@ -174,17 +186,23 @@ export class ClaudeCodeHarness implements Harness {
   }
 
   private after(run: Run, ms: number, action: () => void): void {
-    // setTimeout holds at most 2^31 - 1 ms, about 24 days.
+    // setTimeout holds at most 2^31 - 1 ms, about 24 days, so a longer wait arms again for the rest.
+    const wait = Math.min(Math.max(ms, 0), MAX_TIMEOUT_MS);
     const timer = setTimeout(() => {
       run.timers.delete(timer);
-      action();
-    }, Math.min(Math.max(ms, 0), 2 ** 31 - 1));
+      if (ms > MAX_TIMEOUT_MS) this.after(run, ms - MAX_TIMEOUT_MS, action);
+      else action();
+    }, wait);
     run.timers.add(timer);
   }
 
-  private async end(run: Run, code: number): Promise<void> {
+  private disarm(run: Run): void {
     for (const timer of run.timers) clearTimeout(timer);
     run.timers.clear();
+  }
+
+  private async end(run: Run, code: number): Promise<void> {
+    this.disarm(run);
     this.running.delete(run.session.id);
     const kind = exitOf({ stopped: run.stopped, noInit: run.noInit, timedOut: run.timedOut, code }, run.stream.facts);
     const exit: Exit = { ...kind, transcript: run.session.transcript, claudeCodeVersion: run.claudeCodeVersion };
@@ -193,12 +211,13 @@ export class ClaudeCodeHarness implements Harness {
     // The runner counts a session with no result event at its whole budget, so only a real cost goes here.
     const costUsd = run.stream.facts.result?.costUsd;
     if (costUsd !== undefined && costUsd !== null) exit.costUsd = costUsd;
+    const details = { code, sawInit: run.stream.facts.sawInit, result: run.stream.facts.result, transcriptError: run.transcriptError, endedAt: new Date().toISOString() };
     // Written as soon as the session ends, so a runner that stops before it handles the exit still finds it (ADR 0002).
-    writeFileSync(
-      join(run.session.sessionFolder, "exit.json"),
-      `${JSON.stringify({ ...exit, details: { code, sawInit: run.stream.facts.sawInit, result: run.stream.facts.result, endedAt: new Date().toISOString() } })}\n`,
-    );
-    await killLeftovers([run.session.worktree, sessionParts(run.session.sessionFolder).deps], this.lsof);
+    // A failed write loses only that: the clean-up still runs, and the runner still gets the exit.
+    try {
+      writeFileSync(join(run.session.sessionFolder, "exit.json"), `${JSON.stringify({ ...exit, details })}\n`);
+    } catch {}
+    await killLeftovers([run.session.worktree, sessionParts(run.session.sessionFolder).deps], this.lsof).catch(() => []);
     if (this.running.size === 0) this.releaseCaffeinate(false);
     run.events.exit(exit);
   }
@@ -217,6 +236,27 @@ export class ClaudeCodeHarness implements Harness {
     signal(this.caffeinate, "SIGTERM");
     this.caffeinate = null;
   }
+}
+
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+/** Opens the transcript for writing, or throws when it can't. */
+async function openTranscript(path: string): Promise<WriteStream> {
+  const stream = createWriteStream(path);
+  await new Promise<void>((resolve, reject) => {
+    stream.once("open", () => resolve());
+    stream.once("error", reject);
+  });
+  return stream;
+}
+
+/** Ends the transcript and waits for it to close. A transcript a failed write already closed needs nothing. */
+function endTranscript(stream: WriteStream): Promise<void> {
+  if (stream.destroyed) return Promise.resolve();
+  return new Promise((resolve) => {
+    stream.once("close", () => resolve());
+    stream.end();
+  });
 }
 
 /** The process's start time from `ps`, as an ISO time to the second, or `null` when no such process runs. */
