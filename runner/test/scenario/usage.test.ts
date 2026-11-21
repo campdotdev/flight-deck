@@ -135,6 +135,20 @@ describe("on an API key, a session that exits rate_limited", () => {
     expect((await world.status()).runner).toEqual({ state: "working", holds: [] });
   });
 
+  test("holds under plan_limit when the session launched on a subscription, so API-key starts go on", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "rate_limited", resetsAt: later(3 * HOUR).toISOString() } });
+    await world.tick();
+    world.harness.script(issue.identifier, {});
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+    // The exit requeues the issue, and with no hold on the API key, the same poll takes it again.
+    await world.tick();
+    expect(moves(issue)).toEqual(["Planning", "Ready to plan", "Planning"]);
+    expect(world.harness.started).toHaveLength(2);
+    expect((await world.status()).runner).toEqual({ state: "working", holds: [] });
+  });
+
   test("whose issue read fails stays queued, requeues at the next poll, and counts its budget once", async () => {
     await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
     const issue = world.issue({ title: "Save button is blue" });

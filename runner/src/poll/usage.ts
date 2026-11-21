@@ -5,7 +5,7 @@
 // so a hold survives a restart. `state/spend.json` keeps the day's and the month's spending.
 import type { Exit, RateLimitEvent, RateLimitWindow } from "../harness/index.ts";
 import type { Config } from "../install/index.ts";
-import type { Holds, Spend, State, StatusUsage, StoredHold, UsageWindow } from "../state/index.ts";
+import type { Holds, SessionEntry, Spend, State, StatusUsage, StoredHold, UsageWindow } from "../state/index.ts";
 import type { HoldSource } from "./holds.ts";
 
 /** A `rate_limited` exit with no `resetsAt` holds this long. */
@@ -29,6 +29,11 @@ export const usageHolds: HoldSource = async ({ now, state, config }) =>
     .filter((hold) => CAUSES[config.auth].includes(hold.cause) && holding(hold, now))
     .map(({ cause, since, until }) => ({ cause, scope: "runner", name: null, since, until }));
 
+/** How a session pays: on an API key when its launch recorded a budget, and on a subscription otherwise. */
+export function launchAuth(entry: SessionEntry): Config["auth"] {
+  return entry.budget_usd === undefined ? "subscription" : "api_key";
+}
+
 export class Usage {
   /** The last `rate_limit_event` a session reported since step 11 of the last poll. */
   private reported: RateLimitEvent | null = null;
@@ -42,12 +47,13 @@ export class Usage {
 
   /**
    * A session exited `rate_limited`: hold until `resetsAt`, or for 1 minute when the exit carries none, under
-   * `plan_limit` on a subscription and `rate_limit` on an API key.
+   * `plan_limit` when the session launched on a subscription and `rate_limit` when it launched on an API key. The
+   * launch's `auth` decides, so a limit from one way of paying never holds starts that pay the other way.
    */
-  async rateLimited(now: Date, config: Config, resetsAt: string | null): Promise<void> {
+  async rateLimited(now: Date, auth: Config["auth"], resetsAt: string | null): Promise<void> {
     const until = resetsAt ?? new Date(now.getTime() + NO_RESET_MS).toISOString();
     const holds = await this.state.holds();
-    await this.state.writeHolds(extend(holds, config.auth === "subscription" ? "plan_limit" : "rate_limit", now, until));
+    await this.state.writeHolds(extend(holds, auth === "subscription" ? "plan_limit" : "rate_limit", now, until));
   }
 
   /**
