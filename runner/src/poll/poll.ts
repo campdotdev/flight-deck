@@ -81,6 +81,8 @@ interface Fetched {
 interface QueuedExit {
   session: string;
   exit: Exit;
+  /** Set once the exit's cost counted, so a handler that threw and runs again doesn't count it twice. */
+  counted?: true;
 }
 
 export class Poll {
@@ -367,7 +369,8 @@ export class Poll {
     }
   }
 
-  private async handleExit(now: Date, config: Config, workspace: Workspace, { session, exit }: QueuedExit): Promise<void> {
+  private async handleExit(now: Date, config: Config, workspace: Workspace, queued: QueuedExit): Promise<void> {
+    const { session, exit } = queued;
     const sessions = await this.state.sessions();
     const entry = sessions.find((each) => each.id === session);
     if (entry === undefined) return;
@@ -384,7 +387,8 @@ export class Poll {
       return;
     }
     await this.tracker.revoke({ id: entry.id, repo });
-    await this.usage.spent(now, config, exit);
+    if (queued.counted !== true) await this.usage.spent(now, config, exit);
+    queued.counted = true;
 
     const sessionFolder = paths.sessionFolder(this.folders, entry.id);
     const outbox = new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => (name === entry.repo ? repo : null) });

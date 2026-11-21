@@ -99,6 +99,20 @@ describe("a session that exits rate_limited", () => {
     expect(world.harness.started[2]!.sessionJson.attempt).toBe(2);
     expect(comments()).toEqual([]);
   });
+
+  test.each([
+    ["archived", (issue: StoredIssue) => world.tracker.archive(issue.id)],
+    ["deleted", (issue: StoredIssue) => world.tracker.deleteIssue(issue.id)],
+  ])("ends the session without a requeue once the maintainer %s the issue", async (_, leave) => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "rate_limited", resetsAt: null } });
+    await world.tick();
+    leave(issue);
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+    expect(moves(issue)).toEqual(["Planning"]);
+  });
 });
 
 describe("on an API key, a session that exits rate_limited", () => {
@@ -119,6 +133,38 @@ describe("on an API key, a session that exits rate_limited", () => {
     await world.tick(new Date(until));
     expect(world.harness.started).toHaveLength(2);
     expect((await world.status()).runner).toEqual({ state: "working", holds: [] });
+  });
+
+  test("whose issue read fails stays queued, requeues at the next poll, and counts its budget once", async () => {
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "rate_limited", resetsAt: null } });
+    await world.tick();
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 1;
+    world.tracker.issue = async (ref) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    // The read fails, so the entry stays and the issue waits in Planning.
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
+    let status = await world.status();
+    expect(status.sessions).toHaveLength(1);
+    expect(status.usage).toMatchObject({ day_usd: 5 });
+
+    const retried = later(30_000);
+    await world.tick(retried);
+    expect(moves(issue)).toEqual(["Planning", "Ready to plan"]);
+    status = await world.status();
+    expect(status.sessions).toEqual([]);
+    expect(status.usage).toMatchObject({ day_usd: 5 });
+
+    world.harness.script(issue.identifier, {});
+    await world.tick(new Date(retried.getTime() + 60_000));
+    expect(world.harness.started).toHaveLength(2);
+    expect(world.harness.started[1]!.sessionJson.attempt).toBe(1);
   });
 });
 
