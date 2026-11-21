@@ -71,8 +71,9 @@ describe("each fixture becomes the right event", () => {
   test("a run that --max-budget-usd ended exits with an error and no other exit", () => {
     const stream = new Stream(CLAUDE_CODE);
     stream.line(fixture("init.json"));
-    stream.line(fixture("placeholder.result.max-budget.json"));
-    expect(stream.facts.result).toEqual({ subtype: "error_max_budget_usd", isError: true, costUsd: 5.0412, error: "Reached maximum budget ($5)" });
+    stream.line(fixture("result.max-budget.json"));
+    // Claude Code checks the budget after a turn, so the recorded run spent past its $0.01 cap.
+    expect(stream.facts.result).toEqual({ subtype: "error_max_budget_usd", isError: true, costUsd: 0.029469099999999998, error: "Reached maximum budget ($0.01)" });
     expect(exitOf(ended(1), stream.facts)).toEqual({ kind: "exited", code: 1 });
   });
 

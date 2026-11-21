@@ -99,6 +99,20 @@ describe("a session that exits rate_limited", () => {
     expect(world.harness.started[2]!.sessionJson.attempt).toBe(2);
     expect(comments()).toEqual([]);
   });
+
+  test.each([
+    ["archived", (issue: StoredIssue) => world.tracker.archive(issue.id)],
+    ["deleted", (issue: StoredIssue) => world.tracker.deleteIssue(issue.id)],
+  ])("ends the session without a requeue once the maintainer %s the issue", async (_, leave) => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "rate_limited", resetsAt: null } });
+    await world.tick();
+    leave(issue);
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+    expect(moves(issue)).toEqual(["Planning"]);
+  });
 });
 
 describe("on an API key, a session that exits rate_limited", () => {
@@ -119,6 +133,67 @@ describe("on an API key, a session that exits rate_limited", () => {
     await world.tick(new Date(until));
     expect(world.harness.started).toHaveLength(2);
     expect((await world.status()).runner).toEqual({ state: "working", holds: [] });
+  });
+
+  test("holds under plan_limit when the session launched on a subscription, so API-key starts go on", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "rate_limited", resetsAt: later(3 * HOUR).toISOString() } });
+    await world.tick();
+    world.harness.script(issue.identifier, {});
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+    // The exit requeues the issue, and with no hold on the API key, the same poll takes it again.
+    await world.tick();
+    expect(moves(issue)).toEqual(["Planning", "Ready to plan", "Planning"]);
+    expect(world.harness.started).toHaveLength(2);
+    expect((await world.status()).runner).toEqual({ state: "working", holds: [] });
+  });
+
+  test("holds the runner even when its repo is unregistered before the exit", async () => {
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    const resetsAt = later(2 * HOUR).toISOString();
+    world.harness.script(issue.identifier, { exit: { kind: "rate_limited", resetsAt } });
+    await world.tick();
+    world.config.repos.pop();
+    await world.writeConfig();
+    await world.tick();
+    const status = await world.status();
+    expect(status.sessions).toEqual([]);
+    expect(status.runner).toEqual({ state: "held", holds: [{ cause: "rate_limit", scope: "runner", name: null, since: world.now.toISOString(), until: resetsAt }] });
+  });
+
+  test("whose issue read fails stays queued, requeues at the next poll, and counts its budget once", async () => {
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+    const issue = world.issue({ title: "Save button is blue" });
+    world.send(issue);
+    world.harness.script(issue.identifier, { exit: { kind: "rate_limited", resetsAt: null } });
+    await world.tick();
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 1;
+    world.tracker.issue = async (ref) => {
+      if (failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    // The read fails, so the entry stays and the issue waits in Planning.
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Planning");
+    let status = await world.status();
+    expect(status.sessions).toHaveLength(1);
+    expect(status.usage).toMatchObject({ day_usd: 5 });
+
+    const retried = later(30_000);
+    await world.tick(retried);
+    expect(moves(issue)).toEqual(["Planning", "Ready to plan"]);
+    status = await world.status();
+    expect(status.sessions).toEqual([]);
+    expect(status.usage).toMatchObject({ day_usd: 5 });
+
+    world.harness.script(issue.identifier, {});
+    await world.tick(new Date(retried.getTime() + 60_000));
+    expect(world.harness.started).toHaveLength(2);
+    expect(world.harness.started[1]!.sessionJson.attempt).toBe(1);
   });
 });
 
@@ -230,6 +305,18 @@ describe("the plan-limit hold", () => {
     expect((await world.status()).runner.holds).toEqual([]);
   });
 
+  test("doesn't hold the runner once config.toml pays with an API key", async () => {
+    sendReporting("First", usageEvent([0.8, later(3 * HOUR)], [0.3, later(100 * HOUR)]));
+    await world.tick();
+    expect((await world.status()).runner.holds.map(({ cause }) => cause)).toEqual(["plan_limit"]);
+
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 100, monthly_cap_usd: 1000 });
+    sendBriefed("Second");
+    await world.tick();
+    expect(world.harness.started).toHaveLength(2);
+    expect((await world.status()).runner).toEqual({ state: "working", holds: [] });
+  });
+
   test("shows no usage before the first rate_limit_event", async () => {
     await world.tick();
     expect((await world.status()).usage).toEqual({ auth: "subscription", five_hour: null, weekly: null });
@@ -291,7 +378,7 @@ function nextLocal(unit: "day" | "month"): Date {
 function sendBriefed(title: string): StoredIssue {
   const issue = world.issue({ title });
   world.send(issue);
-  world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: "Brief ready", brief: "## Brief\n" }) });
+  world.harness.script(issue.identifier, { outbox: outbox.brief({ summary: "Brief ready", brief: "## Summary\n\nBrief ready.\n" }) });
   return issue;
 }
 
@@ -368,6 +455,115 @@ describe("on an API key", () => {
     await world.tick();
     expect(world.harness.started).toHaveLength(2);
     expect((await world.status()).runner.holds).toEqual([]);
+  });
+
+  test("a lowered budget keeps each running session's launch budget, in the cap test and its spending", async () => {
+    await useApiKey({ session_budget_usd: 10, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+    world.config.concurrency_cap = 5;
+    await world.writeConfig();
+    sendBriefed("First");
+    sendBriefed("Second");
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+
+    // The running session may still spend the 10 its launch carried, so a budget of 1 doesn't fit beside it.
+    world.config.api = { session_budget_usd: 1, daily_cap_usd: 10, monthly_cap_usd: 1000 };
+    await world.writeConfig();
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+
+    // It ended with no result event, so it counts the 10, not the 1.
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 });
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+    expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 10, month_usd: 10, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+  });
+
+  test("a session that launched on an API key counts its cost after config.toml switches to a subscription", async () => {
+    await useApiKey({ session_budget_usd: 10, daily_cap_usd: 15, monthly_cap_usd: 1000 });
+    sendBriefed("First");
+    await world.tick();
+    world.config.auth = "subscription";
+    await world.writeConfig();
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 }, { costUsd: 8 });
+    await world.tick();
+
+    // Back on the API key the same day, 7 is left, under one budget.
+    await useApiKey({ session_budget_usd: 10, daily_cap_usd: 15, monthly_cap_usd: 1000 });
+    sendBriefed("Second");
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+    expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 8, month_usd: 8, daily_cap_usd: 15, monthly_cap_usd: 1000 });
+  });
+
+  test("a session that launched on a subscription counts nothing toward the caps after config.toml switches to an API key", async () => {
+    world.config.concurrency_cap = 5;
+    await world.writeConfig();
+    sendBriefed("First");
+    await world.tick();
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+    sendBriefed("Second");
+    sendBriefed("Third");
+    await world.tick();
+    // The subscription session reserves no budget, so two budgets fit under 10 beside it.
+    expect(world.harness.started).toHaveLength(3);
+
+    // It ended with no result event, and counts no budget.
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 });
+    await world.tick();
+    expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 0, month_usd: 0, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+  });
+
+  test("a session whose exit waits for another try reserves no budget once its cost counted", async () => {
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+    world.config.concurrency_cap = 5;
+    await world.writeConfig();
+    const first = sendBriefed("First");
+    await world.tick();
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 }, { costUsd: 1 });
+    sendBriefed("Second");
+    const read = world.tracker.issue.bind(world.tracker);
+    let failures = 1;
+    world.tracker.issue = async (ref) => {
+      if (ref.id === first.id && failures-- > 0) throw new Error("fetch failed");
+      return read(ref);
+    };
+    // The first session's exit stays queued with its cost counted. 9 is left, and one budget fits.
+    await world.tick();
+    const status = await world.status();
+    expect(status.sessions).toHaveLength(2);
+    expect(status.usage).toMatchObject({ day_usd: 1 });
+    expect(world.harness.started).toHaveLength(2);
+    expect(status.runner.holds).toEqual([]);
+  });
+
+  test("a budget that sums to the cap with a rounding error still fits", async () => {
+    // 0.1 + 0.1 + 0.1 is 0.30000000000000004 in floating point.
+    await useApiKey({ session_budget_usd: 0.1, daily_cap_usd: 0.3, monthly_cap_usd: 1000 });
+    world.config.concurrency_cap = 5;
+    await world.writeConfig();
+    sendBriefed("First");
+    sendBriefed("Second");
+    sendBriefed("Third");
+    await world.tick();
+    expect(world.harness.started).toHaveLength(3);
+    expect((await world.status()).runner.holds).toEqual([]);
+  });
+
+  test("a session whose repo is unregistered before its exit still counts its cost", async () => {
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+    sendBriefed("First");
+    await world.tick();
+    const registration = world.config.repos.pop()!;
+    await world.writeConfig();
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 }, { costUsd: 3 });
+    await world.tick();
+    expect((await world.status()).sessions).toEqual([]);
+
+    world.config.repos.push(registration);
+    await world.writeConfig();
+    await world.tick();
+    expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 3, month_usd: 3, daily_cap_usd: 10, monthly_cap_usd: 1000 });
   });
 
   test("spending survives a restart", async () => {

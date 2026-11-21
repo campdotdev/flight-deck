@@ -8,7 +8,7 @@ import type { RepoRecord } from "./types.ts";
 export interface SlotLookup {
   /** Whether the running version ships `skills/<name>/SKILL.md`. */
   shipped(name: string): boolean | Promise<boolean>;
-  /** Whether the commit holds `<path>/SKILL.md`, for a path such as `.claude/skills/triage`. */
+  /** Whether the commit holds `<path>/SKILL.md` as a regular file, for a path such as `.claude/skills/triage`. */
   inRepo(path: string): boolean | Promise<boolean>;
   /** The commit, for the error. */
   commit: string;
@@ -25,7 +25,7 @@ export async function resolveSlots(record: RepoRecord, lookup: SlotLookup): Prom
       for (const [index, entry] of entries.entries()) {
         const where = `slots.${stage}.${slot}[${index + 1}]`;
         if (entry.includes("/")) {
-          if (!(await lookup.inRepo(entry))) errors.push(`${where}: ${entry}/SKILL.md isn't in the repo at commit ${lookup.commit.slice(0, 7)}`);
+          if (!(await lookup.inRepo(entry))) errors.push(`${where}: ${entry}/SKILL.md isn't a file in the repo at commit ${lookup.commit.slice(0, 7)}`);
         } else if (!(await lookup.shipped(entry))) {
           errors.push(`${where}: Flight Deck ships no skill named "${entry}"`);
         }

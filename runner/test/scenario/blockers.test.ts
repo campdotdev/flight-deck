@@ -195,6 +195,44 @@ describe("a blocker that won't be done", () => {
     });
   });
 
+  test("a duplicate blocker pauses by its original, and the comment names the original", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const toCanceled = blocker("Duplicate", "Pick colors");
+    const canceled = blocker("Canceled", "Pick the palette");
+    world.tracker.setDuplicate(toCanceled.id, canceled.id);
+    const toOrphan = blocker("Duplicate", "Pick fonts");
+    const orphan = blocker("Duplicate", "Pick the type scale");
+    world.tracker.setDuplicate(toOrphan.id, orphan.id);
+    for (const each of [toCanceled, toOrphan]) world.tracker.addBlocker(issue.id, each.id);
+    world.send(issue);
+    await world.tick();
+    expect(world.tracker.stored(issue.id).status).toBe("Paused");
+    expect(world.tracker.writes.find((write) => write.kind === "comment")).toEqual({
+      kind: "comment",
+      issue: issue.identifier,
+      body: pauseComment(
+        "🟡 Needs your help: a blocker was canceled",
+        `Plan can't start, because blockers of this issue won't be done. ${link(canceled)} was canceled. ${link(orphan)} is marked a duplicate of no issue. Remove each blocking relation, or reopen each blocker.`,
+      ),
+    });
+  });
+
+  test("a bracket or a backslash in a blocker's title can't end its link early", async () => {
+    const issue = world.issue({ title: "Save button is blue" });
+    const canceled = blocker("Canceled", "Palette](https://example.invalid) [follow-up \\");
+    world.tracker.addBlocker(issue.id, canceled.id);
+    world.send(issue);
+    await world.tick();
+    expect(world.tracker.writes.find((write) => write.kind === "comment")).toEqual({
+      kind: "comment",
+      issue: issue.identifier,
+      body: pauseComment(
+        "🟡 Needs your help: a blocker was canceled",
+        `Plan can't start, because a blocker of this issue won't be done. [Palette\\](https://example.invalid) \\[follow-up \\\\](https://linear.app/campdotdev/issue/${canceled.identifier}) was canceled. Remove the blocking relation, or reopen the blocker.`,
+      ),
+    });
+  });
+
   test("a canceled blocker pauses even beside an open one, and its status line wins over a duplicate of nothing", async () => {
     const issue = world.issue({ title: "Save button is blue" });
     const open = blocker("Backlog");
@@ -253,5 +291,33 @@ describe("a blocker that won't be done", () => {
     // One comment and one move: the retry lands the pending pause, and the blocker test doesn't post a second.
     expect(world.tracker.writes.map((write) => write.kind)).toEqual(["unsubscribe", "assign", "comment", "move"]);
     expect(world.harness.started).toEqual([]);
+  });
+
+  test("a pause that throws skips only its own issue, and the tick still starts, publishes, and retries it next poll", async () => {
+    const failing = world.issue({ title: "Save button is blue" });
+    const other = world.issue({ title: "Save button is green" });
+    const free = world.issue({ title: "Save button is red" });
+    for (const each of [failing, other]) world.tracker.addBlocker(each.id, blocker("Canceled", `Blocker of ${each.title}`).id);
+    for (const each of [failing, other, free]) world.send(each);
+    // Linear rejects the first post with an error that isn't a network failure, such as a GraphQL error.
+    const post = world.tracker.post.bind(world.tracker);
+    let failed = false;
+    world.tracker.post = async (ref, body, options) => {
+      if (!failed && ref.id === failing.id) {
+        failed = true;
+        throw new Error("GraphQL error: something went wrong");
+      }
+      return post(ref, body, options);
+    };
+    await world.tick();
+    expect(world.tracker.stored(failing.id).status).toBe("Ready to plan");
+    expect(world.tracker.stored(other.id).status).toBe("Paused");
+    expect(startedFor(free)).toBe(1);
+    expect((await world.status()).polled_at).toBe(world.now.toISOString());
+
+    await world.tick();
+    expect(world.tracker.stored(failing.id).status).toBe("Paused");
+    expect(writesOn(failing).filter((kind) => kind === "comment")).toHaveLength(1);
+    expect(startedFor(failing)).toBe(0);
   });
 });
