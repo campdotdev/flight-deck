@@ -522,6 +522,19 @@ describe("on an API key", () => {
     expect(status.runner.holds).toEqual([]);
   });
 
+  test("a budget that sums to the cap with a rounding error still fits", async () => {
+    // 0.1 + 0.1 + 0.1 is 0.30000000000000004 in floating point.
+    await useApiKey({ session_budget_usd: 0.1, daily_cap_usd: 0.3, monthly_cap_usd: 1000 });
+    world.config.concurrency_cap = 5;
+    await world.writeConfig();
+    sendBriefed("First");
+    sendBriefed("Second");
+    sendBriefed("Third");
+    await world.tick();
+    expect(world.harness.started).toHaveLength(3);
+    expect((await world.status()).runner.holds).toEqual([]);
+  });
+
   test("a session whose repo is unregistered before its exit still counts its cost", async () => {
     await useApiKey({ session_budget_usd: 5, daily_cap_usd: 10, monthly_cap_usd: 1000 });
     sendBriefed("First");

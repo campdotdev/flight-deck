@@ -11,6 +11,12 @@ import type { HoldSource } from "./holds.ts";
 /** A `rate_limited` exit with no `resetsAt` holds this long. */
 const NO_RESET_MS = 60_000;
 
+/**
+ * The cap test's allowance for floating-point rounding, far below a cent: 3 × $0.10 sums to $0.30000000000000004,
+ * which must still fit a $0.30 cap.
+ */
+const ROUNDING_USD = 1e-9;
+
 /** Each plan window `[usage]` sets a threshold for: the event's window name, and its `config.toml` key. */
 const WINDOWS = [
   { window: "five_hour", key: "five_hour" },
@@ -103,8 +109,8 @@ export class Usage {
       const { session_budget_usd, daily_cap_usd, monthly_cap_usd } = config.api;
       const spend = spendAt(await this.state.spend(), now);
       const needed = running.reduce((sum, budget) => sum + budget, session_budget_usd);
-      day = daily_cap_usd - spend.day_usd >= needed;
-      month = monthly_cap_usd - spend.month_usd >= needed;
+      day = daily_cap_usd - spend.day_usd + ROUNDING_USD >= needed;
+      month = monthly_cap_usd - spend.month_usd + ROUNDING_USD >= needed;
     }
     const holds = await this.state.holds();
     if (day && month) {
