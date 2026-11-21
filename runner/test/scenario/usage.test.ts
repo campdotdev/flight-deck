@@ -450,6 +450,41 @@ describe("on an API key", () => {
     expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 10, month_usd: 10, daily_cap_usd: 10, monthly_cap_usd: 1000 });
   });
 
+  test("a session that launched on an API key counts its cost after config.toml switches to a subscription", async () => {
+    await useApiKey({ session_budget_usd: 10, daily_cap_usd: 15, monthly_cap_usd: 1000 });
+    sendBriefed("First");
+    await world.tick();
+    world.config.auth = "subscription";
+    await world.writeConfig();
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 }, { costUsd: 8 });
+    await world.tick();
+
+    // Back on the API key the same day, 7 is left, under one budget.
+    await useApiKey({ session_budget_usd: 10, daily_cap_usd: 15, monthly_cap_usd: 1000 });
+    sendBriefed("Second");
+    await world.tick();
+    expect(world.harness.started).toHaveLength(1);
+    expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 8, month_usd: 8, daily_cap_usd: 15, monthly_cap_usd: 1000 });
+  });
+
+  test("a session that launched on a subscription counts nothing toward the caps after config.toml switches to an API key", async () => {
+    world.config.concurrency_cap = 5;
+    await world.writeConfig();
+    sendBriefed("First");
+    await world.tick();
+    await useApiKey({ session_budget_usd: 5, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+    sendBriefed("Second");
+    sendBriefed("Third");
+    await world.tick();
+    // The subscription session reserves no budget, so two budgets fit under 10 beside it.
+    expect(world.harness.started).toHaveLength(3);
+
+    // It ended with no result event, and counts no budget.
+    world.harness.finish(world.harness.started[0]!.session.id, { kind: "exited", code: 0 });
+    await world.tick();
+    expect((await world.status()).usage).toEqual({ auth: "api_key", day_usd: 0, month_usd: 0, daily_cap_usd: 10, monthly_cap_usd: 1000 });
+  });
+
   test("spending survives a restart", async () => {
     await useApiKey({ session_budget_usd: 5, daily_cap_usd: 8, monthly_cap_usd: 1000 });
     sendBriefed("First");

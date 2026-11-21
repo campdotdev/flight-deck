@@ -387,7 +387,7 @@ export class Poll {
       return;
     }
     await this.tracker.revoke({ id: entry.id, repo });
-    if (queued.counted !== true) await this.usage.spent(now, config, exit, entry.budget_usd);
+    if (queued.counted !== true) await this.usage.spent(now, exit, entry.budget_usd);
     queued.counted = true;
 
     const sessionFolder = paths.sessionFolder(this.folders, entry.id);
@@ -790,10 +790,12 @@ export class Poll {
 
   private async starts(now: Date, config: Config, repos: RepoPoll[], workspace: Workspace, trouble: Trouble): Promise<void> {
     const sessions = await this.state.sessions();
-    // Each running session's budget, the one its launch carried (spec 1, "Holds").
-    const running = sessions.filter((entry) => entry.state === "starting" || entry.state === "running").map((entry) => entry.budget_usd);
+    // Each running session's budget, the one its launch carried, or 0 for one on a subscription (spec 1, "Holds").
+    const running = sessions.filter((entry) => entry.state === "starting" || entry.state === "running").map((entry) => entry.budget_usd ?? 0);
     const busy = new Set(sessions.map((entry) => entry.issue_id));
     for (const poll of repos) await this.blockers(now, poll, busy);
+    /** The budget each start this poll launches with. */
+    const budget = config.auth === "api_key" ? (config.api?.session_budget_usd ?? 0) : 0;
     let free = config.concurrency_cap - running.length;
     /** Whether one more session may start: a free place under the cap, and on an API key, room under each cap. */
     const room = async () => free > 0 && (await this.usage.fits(now, config, running));
@@ -829,7 +831,7 @@ export class Poll {
       // Step 4 dropped the retry of an issue that left its working status.
       if (issue === undefined || issue.role !== WORKING[entry.stage]) continue;
       free--;
-      running.push(config.api?.session_budget_usd);
+      running.push(budget);
       await this.startSession(now, config, poll, issue, workspace, entry);
     }
 
@@ -849,7 +851,7 @@ export class Poll {
     for (const { poll, issue } of candidates) {
       if (!(await room())) break;
       free--;
-      running.push(config.api?.session_budget_usd);
+      running.push(budget);
       await this.startSession(now, config, poll, issue, workspace);
     }
   }
@@ -908,7 +910,7 @@ export class Poll {
       deadline: null,
       state: "starting",
       // The budget `buildLaunch` passes as `--max-budget-usd`, from the same `config.toml`, so the cap test and the
-      // spending count keep it after the maintainer changes `session_budget_usd`.
+      // spending count keep it after the maintainer changes `session_budget_usd` or `auth`.
       ...(config.auth === "api_key" && config.api !== undefined ? { budget_usd: config.api.session_budget_usd } : {}),
     };
 

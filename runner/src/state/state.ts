@@ -36,7 +36,10 @@ export interface SessionEntry {
   started_at: string | null;
   deadline: string | null;
   state: SessionState;
-  /** On an API key, the `session_budget_usd` the session's launch carried as `--max-budget-usd`. */
+  /**
+   * The `session_budget_usd` the session's launch carried as `--max-budget-usd`, when it launched on an API key.
+   * A session that launched on a subscription has none, so its exit counts no spending.
+   */
   budget_usd?: number;
   /**
    * Why the runner asked the Harness to stop the session, once it has: `stop` for `flight-deck stop`, and
