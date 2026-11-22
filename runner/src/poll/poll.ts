@@ -87,6 +87,11 @@ interface QueuedExit {
   exit: Exit;
   /** Set once the exit's cost counted, so a handler that threw and runs again doesn't count it twice. */
   counted?: true;
+  /**
+   * Set once the login watch saw the exit. A handler that runs again would reopen `claude_login` over a trial that
+   * passed since, and would no longer know the session reported the warning.
+   */
+  loginSeen?: true;
 }
 
 export class Poll {
@@ -436,7 +441,8 @@ export class Poll {
     const sessions = await this.state.sessions();
     const entry = sessions.find((each) => each.id === session);
     if (entry === undefined) return;
-    this.login.exited(now, entry, exit, trouble);
+    if (queued.loginSeen !== true) this.login.exited(now, entry, exit, trouble);
+    queued.loginSeen = true;
     // Spending and a plan limit's hold need only the exit and the launch, so they land before the repo lookup and
     // the token revoke, even when the repo is gone. The hold only extends, so a retried exit can set it again.
     if (queued.counted !== true) await this.usage.spent(now, exit, entry.budget_usd);
@@ -892,6 +898,8 @@ export class Poll {
       } catch (error) {
         // Nothing starts this poll, and the tick still settles trouble and publishes its status.
         await this.state.log(now, `Claude Code version check failed, no session starts this poll: ${(error as Error).message}`);
+        // A caller whose trial a hold stops still hears which hold.
+        this.trials.held(await currentHolds(this.holdContext(now, config, trouble)));
         return;
       }
       if (tooOld(version)) trouble.open("claude_code_version", "runner", { scope: "runner", repos: [], facts: { version, minVersion: MIN_VERSION } });

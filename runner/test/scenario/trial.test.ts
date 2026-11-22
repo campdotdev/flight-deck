@@ -240,6 +240,14 @@ describe("which holds a trial runs under", () => {
     expect(world.harness.started).toEqual([]);
   });
 
+  test("says which hold stopped it when Claude Code's version can't be read", async () => {
+    await world.stop();
+    world.harness.version = async () => {
+      throw new Error("claude --version printed no version");
+    };
+    expect(await runTrial()).toEqual({ result: "held", cause: "stop" });
+  });
+
   test("doesn't start while others can read credentials.env", async () => {
     await world.credentialsMode(0o640);
     expect(await runTrial()).toEqual({ result: "held", cause: "credentials" });
@@ -318,6 +326,34 @@ describe("a running trial", () => {
     expect(world.tracker.writes).toEqual([]);
     expect(existsSync(start.session.worktree)).toBe(false);
     expect((await world.status()).sessions).toEqual([]);
+  });
+
+  test("a caller who asks while it runs gets its result, even when it ends before the next poll", async () => {
+    let first: TrialResult | null = null;
+    void world.poll.trial().then((each) => (first = each));
+    await world.tick();
+    const start = world.harness.started[0]!;
+    let second: TrialResult | null = null;
+    void world.poll.trial().then((each) => (second = each));
+    world.harness.finish(start.session.id, { kind: "exited", code: 1 });
+    await world.tick();
+    const failed = { result: "failed", session: start.session.id, exit: { kind: "exited", code: 1 } };
+    expect(first as TrialResult | null).toEqual(failed as TrialResult);
+    expect(second as TrialResult | null).toEqual(failed as TrialResult);
+    expect(world.harness.started).toHaveLength(1);
+  });
+
+  test("a caller who asks under a hold that stops trials hears it, while the running trial goes on", async () => {
+    let first: TrialResult | null = null;
+    void world.poll.trial().then((each) => (first = each));
+    await world.tick();
+    await world.credentialsMode(0o640);
+    let second: TrialResult | null = null;
+    void world.poll.trial().then((each) => (second = each));
+    await world.tick();
+    expect(second as TrialResult | null).toEqual({ result: "held", cause: "credentials" });
+    expect(first).toBeNull();
+    expect(world.harness.runningSessions()).toEqual([world.harness.started[0]!.session.id]);
   });
 
   test("an earlier runner's trial goes at the next start, because no one waits for it", async () => {

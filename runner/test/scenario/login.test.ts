@@ -132,6 +132,24 @@ describe("login_expired", () => {
       ["plan", 2],
     ]);
   });
+
+  test("an expired login's exit handled again doesn't reopen claude_login over a trial that passed", async () => {
+    const sent = world.issue({ title: "Save button is blue" });
+    world.send(sent);
+    world.harness.script(sent.identifier, { exit: { kind: "login_expired" } });
+    const revoke = world.tracker.revoke.bind(world.tracker);
+    let broken = 1;
+    world.tracker.revoke = async (session) => {
+      if (broken-- > 0) throw new Error("socket hang up");
+      await revoke(session);
+    };
+    await world.tick();
+    world.harness.script("", PASSES);
+    void world.poll.trial();
+    await world.tick();
+    await world.tick();
+    expect((await world.status()).runner.holds).toEqual([]);
+  });
 });
 
 describe("claude_login_soon", () => {
@@ -205,6 +223,29 @@ describe("claude_login_soon", () => {
     expect(writes[0]!.title).toBe("Claude Code's login expires soon: run claude, then /login");
     expect(await world.notifications()).toEqual(["Claude Code's login expires soon: run claude, then /login"]);
     expect(await nextTick()).toEqual([]);
+  });
+
+  test("an exit handled again after a failed revoke doesn't forget that its session reported the warning", async () => {
+    const warning = "Your login expires in 3 days. Run /login to renew it.";
+    const first = world.issue({ title: "Save button is blue" });
+    world.send(first);
+    world.harness.script(first.identifier, { loginExpiring: warning });
+    await world.tick();
+    const second = world.issue({ title: "Cancel button is green" });
+    world.send(second);
+    world.harness.script(second.identifier, { loginExpiring: warning });
+    await world.tick();
+
+    const revoke = world.tracker.revoke.bind(world.tracker);
+    let broken = 1;
+    world.tracker.revoke = async (session) => {
+      if (broken-- > 0) throw new Error("socket hang up");
+      await revoke(session);
+    };
+    world.harness.finish(world.harness.started[1]!.session.id, { kind: "exited", code: 1 });
+    expect(await nextTick()).not.toContainEqual(expect.objectContaining({ kind: "comment" }));
+    expect(await nextTick()).not.toContainEqual(expect.objectContaining({ kind: "comment" }));
+    expect((await world.status()).trouble.map((each) => each.cause)).toEqual(["claude_login_soon"]);
   });
 
   test("a session that ends before init leaves the cause open", async () => {

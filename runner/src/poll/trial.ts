@@ -84,6 +84,8 @@ export class Trials {
   private readonly attached = new Map<string, Waiter[]>();
   /** When the next trial for `claude_login` is due, as ms, or `null` while the cause is closed. */
   private nextLogin: number | null = null;
+  /** The result of a trial whose exit was handled, with that poll's time, for the callers who asked while it ran. */
+  private ended: { at: number; result: TrialResult } | null = null;
 
   constructor(private readonly options: TrialsOptions) {}
 
@@ -99,23 +101,31 @@ export class Trials {
     return this.waiters.length > 0 || (this.nextLogin !== null && now.getTime() >= this.nextLogin);
   }
 
+  /** Answers each waiting caller `held` when a hold stops trials. Returns that hold, or `null`. */
+  held(holds: readonly StatusHold[]): HoldCause | null {
+    const cause = trialStoppedBy(holds);
+    if (cause !== null) for (const waiter of this.waiters.splice(0)) waiter.resolve({ result: "held", cause });
+    return cause;
+  }
+
   /** Step 9's first start: the trial, when one is wanted. Returns whether it took a place under the cap. */
   async start(input: TrialStart): Promise<boolean> {
     const { now, workspace } = input;
     const { state, folders } = this.options;
+    // A hold that stops trials answers each caller first, even one who asks while a trial runs.
+    const cause = this.held(input.holds);
+    // One trial at a time. A caller who asks while one runs gets its result, even when its exit was handled this poll.
+    const ended = this.ended;
+    this.ended = null;
+    if (ended !== null && ended.at === now.getTime()) for (const waiter of this.waiters.splice(0)) waiter.resolve(ended.result);
     const sessions = await state.sessions();
     const running = sessions.find((entry) => entry.stage === "trial");
     if (running !== undefined) {
-      // One trial at a time. A caller who asks while one runs gets its result.
       this.attached.set(running.id, [...(this.attached.get(running.id) ?? []), ...this.waiters.splice(0)]);
       return false;
     }
     if (!this.wanted(now, input.trouble)) return false;
-    const cause = trialStoppedBy(input.holds);
-    if (cause !== null) {
-      for (const waiter of this.waiters.splice(0)) waiter.resolve({ result: "held", cause });
-      return false;
-    }
+    if (cause !== null) return false;
     if (input.free <= 0) {
       for (const waiter of this.waiters.filter((each) => !each.told)) {
         waiter.told = true;
@@ -231,6 +241,7 @@ export class Trials {
     const result: TrialResult = passed
       ? { result: "passed", session: entry.id, exit: kind }
       : { result: "failed", session: entry.id, exit: kind, ...(exit.error === undefined ? {} : { error: exit.error }) };
+    this.ended = { at: now.getTime(), result };
     await this.end(entry, input.workspace, result);
   }
 
