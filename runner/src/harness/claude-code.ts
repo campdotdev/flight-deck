@@ -205,7 +205,7 @@ export class ClaudeCodeHarness implements Harness {
     this.disarm(run);
     this.running.delete(run.session.id);
     const kind = exitOf({ stopped: run.stopped, noInit: run.noInit, timedOut: run.timedOut, code }, run.stream.facts);
-    const exit: Exit = { ...kind, transcript: run.session.transcript, claudeCodeVersion: run.claudeCodeVersion };
+    const exit: Exit = { ...kind, transcript: run.session.transcript, claudeCodeVersion: run.claudeCodeVersion, sawInit: run.stream.facts.sawInit };
     const error = run.stream.facts.result?.error;
     if (error !== undefined) exit.error = error;
     // The runner counts a session with no result event at its whole budget, so only a real cost goes here.

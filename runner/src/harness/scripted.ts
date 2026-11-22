@@ -17,14 +17,18 @@ export interface SessionScript {
   loginExpiring?: string;
   /** How the session ends. Without one, it runs until the scenario calls `finish` or the runner calls `stop`. */
   exit?: ExitKind;
+  /** Whether the session sent `init`. By default it did, unless it ends `no_init`. */
+  sawInit?: boolean;
+  /** The start fails with this message, as when `claude` can't be spawned, and the session never runs. */
+  startError?: string;
   /** The last error message from the session's `result` event. */
   error?: string;
   /** The `result` event's `total_cost_usd`. Without one, the session ended with no `result` event. */
   costUsd?: number;
 }
 
-/** What a session's `result` event said, when it had one. */
-type ResultFacts = Pick<SessionScript, "error" | "costUsd">;
+/** What a session's `result` event said, when it had one, and whether it sent `init`. */
+type ResultFacts = Pick<SessionScript, "error" | "costUsd" | "sawInit">;
 
 /** One `start` call: what the session was started with, and what it found when it started. */
 export interface StartRecord {
@@ -72,7 +76,7 @@ export class ScriptedHarness implements Harness {
     this.scripts.set(issue, [...(this.scripts.get(issue) ?? []), script]);
   }
 
-  /** Ends a running session, with its `result` event's last error message and cost when it has them. */
+  /** Ends a running session, with its `result` event's last error message and cost when it has them, and whether it sent `init`. */
   finish(session: string, exit: ExitKind, result: ResultFacts = {}): void {
     const running = this.running.get(session);
     if (running === undefined) throw new Error(`session ${session} isn't running`);
@@ -107,6 +111,10 @@ export class ScriptedHarness implements Harness {
 
     const queue = this.scripts.get(session.issue) ?? [];
     const script = queue.shift() ?? {};
+    if (script.startError !== undefined) {
+      this.running.delete(session.id);
+      throw new Error(script.startError);
+    }
     for (const [path, content] of Object.entries(script.outbox ?? {})) {
       const file = join(session.sessionFolder, "outbox", path);
       await mkdir(dirname(file), { recursive: true });
@@ -130,7 +138,7 @@ export class ScriptedHarness implements Harness {
 
   private end(running: Running, kind: ExitKind, result: ResultFacts): void {
     this.running.delete(running.session.id);
-    const exit: Exit = { ...kind, transcript: running.session.transcript, claudeCodeVersion: this.claudeCodeVersion };
+    const exit: Exit = { ...kind, transcript: running.session.transcript, claudeCodeVersion: this.claudeCodeVersion, sawInit: result.sawInit ?? kind.kind !== "no_init" };
     if (result.error !== undefined) exit.error = result.error;
     if (result.costUsd !== undefined) exit.costUsd = result.costUsd;
     // The adapter writes exit.json as soon as it sees the session end, before the runner handles the exit.

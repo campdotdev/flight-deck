@@ -167,7 +167,21 @@ describe("a trial", () => {
     expect(await runTrial()).toEqual({ result: "failed", session: expect.any(String), exit: { kind: "exited", code: 1 } });
     world.harness.script("", { exit: { kind: "no_init" } });
     expect(await runTrial()).toEqual({ result: "failed", session: expect.any(String), exit: { kind: "no_init" } });
+    world.harness.script("", { ...PASSES, sawInit: false });
+    expect(await runTrial()).toEqual({ result: "failed", session: expect.any(String), exit: { kind: "exited", code: 0 } });
     expect(await world.trialRecord()).toBeNull();
+  });
+
+  test("fails when Claude Code can't start, and frees its place for the next trial", async () => {
+    world.harness.script("", { startError: "can't start claude: ENOENT" });
+    const result = await runTrial();
+    const { session } = world.harness.started[0]!;
+    expect(result).toEqual({ result: "failed", session: session.id, exit: null, error: "can't start claude: ENOENT" });
+    expect((await world.status()).sessions).toEqual([]);
+    expect(existsSync(session.worktree)).toBe(false);
+
+    world.harness.script("", PASSES);
+    expect((await runTrial()).result).toBe("passed");
   });
 
   test("on an API key, counts its cost toward the caps, and a rate_limited exit holds under rate_limit", async () => {

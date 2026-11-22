@@ -124,7 +124,10 @@ export class Trouble {
       .map((entry) => ({ cause: entry.cause, repos: entry.repos, issue_url: entry.issues[0]?.url ?? null, since: entry.since }));
   }
 
-  /** Step 10: file, flag, and notify for each cause that opened, and comment on each issue whose cause cleared. */
+  /**
+   * Step 10: file, flag, and notify for each cause that opened, file and flag what's still owed for each cause that
+   * stays open, and comment on each issue whose cause cleared.
+   */
   async settle(context: SettleContext): Promise<void> {
     const at = context.now.toISOString();
     const log = (message: string) => context.state.log(context.now, message);
@@ -164,6 +167,11 @@ export class Trouble {
         await log(`trouble ${entry.cause} cleared${entry.repos.length > 0 ? ` for ${entry.repos.join(", ")}` : ""}`);
         const cleared = clearedText(entry, this.cleared.get(k) ?? {});
         if (cleared !== null) for (const issue of entry.issues) issue.pending = { kind: "cleared", ...cleared, since: at, tried: false };
+      } else if (entry.open) {
+        // A cause an event opens, such as Claude Code's login warning, doesn't open again each poll, so a filing or
+        // a flag Linear didn't take is tried again here until it lands.
+        const text = troubleText(entry, context.version);
+        if (text.body !== null) await this.file(context, entry, text.title, text.body, save);
       }
       await this.comment(context, entry, reads, save);
       await save();

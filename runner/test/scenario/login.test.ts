@@ -191,4 +191,33 @@ describe("claude_login_soon", () => {
     });
     expect((await world.status()).trouble).toEqual([]);
   });
+
+  test("a trouble issue Linear refuses at the warning is filed at the next poll, with no second warning", async () => {
+    const sent = world.issue({ title: "Save button is blue" });
+    world.send(sent);
+    world.harness.script(sent.identifier, { loginExpiring: "Your login expires in 3 days. Run /login to renew it." });
+    await world.tick();
+    world.tracker.refuse("file");
+    expect(await nextTick()).not.toContainEqual(expect.objectContaining({ kind: "file" }));
+
+    const writes = (await nextTick()) as { kind: string; title?: string }[];
+    expect(writes.map((write) => write.kind)).toEqual(["file", "assign"]);
+    expect(writes[0]!.title).toBe("Claude Code's login expires soon: run claude, then /login");
+    expect(await world.notifications()).toEqual(["Claude Code's login expires soon: run claude, then /login"]);
+    expect(await nextTick()).toEqual([]);
+  });
+
+  test("a session that ends before init leaves the cause open", async () => {
+    const first = world.issue({ title: "Save button is blue" });
+    world.send(first);
+    world.harness.script(first.identifier, { loginExpiring: "Your login expires in 3 days. Run /login to renew it." });
+    await world.tick();
+    const second = world.issue({ title: "Cancel button is green" });
+    world.send(second);
+    await world.tick();
+
+    world.harness.finish(world.harness.started[1]!.session.id, { kind: "exited", code: 1 }, { sawInit: false });
+    expect(await nextTick()).not.toContainEqual(expect.objectContaining({ kind: "comment" }));
+    expect((await world.status()).trouble.map((each) => each.cause)).toEqual(["claude_login_soon"]);
+  });
 });

@@ -460,7 +460,7 @@ export class Poll {
 
     const sessionFolder = paths.sessionFolder(this.folders, entry.id);
     const outbox = new Outbox({ version: this.version, state: this.state, clock: () => now, repo: (name) => (name === entry.repo ? repo : null) });
-    const { transcript, claudeCodeVersion: _, error, costUsd: __, ...kind } = exit;
+    const { transcript, claudeCodeVersion: _, sawInit: ___, error, costUsd: __, ...kind } = exit;
     const facts: RunnerFacts = { exit: kind as ExitKind, session: entry.id, attempt: entry.attempt, transcript };
     if (error !== undefined) facts.error = error;
     const context: ExitContext = {

@@ -32,7 +32,7 @@ export class LoginWatch {
     }
     if (this.warned.delete(entry.id)) return;
     // A session that never sent `init`, or whose login had already expired, says nothing about the warning.
-    if (exit.kind === "no_init" || exit.kind === "login_expired") return;
+    if (!exit.sawInit || exit.kind === "login_expired") return;
     const since = trouble.since("claude_login_soon", "runner", now);
     if (since !== null && entry.started_at !== null && entry.started_at >= since) trouble.clear("claude_login_soon", "runner");
   }

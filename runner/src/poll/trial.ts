@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { paths, sessionParts, type Folders } from "../folders/index.ts";
-import { buildLaunch, type Auth, type Exit, type ExitKind, type Harness, type HarnessSession, type SessionEvents } from "../harness/index.ts";
+import { buildLaunch, type Auth, type Exit, type ExitKind, type Handle, type Harness, type HarnessSession, type SessionEvents } from "../harness/index.ts";
 import type { Config } from "../install/index.ts";
 import type { HoldCause, SessionEntry, State, StatusHold } from "../state/index.ts";
 import type { Workspace } from "../workspace/index.ts";
@@ -17,7 +17,7 @@ import type { Trouble } from "./trouble/trouble.ts";
 /** How a trial ended, for `{ "op": "trial" }`, which install prints (spec 1, "The runner's socket"). */
 export type TrialResult =
   | { result: "passed"; session: string; exit: ExitKind }
-  /** `exit` is `null` when the trial never started, because its repo or its launch couldn't be made. */
+  /** `exit` is `null` when the trial never started, because its repo or its launch couldn't be made, or Claude Code couldn't start. */
   | { result: "failed"; session: string; exit: ExitKind | null; error?: string }
   /** A hold a trial doesn't start under. */
   | { result: "held"; cause: HoldCause };
@@ -189,7 +189,16 @@ export class Trials {
       return false;
     }
 
-    const handle = await this.options.harness.start(session, this.options.events(id));
+    let handle: Handle;
+    try {
+      handle = await this.options.harness.start(session, this.options.events(id));
+    } catch (error) {
+      // No exit follows a start that failed, so the trial ends here, or its entry would hold a place for good.
+      const message = (error as Error).message;
+      await state.log(now, `${id} trial: start failed: ${message}`);
+      await this.end(entry, workspace, { result: "failed", session: id, exit: null, error: message });
+      return false;
+    }
     const started: SessionEntry = {
       ...entry,
       pid: handle.pid,
@@ -213,8 +222,7 @@ export class Trials {
     const { state, folders, version } = this.options;
     const kind = exitKind(exit);
     const summary = existsSync(join(sessionParts(paths.sessionFolder(folders, entry.id)).outbox, "summary.md"));
-    // An `exited` exit means the session sent `init`, or the Harness would have reported `no_init`.
-    const passed = exit.kind === "exited" && exit.code === 0 && summary;
+    const passed = exit.kind === "exited" && exit.code === 0 && exit.sawInit && summary;
     if (passed) {
       await state.writeTrial({ version, claude_code_version: exit.claudeCodeVersion, session: entry.id, passed_at: now.toISOString() });
       input.trouble.clear("claude_login", "runner");

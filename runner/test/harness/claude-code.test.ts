@@ -172,7 +172,7 @@ describe("a session that runs to its end", () => {
   test("runs the launch's command line from the worktree with exactly the launch's environment", async () => {
     const h = await makeHarness(await fakeClaude(`cat ${INIT}; cat ${RESULT}`));
     const run = await start(h, "a1b2c3");
-    expect(await run.exit).toEqual({ kind: "exited", code: 0, transcript: run.session.transcript, claudeCodeVersion: "2.1.321", costUsd: 2.0853960000000002 });
+    expect(await run.exit).toEqual({ kind: "exited", code: 0, transcript: run.session.transcript, claudeCodeVersion: "2.1.321", sawInit: true, costUsd: 2.0853960000000002 });
 
     const args = (await readFile(join(root, "args"), "utf8")).split("\n").slice(0, -1);
     expect(args).toEqual(run.session.launch.args);
@@ -223,6 +223,12 @@ describe("a session that runs to its end", () => {
     expect(await readFile(run.session.transcript, "utf8")).toBe(`${await readFile(INIT, "utf8")}${await readFile(RESULT, "utf8")}`);
     expect(run.session.transcript).toBe(join(folders.data, "repos/campdotdev/shaders/transcripts/g7h8i9.jsonl"));
     expect(await readFile(join(folders.data, "repos/campdotdev/shaders/transcripts/g7h8i9.uuid"), "utf8")).toBe(`${run.handle.uuid}\n`);
+  });
+
+  test("a process that exits before init, inside the watchdog, ends exited and says it sent no init", async () => {
+    const h = await makeHarness(await fakeClaude("exit 1"));
+    const run = await start(h, "m1n2o3");
+    expect(await run.exit).toMatchObject({ kind: "exited", code: 1, sawInit: false });
   });
 
   test("writes exit.json in the session folder before it reports the exit", async () => {
