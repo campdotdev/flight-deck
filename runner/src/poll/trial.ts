@@ -101,29 +101,29 @@ export class Trials {
     return this.waiters.length > 0 || (this.nextLogin !== null && now.getTime() >= this.nextLogin);
   }
 
-  /** Answers each waiting caller `held` when a hold stops trials. Returns that hold, or `null`. */
-  held(holds: readonly StatusHold[]): HoldCause | null {
+  /**
+   * Answers the callers that need no new trial, and needs no Claude Code version, so a poll whose version check
+   * failed still runs it. A hold that stops trials answers each caller first, even one who asks while a trial
+   * runs. One trial runs at a time, so a caller who asks while one runs gets its result, even when its exit was
+   * handled this poll. Returns the hold, and whether a trial runs.
+   */
+  async answer(now: Date, holds: readonly StatusHold[]): Promise<{ cause: HoldCause | null; running: boolean }> {
     const cause = trialStoppedBy(holds);
     if (cause !== null) for (const waiter of this.waiters.splice(0)) waiter.resolve({ result: "held", cause });
-    return cause;
+    const ended = this.ended;
+    this.ended = null;
+    if (ended !== null && ended.at === now.getTime()) for (const waiter of this.waiters.splice(0)) waiter.resolve(ended.result);
+    const running = (await this.options.state.sessions()).find((entry) => entry.stage === "trial");
+    if (running !== undefined) this.attached.set(running.id, [...(this.attached.get(running.id) ?? []), ...this.waiters.splice(0)]);
+    return { cause, running: running !== undefined };
   }
 
   /** Step 9's first start: the trial, when one is wanted. Returns whether it took a place under the cap. */
   async start(input: TrialStart): Promise<boolean> {
     const { now, workspace } = input;
     const { state, folders } = this.options;
-    // A hold that stops trials answers each caller first, even one who asks while a trial runs.
-    const cause = this.held(input.holds);
-    // One trial at a time. A caller who asks while one runs gets its result, even when its exit was handled this poll.
-    const ended = this.ended;
-    this.ended = null;
-    if (ended !== null && ended.at === now.getTime()) for (const waiter of this.waiters.splice(0)) waiter.resolve(ended.result);
-    const sessions = await state.sessions();
-    const running = sessions.find((entry) => entry.stage === "trial");
-    if (running !== undefined) {
-      this.attached.set(running.id, [...(this.attached.get(running.id) ?? []), ...this.waiters.splice(0)]);
-      return false;
-    }
+    const { cause, running } = await this.answer(now, input.holds);
+    if (running) return false;
     if (!this.wanted(now, input.trouble)) return false;
     if (cause !== null) return false;
     if (input.free <= 0) {
@@ -155,7 +155,7 @@ export class Trials {
       // On an API key, the budget its launch carries, so its cost counts and a `rate_limited` exit holds the key.
       ...(input.auth.kind === "api_key" ? { budget_usd: input.auth.sessionBudgetUsd } : {}),
     };
-    await state.writeSessions([...sessions, entry]);
+    await state.writeSessions([...(await state.sessions()), entry]);
     this.attached.set(id, this.waiters.splice(0));
     if (this.nextLogin !== null) this.nextLogin = now.getTime() + LOGIN_EVERY_MS;
 

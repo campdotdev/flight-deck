@@ -898,8 +898,8 @@ export class Poll {
       } catch (error) {
         // Nothing starts this poll, and the tick still settles trouble and publishes its status.
         await this.state.log(now, `Claude Code version check failed, no session starts this poll: ${(error as Error).message}`);
-        // A caller whose trial a hold stops still hears which hold.
-        this.trials.held(await currentHolds(this.holdContext(now, config, trouble)));
+        // The trial's callers that need no new trial still hear their answer.
+        await this.trials.answer(now, await currentHolds(this.holdContext(now, config, trouble)));
         return;
       }
       if (tooOld(version)) trouble.open("claude_code_version", "runner", { scope: "runner", repos: [], facts: { version, minVersion: MIN_VERSION } });

@@ -343,6 +343,23 @@ describe("a running trial", () => {
     expect(world.harness.started).toHaveLength(1);
   });
 
+  test("a caller who asks while it runs gets its result when the version check fails at its exit", async () => {
+    let first: TrialResult | null = null;
+    void world.poll.trial().then((each) => (first = each));
+    await world.tick();
+    const start = world.harness.started[0]!;
+    let second: TrialResult | null = null;
+    void world.poll.trial().then((each) => (second = each));
+    world.harness.finish(start.session.id, { kind: "exited", code: 1 });
+    world.harness.version = async () => {
+      throw new Error("claude --version printed no version");
+    };
+    await world.tick();
+    expect(first as TrialResult | null).toEqual(second as TrialResult | null);
+    expect(second as TrialResult | null).toMatchObject({ result: "failed", session: start.session.id });
+    expect(world.harness.started).toHaveLength(1);
+  });
+
   test("a caller who asks under a hold that stops trials hears it, while the running trial goes on", async () => {
     let first: TrialResult | null = null;
     void world.poll.trial().then((each) => (first = each));
