@@ -155,12 +155,18 @@ export class Workspace {
     }
   }
 
-  /** Makes one session's folder and worktree. */
-  async prepare(plan: PreparePlan): Promise<PreparedWorkspace> {
-    // The session root has mode 0700 (spec 1, "Folders and files"), so no other user on the Mac can read a
-    // checkout or a brief under /Users/Shared. A root made with the umask's mode, or loosened since, is tightened.
+  /**
+   * The session root has mode 0700 (spec 1, "Folders and files"), so no other user on the Mac can read a
+   * checkout or a brief under /Users/Shared. A root made with the umask's mode, or loosened since, is tightened.
+   */
+  private async lockRoot(): Promise<void> {
     await mkdir(this.folders.sessionRoot, { recursive: true });
     await chmod(this.folders.sessionRoot, 0o700);
+  }
+
+  /** Makes one session's folder and worktree. */
+  async prepare(plan: PreparePlan): Promise<PreparedWorkspace> {
+    await this.lockRoot();
     const sessionFolder = paths.sessionFolder(this.folders, plan.session);
     const parts = sessionParts(sessionFolder);
     const worktree = paths.worktree(this.folders, plan.session);
@@ -213,6 +219,8 @@ export class Workspace {
    * commit on `main`. The repo isn't a clone of anything, so `dispose` deletes it outright.
    */
   async prepareTrial(plan: TrialPlan): Promise<PreparedWorkspace> {
+    // A trial is the first session an install runs, so it can be what makes the root.
+    await this.lockRoot();
     const sessionFolder = paths.sessionFolder(this.folders, plan.session);
     const parts = sessionParts(sessionFolder);
     const worktree = paths.worktree(this.folders, plan.session);

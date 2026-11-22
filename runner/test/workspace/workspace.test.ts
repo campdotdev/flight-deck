@@ -155,6 +155,20 @@ describe("the session root", () => {
     await workspace.prepare(plan("abc123", world.commit));
     expect((await stat(world.folders.sessionRoot)).mode & 0o777).toBe(0o700);
   });
+
+  const trial = { session: "abc123", deadline: "2026-01-01T00:05:00.000Z", version: "1.0.0", versionFolder: "/versions/1.0.0", path: "/usr/bin:/bin" };
+
+  test("prepareTrial makes a missing root with mode 0700", async () => {
+    await rm(world.folders.sessionRoot, { recursive: true, force: true });
+    await workspace.prepareTrial(trial);
+    expect((await stat(world.folders.sessionRoot)).mode & 0o777).toBe(0o700);
+  });
+
+  test("prepareTrial tightens a root other users can read to mode 0700", async () => {
+    await chmod(world.folders.sessionRoot, 0o755);
+    await workspace.prepareTrial(trial);
+    expect((await stat(world.folders.sessionRoot)).mode & 0o777).toBe(0o700);
+  });
 });
 
 describe("dispose", () => {
