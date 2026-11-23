@@ -37,6 +37,12 @@ if ! printf '%s' "$issue" | grep -Eq '^[A-Z][A-Z0-9]*-[0-9]+$'; then
 fi
 branch="flight-deck/$issue"
 
+# Sets $repo to origin's URL. gh targets its own default repository unless told
+# otherwise, and that can be a remote other than origin.
+read_repo() {
+	repo=$(git remote get-url origin) || refuse "can't read origin's URL"
+}
+
 # Sets $base to origin's default branch, and refuses when that is the issue's
 # branch. It sets a variable, not prints one, so that its refusal exits the
 # script and not just a command substitution.
@@ -54,7 +60,8 @@ push() {
 	[ "$current" = "$branch" ] || refuse "on $current, not $branch"
 	read_base
 	# An explicit refspec with no leading +: git rejects anything but a fast-forward.
-	git push --set-upstream origin "refs/heads/$branch:refs/heads/$branch"
+	# --no-follow-tags overrides push.followTags, which would also push tags.
+	git push --no-follow-tags --set-upstream origin "refs/heads/$branch:refs/heads/$branch"
 }
 
 open() {
@@ -72,12 +79,14 @@ open() {
 	read_base
 	[ -n "$(git ls-remote --heads origin "refs/heads/$branch")" ] || refuse "origin has no $branch; push it first"
 
-	gh pr create --draft --base "$base" --head "$branch" --title "$title" --body-file "$body_file"
+	read_repo
+	gh pr create --repo "$repo" --draft --base "$base" --head "$branch" --title "$title" --body-file "$body_file"
 }
 
 ready() {
 	[ $# -eq 0 ] || usage
-	gh pr ready "$branch"
+	read_repo
+	gh pr ready --repo "$repo" "$branch"
 }
 
 case "$action" in

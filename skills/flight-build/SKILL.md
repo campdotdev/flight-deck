@@ -57,7 +57,7 @@ Add `building` with `save_issue` and `addLabels`. Do this before any other work.
 ## 3. Make the worktree
 
 1. Run `git fetch origin`. Read origin's default branch with `git ls-remote --symref origin HEAD`.
-2. Add the worktree on a new branch from it: `git worktree add <folder> -b flight-deck/<issue> origin/<default branch>`. Use the folder the repo's docs name for worktrees. When they name none, use `.worktrees/flight-deck-<issue>` at the repo root, and first add `.worktrees/` to `.git/info/exclude` unless `git check-ignore -q .worktrees/x` says git already ignores it.
+2. Add the worktree on a new branch from it: `git worktree add <folder> -b flight-deck/<issue> origin/<default branch>`. A paused run leaves its worktree and branch in place, so look first. When `git worktree list` shows a worktree on `flight-deck/<issue>`, work there and go on to install. When only the branch `flight-deck/<issue>` is left, add the worktree on it without `-b`. Use the folder the repo's docs name for worktrees. When they name none, use `.worktrees/flight-deck-<issue>` at the repo root, and first add `.worktrees/` to `.git/info/exclude` unless `git check-ignore -q .worktrees/x` says git already ignores it.
 3. Install dependencies there the way the repo's docs say.
 
 Run every later command in that worktree.

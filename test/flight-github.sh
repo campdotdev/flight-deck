@@ -125,6 +125,15 @@ test_push_never_rewrites_a_pushed_commit() {
 	[ "$(remote_sha flight-deck/SHA-12)" = "$pushed" ] || fail "origin's commit was replaced" || return 1
 }
 
+test_push_sends_no_tags_under_follow_tags() {
+	on_issue_branch_with_a_commit SHA-12
+	git tag -a v9 -m unreleased
+	git config push.followTags true
+	run push SHA-12
+	[ "$STATUS" -eq 0 ] || fail "exit $STATUS" || return 1
+	[ -z "$(git --git-dir="$TMP/origin.git" tag)" ] || fail "origin got tags: $(git --git-dir="$TMP/origin.git" tag)" || return 1
+}
+
 test_push_refuses_a_malformed_identifier() {
 	git switch -q -c "flight-deck/main"
 	run push main
@@ -138,7 +147,7 @@ test_open_makes_a_draft_pull_request_into_the_default_branch() {
 	run open SHA-12 --title "Fix the thing" --body-file "$TMP/body.md"
 	[ "$STATUS" -eq 0 ] || fail "exit $STATUS" || return 1
 	case "$OUT" in *"/pull/7"*) ;; *) fail "no pull request URL printed" || return 1 ;; esac
-	expected="pr create --draft --base main --head flight-deck/SHA-12 --title Fix the thing --body-file $TMP/body.md"
+	expected="pr create --repo $TMP/origin.git --draft --base main --head flight-deck/SHA-12 --title Fix the thing --body-file $TMP/body.md"
 	[ "$(cat "$GH_LOG")" = "$expected" ] || fail "gh got: $(cat "$GH_LOG")" || return 1
 }
 
@@ -161,7 +170,7 @@ test_open_needs_a_title_and_a_body() {
 test_ready_marks_the_issue_branchs_pull_request_ready() {
 	run ready SHA-12
 	[ "$STATUS" -eq 0 ] || fail "exit $STATUS" || return 1
-	[ "$(cat "$GH_LOG")" = "pr ready flight-deck/SHA-12" ] || fail "gh got: $(cat "$GH_LOG")" || return 1
+	[ "$(cat "$GH_LOG")" = "pr ready --repo $TMP/origin.git flight-deck/SHA-12" ] || fail "gh got: $(cat "$GH_LOG")" || return 1
 }
 
 test_an_unknown_action_is_refused() {
