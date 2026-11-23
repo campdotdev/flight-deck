@@ -1,0 +1,6 @@
+{
+	"name": "flight-deck",
+	"description": "Flight Deck's flows, which take a labelled Linear issue to a draft pull request.",
+	"author": { "name": "campdotdev" },
+	"license": "MIT"
+}
