@@ -11,6 +11,7 @@ Flight Deck's flows follow these skills. A copy is byte for byte the upstream fi
 | `skills/ponytail/` | `DietrichGebert/ponytail` | `skills/ponytail/` | `09c434ab73ca43761c5d8b0c5d341926c2fba710` | Copy |
 | `skills/technical-writing/` | `cursor/plugins` (pstack) | `pstack/skills/technical-writing/` | `d457567332aa6989e753ea289f30ea2bfbc80bc0` | Copy |
 | `skills/unslop/` | `cursor/plugins` (pstack) | `pstack/skills/unslop/` | `d457567332aa6989e753ea289f30ea2bfbc80bc0` | Copy |
+| `skills/tdd/` | `mattpocock/skills` | `skills/engineering/tdd/`, without `agents/` | `49dd158d1076134a641b33efb035946536778336` | Copy |
 | `skills/brief/` | `mattpocock/skills` | `skills/engineering/triage/AGENT-BRIEF.md` | `49dd158d1076134a641b33efb035946536778336` | Fork |
 | `skills/reproducing-bugs/` | `mattpocock/skills` | `skills/engineering/diagnosing-bugs/SKILL.md` | `49dd158d1076134a641b33efb035946536778336` | Fork |
 
