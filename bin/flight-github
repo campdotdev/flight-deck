@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# flight-github: every GitHub write Flight Deck's flows make, under the
+# maintainer's own git and gh logins. The flows call this and never call
+# `git push` or `gh pr` themselves.
+#
+#   flight-github push  <issue>
+#   flight-github open  <issue> --title <title> --body-file <file>
+#   flight-github ready <issue>
+#
+# <issue> is a Linear identifier such as SHA-12, and the issue's branch is
+# flight-deck/<issue>. The script pushes only that branch, never forces a push,
+# never pushes the remote's default branch, and never merges.
+
+set -euo pipefail
+
+refuse() {
+	echo "flight-github: refused: $*" >&2
+	exit 1
+}
+
+usage() {
+	cat >&2 <<-'USAGE'
+		usage: flight-github push  <issue>
+		       flight-github open  <issue> --title <title> --body-file <file>
+		       flight-github ready <issue>
+	USAGE
+	exit 2
+}
+
+[ $# -ge 2 ] || usage
+action=$1
+issue=$2
+shift 2
+
+if ! printf '%s' "$issue" | grep -Eq '^[A-Z][A-Z0-9]*-[0-9]+$'; then
+	refuse "'$issue' is not an issue identifier such as SHA-12"
+fi
+branch="flight-deck/$issue"
+
+# Sets $base to origin's default branch, and refuses when that is the issue's
+# branch. It sets a variable, not prints one, so that its refusal exits the
+# script and not just a command substitution.
+read_base() {
+	local ref
+	ref=$(git ls-remote --symref origin HEAD | awk '$1 == "ref:" { print $2; exit }')
+	[ -n "$ref" ] || refuse "can't read origin's default branch"
+	base=${ref#refs/heads/}
+	[ "$branch" != "$base" ] || refuse "$branch is origin's default branch"
+}
+
+push() {
+	local current
+	current=$(git symbolic-ref --quiet --short HEAD) || refuse "HEAD is detached, not on $branch"
+	[ "$current" = "$branch" ] || refuse "on $current, not $branch"
+	read_base
+	# An explicit refspec with no leading +: git rejects anything but a fast-forward.
+	git push --set-upstream origin "refs/heads/$branch:refs/heads/$branch"
+}
+
+open() {
+	local title="" body_file=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--title) title=${2-}; shift 2 || usage ;;
+			--body-file) body_file=${2-}; shift 2 || usage ;;
+			*) usage ;;
+		esac
+	done
+	[ -n "$title" ] || refuse "open needs --title"
+	[ -n "$body_file" ] && [ -f "$body_file" ] || refuse "open needs --body-file with an existing file"
+
+	read_base
+	[ -n "$(git ls-remote --heads origin "refs/heads/$branch")" ] || refuse "origin has no $branch; push it first"
+
+	gh pr create --draft --base "$base" --head "$branch" --title "$title" --body-file "$body_file"
+}
+
+ready() {
+	[ $# -eq 0 ] || usage
+	gh pr ready "$branch"
+}
+
+case "$action" in
+	push) [ $# -eq 0 ] || usage; push ;;
+	open) open "$@" ;;
+	ready) ready "$@" ;;
+	*) refuse "'$action' is not an action; use push, open, or ready" ;;
+esac
