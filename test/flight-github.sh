@@ -134,6 +134,15 @@ test_push_sends_no_tags_under_follow_tags() {
 	[ -z "$(git --git-dir="$TMP/origin.git" tag)" ] || fail "origin got tags: $(git --git-dir="$TMP/origin.git" tag)" || return 1
 }
 
+test_push_refuses_a_push_url_unlike_the_fetch_url() {
+	git init -q --bare -b flight-deck/SHA-12 "$TMP/other.git"
+	git config remote.origin.pushurl "$TMP/other.git"
+	on_issue_branch_with_a_commit SHA-12
+	run push SHA-12
+	refused || fail "pushed to a repository read_base never checked" || return 1
+	[ -z "$(git --git-dir="$TMP/other.git" rev-parse --verify --quiet refs/heads/flight-deck/SHA-12)" ] || fail "the push URL got the branch" || return 1
+}
+
 test_push_refuses_a_malformed_identifier() {
 	git switch -q -c "flight-deck/main"
 	run push main

@@ -59,6 +59,9 @@ push() {
 	current=$(git symbolic-ref --quiet --short HEAD) || refuse "HEAD is detached, not on $branch"
 	[ "$current" = "$branch" ] || refuse "on $current, not $branch"
 	read_base
+	# read_base checked the repository origin fetches from, so push only there.
+	read_repo
+	[ "$(git remote get-url --push --all origin)" = "$repo" ] || refuse "origin pushes somewhere other than $repo"
 	# An explicit refspec with no leading +: git rejects anything but a fast-forward.
 	# --no-follow-tags overrides push.followTags, which would also push tags.
 	git push --no-follow-tags --set-upstream origin "refs/heads/$branch:refs/heads/$branch"
