@@ -1,6 +1,6 @@
 # Flight Deck
 
-Flight Deck takes a labelled Linear issue on your repo to a draft pull request that you review and merge. It ships as a Claude Code plugin with one flow so far, `/flight-build`. That flow builds a bug labelled `flight-bug` or a feature labelled `flight-feature`, and opens a draft pull request under your own GitHub login. A bug is reproduced with a failing test before it is fixed. The feature path isn't written yet.
+Flight Deck takes a labelled Linear issue on your repo to a draft pull request that you review and merge. It ships as a Claude Code plugin with one flow so far, `/flight-build`. That flow builds a bug labelled `flight-bug` and opens a draft pull request under your own GitHub login. It reproduces the bug with a failing test before it fixes it. Features, labelled `flight-feature`, come in a later version, and the flow leaves them alone for now.
 
 ## Install the plugin from a checkout
 
