@@ -59,10 +59,6 @@ _Avoid_: Claim, pick up, lock
 To stop an issue's work until the maintainer acts. The session comments, sets `needs-you`, and assigns the issue to the maintainer. The maintainer removes `needs-you` to resume it.
 _Avoid_: Block (blocking is a relation between issues), escalate
 
-**Machine user**:
-The GitHub account the factory pushes and opens pull requests under. GitHub lets nobody approve their own pull request, so only the maintainer's approval merges one.
-_Avoid_: Bot, service account
-
 **Repo record**:
 The TOML file a repo commits for its factory. It names the entry labels and the skills that fill each slot. The repo's build and test commands stay in its own `AGENTS.md`.
 _Avoid_: Config, manifest, settings
