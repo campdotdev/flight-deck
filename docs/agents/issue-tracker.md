@@ -2,7 +2,7 @@
 
 Flight Deck's planning lives in Linear, on the **Flight Deck** team, with the `FLD-` identifier prefix, in the workspace `campdotdev`. Reach Linear through the Linear MCP server. There is no `linear` CLI here.
 
-The wayfinder map for v1 is [Wayfinder map: Flight Deck v1 spec](https://linear.app/campdotdev/issue/FLD-2/wayfinder-map-flight-deck-v1-spec). It and its decision tickets live in the **Flight Deck wayfinding** project.
+The wayfinder map for the archived runner design is [Wayfinder map: Flight Deck v1 spec](https://linear.app/campdotdev/issue/FLD-2/wayfinder-map-flight-deck-v1-spec). It is closed. It and its decision tickets live in the **Flight Deck wayfinding** project, and `AGENTS.md` says how to treat that design.
 
 This file adapts the hand-written Linear conventions in `campdotdev/shaders` (`docs/agents/issue-tracker.md`). `setup-matt-pocock-skills` ships templates for GitHub, GitLab, and local markdown only.
 
