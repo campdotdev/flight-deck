@@ -48,7 +48,9 @@ The bug label makes it a bug.
 
 Order what is left by priority, where 1 is the highest and 0, no priority, ranks below 4. Break a tie with the oldest `createdAt`.
 
-**Send-backs.** Run `git ls-remote --heads origin flight-deck/<issue>`. When it prints a branch, check already judged this issue, and this version can't answer a send-back. For a named issue, end without a write and say so. Otherwise skip to the next issue in the order, and end as above when none is left.
+**A branch already on origin.** Run `git ls-remote --heads origin flight-deck/<issue>`. When it prints a branch, an earlier run pushed this issue. Either check sent the issue back, or that run stopped before it opened the pull request. This version can't answer a send-back or finish a stopped run, so write nothing to the issue.
+
+For a named issue, end. Otherwise skip to the next issue in the order, and end as above when none is left. In your reply, name each issue that you left for this reason, and say both causes. Say that when the branch has no pull request, the maintainer can delete the branch on origin, and the next run then builds the issue.
 
 ## 2. Take the issue
 
