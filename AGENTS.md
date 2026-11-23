@@ -2,7 +2,7 @@
 
 Flight Deck is a software factory a solo developer adds to a repo. Two skills, `/flight-build` and `/flight-check`, take a labelled issue to a reviewed pull request. The maintainer runs them by hand or from Claude Desktop scheduled tasks, and approves every merge.
 
-The skills are not written yet. Build them one small issue at a time, and add a feature only after real use shows the need for it.
+`/flight-build` builds bugs so far, and `/flight-check` is not written yet. Build them one small issue at a time, and add a feature only after real use shows the need for it.
 
 ## The archived design
 
@@ -24,6 +24,10 @@ Linear, on the Flight Deck team (`FLD-`), through the Linear MCP server. See `do
 
 Single-context: `GLOSSARY.md` at the root. See `docs/agents/domain.md`.
 
-### Bundled skills
+### Plugin layout
 
-`skills/` holds the copies and forks that the flows read as files. `CREDITS.md` names each one's upstream and commit. The `brief` and `reproducing-bugs` forks still mention the runner, and the issue that writes `/flight-build` updates them.
+The repo root is the Claude Code plugin. `.claude-plugin/` holds its manifest and a marketplace entry, so the plugin installs from a local checkout.
+
+`skills/` holds the flows, such as `skills/flight-build/`, beside the copies and forks that the flows read as files. `CREDITS.md` names each copy's and each fork's upstream and commit.
+
+`bin/flight-github` makes every GitHub write the flows make. Test it with `bash test/flight-github.sh`.

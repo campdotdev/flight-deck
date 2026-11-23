@@ -1,19 +1,20 @@
 ---
 name: reproducing-bugs
-description: Reproduce a reported bug with a tight feedback loop, then stop. Plan's default reproduce slot.
+description: Reproduce a reported bug with a failing test, then stop. Build's default reproduce slot.
 disable-model-invocation: true
 ---
 
 <!-- Fork of mattpocock/skills skills/engineering/diagnosing-bugs/SKILL.md at 49dd158 (MIT, Matt Pocock).
      Changed: keeps the redaction rule and Phases 1 and 2, and stops once the bug reproduces. Drops Phases 3 to 6,
-     the HITL loop script, and the three things upstream asks a person for. Where upstream asks a person, it follows
-     plan's reproduction rule instead. The browser item names the browser MCP server, with curl until a session has one. -->
+     the HITL loop script, and the three things upstream asks a person for. Where upstream asks a person, it hands
+     back what it tried instead. It ends with a failing test that build commits. The browser item names the browser
+     MCP server, with curl when a session has none. -->
 
 # Reproducing bugs
 
-Build a loop that goes red on the reported bug, watch it go red, and shrink it. Then stop. Finding the cause and fixing it belong to build.
+Build a loop that goes red on the reported bug, watch it go red, and shrink it into a failing test. Then stop. Finding the cause and fixing it belong to the `implement` slot.
 
-You commit nothing. Throwaway scripts and tests stay uncommitted in the worktree. Spend at most half of plan's time limit, the record's `time_limits.plan`, on this skill.
+Commit nothing. Build commits the failing test you hand back. Throwaway scripts stay uncommitted in the worktree.
 
 Nobody is there to ask. Where upstream would ask a person, follow the rule in **When you can't build a loop**.
 
@@ -30,9 +31,9 @@ If you have a **tight** pass or fail signal for the bug, one that goes red on _t
 ### Ways to construct one, in roughly this order
 
 1. **Failing test** at whatever seam reaches the bug: unit, integration, or e2e.
-2. **Curl or HTTP script** against the running app. Start it as `plugin/shared/session.md` says, on `session.json`'s `port`.
+2. **Curl or HTTP script** against the running app. Start it the way the repo's `AGENTS.md` says.
 3. **CLI invocation** with a fixture input, diffing stdout against a known-good snapshot.
-4. **The browser MCP server**, when the session has one, driving the running app and asserting on the DOM, computed styles, the console, or the network. Chromium can't start from sandboxed Bash, so a Playwright or Puppeteer script you run yourself won't work. Without the browser server, drive the app with `curl`.
+4. **The browser MCP server**, when the session has one, driving the running app and asserting on the DOM, computed styles, the console, or the network. Chromium can't start from sandboxed Bash, so when the sandbox is on, a Playwright or Puppeteer script you run yourself won't work. Without the browser server, drive the app with `curl`.
 5. **Replay a captured trace.** Save a real payload or log to disk and replay it through the code path in isolation.
 6. **Throwaway harness.** Start a minimal subset of the system that exercises the bug's code path with a single function call.
 7. **Property or fuzz loop.** If the bug is "sometimes wrong output", run 1000 random inputs and look for the failure mode.
@@ -51,13 +52,9 @@ The goal is a **higher reproduction rate**, not a clean repro. Loop the trigger,
 
 ### When you can't build a loop
 
-Stop and say so in what you hand back. List what you tried and why each attempt failed. Don't guess at the cause without a loop.
+Stop and say so in what you hand back. List what you tried and why each attempt failed, and what detail from the reporter would help. Don't guess at the cause without a loop. Build pauses the issue for the maintainer with that list.
 
-Plan's reproduction rule decides what happens next:
-
-- If the expected outcome is clear enough for a testable criterion, the issue goes on, and the brief marks the bug "not reproduced" with what you tried.
-- If the steps are clear but the sandbox can't reproduce the bug, such as a Safari-only bug, the issue goes on the same way.
-- Otherwise the issue pauses, because the report doesn't say enough to write a testable criterion.
+A bug the session can't reach, such as a Safari-only bug, goes the same way. Say what blocked you.
 
 ### Completion criterion: a tight loop that goes red
 
@@ -86,10 +83,12 @@ You are done when every remaining element is needed for the failure.
 
 ## Hand back
 
-Stop here. Hand back what goes in the brief's Context as the reproduction:
+Build needs a failing test it can commit. When your loop is something other than a test, such as a curl script, turn the minimised scenario into a test where the repo's test command runs it, and watch that test go red too. When no test can hold the bug, say why in what you hand back.
 
-- The command, its redacted output, and how often it went red.
-- The minimised scenario, as steps or as test code build can paste back in.
+Stop here. Hand back:
+
+- The failing test, uncommitted in the worktree, and the command that runs it.
+- That command's redacted output, and how often it went red.
 - Anything you saw directly about where the bug lives, such as the function a stack trace names. Leave out guesses about the cause.
 
 Leave the throwaway files uncommitted. Stop the app if you started it.

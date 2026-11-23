@@ -1,18 +1,18 @@
 ---
 name: brief
-description: The template for plan's brief, the description build works from.
+description: The template for a brief, the description of a feature issue that build works from.
 disable-model-invocation: true
 ---
 
 <!-- Fork of mattpocock/skills skills/engineering/triage/AGENT-BRIEF.md at 49dd158 (MIT, Matt Pocock).
-     Changed: the brief replaces the issue's description instead of riding in a comment. No Category field and
-     no pull request example. The bold labels become the seven ## headings that the runner finds the brief by.
+     Changed: the maintainer writes the brief as the issue's description instead of in a comment. No Category
+     field and no pull request example. The bold labels become seven ## headings that build finds the brief by.
      Key interfaces has fixed bullet shapes, each acceptance criterion names its proof, and Context holds
-     pointers and ends with a ### Design subsection. -->
+     pointers. -->
 
 # Writing the brief
 
-The brief is what build works from. The runner puts it in the issue's description and keeps the report in a fold beneath it. The report and its thread are context. The brief is the contract.
+The brief is what build works from. The maintainer writes it as the issue's description, then adds `flight-feature`. Build works from its acceptance criteria, and check proves each one. The comment thread is context. The brief is the contract.
 
 ## Principles
 
@@ -34,13 +34,13 @@ Describe **what** the system should do, not **how** to build it. Build explores 
 
 ### Complete acceptance criteria
 
-Every criterion is testable on its own, traces to the problem the report describes, and names its proof. A proof is one of these:
+Every criterion is testable on its own, traces to the problem the brief describes, and names its proof. A proof is one of these:
 
-- **A record command category:** `types`, `lint`, `format`, `unit`, `integration`, or `e2e`, from the record's `[[commands]]`. Build writes the criterion's test where that command runs it.
-- **running app:** build and check prove it in the app that the record's `[app]` starts.
+- **A test command:** one the repo's `AGENTS.md` names, such as `unit`, `integration`, or `e2e`. Build writes the criterion's test where that command runs it.
+- **running app:** build and check prove it in the app, started the way the repo's `AGENTS.md` says.
 - **type check only:** the change is proven when it compiles, such as a renamed export.
 
-An extra, such as a `build` entry in the record's `[[extras]]`, is never a proof, because it has no category to hold a test. Check runs every local extra anyway. A criterion whose proof is a command with `where = "ci"` says "CI only", because build and check can't run it in a session.
+A criterion whose test runs only in CI says "CI only", because build and check can't run it in a session.
 
 Mark a criterion "regression guard" when it guards behavior that already works, so its test can pass before build's change.
 
@@ -50,7 +50,7 @@ Mark a criterion "regression guard" when it guards behavior that already works, 
 
 ### Explicit scope boundaries
 
-State what is out of scope, so build doesn't do more than the job needs or guess at adjacent work. What `ponytail` at `ultra` pushed back on goes here, unless it pauses the issue.
+State what is out of scope, so build doesn't do more than the job needs or guess at adjacent work.
 
 ## Key interfaces
 
@@ -63,13 +63,13 @@ You may also list a seam that isn't a public contract, because build writes its 
 
 - `` - `<name>`: seam, <what changes> ``
 
-Write the contract or seam name in code font, then a colon, then the second part. The runner reads only the bullets whose second part starts with "break", and refuses a handed-off brief unless each of them says "break (accepted)". A break the maintainer hasn't accepted never reaches a handed-off brief, because it pauses the issue. "break" without "(accepted)" appears only in the proposed brief of a pause.
+Write the contract or seam name in code font, then a colon, then the second part. A break listed here is one the maintainer accepts by writing the brief. Build makes no break that the brief doesn't list.
 
 When the change breaks or adds no contract and touches no seam worth naming, the section holds the one line "None."
 
 ## Template
 
-Use these seven headings, in this order, with this exact text. The runner finds the brief and its Key interfaces by them.
+Use these seven headings, in this order, with this exact text. Build finds the acceptance criteria and Key interfaces by them.
 
 ```markdown
 ## Summary
@@ -78,7 +78,7 @@ One line: what has to happen.
 
 ## Current behavior
 
-What happens now. For a bug, the broken behavior, and whether plan reproduced it.
+What happens now.
 
 ## Desired behavior
 
@@ -101,28 +101,12 @@ What happens once build is done, including edge cases and error conditions.
 
 ## Context
 
-- Reproduction: for a bug, the steps or the command, and what happened. Or "not reproduced", with what plan tried.
 - Related issues: links, one line each on how they relate.
-- GitHub issue: the link, for an issue synced from GitHub, and one line for each duplicate's GitHub issue. Build's PR closes each one.
-- Where plan looked: paths and symbols, one line each.
-- Slots: what each slot skill decided, such as "reproduce: reproduced with `pnpm test`" or "design: not checked".
-
-### Design
-
-- <state>: <frame link>
+- GitHub issue: the link, for an issue synced from GitHub. Build's PR closes it.
+- Where to look: paths and symbols, one line each.
 ```
 
 Leave out a Context line that has nothing to say. Out of scope with nothing to say holds the one line "None."
-
-## The Design part
-
-Context always ends with `### Design`. Later stages find the Design part by that heading. It holds one bullet per state the change creates or alters, shaped `- <state>: <frame link>`. After the maintainer answers `copy` to a pause about a missing frame, the state's bullet reads `- <state>: like <frame link>`, naming the nearest drawn frame.
-
-Instead of the bullets, the part may hold one of these three lines:
-
-- "design not checked", when the record's `design` slot is empty.
-- "no design for <area>", when the change touches an existing area the design never drew.
-- "no design needed", followed by the reason from the report's `## Design` section or the maintainer's reply.
 
 ## Bad brief
 
