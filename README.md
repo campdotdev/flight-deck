@@ -1,6 +1,9 @@
 # Flight Deck
 
-Flight Deck takes a labelled Linear issue on your repo to a draft pull request that you review and merge. It ships as a Claude Code plugin with one flow so far, `/flight-build`. That flow builds a bug labelled `flight-bug` and opens a draft pull request under your own GitHub login. It reproduces the bug with a failing test before it fixes it. Features, labelled `flight-feature`, come in a later version, and the flow leaves them alone for now.
+Flight Deck takes a labelled Linear issue on your repo to a pull request that you review and merge. It ships as a Claude Code plugin with two flows:
+
+- `/flight-build` builds a bug labelled `flight-bug` and opens a draft pull request under your own GitHub login. It reproduces the bug with a failing test before it fixes it. Features, labelled `flight-feature`, come in a later version, and the flow leaves them alone for now.
+- `/flight-check` judges that draft in a fresh session. It proves the fix on the pull request's head commit, and the bug's test must fail on the base and pass on the head. It then runs the review skills. On a pass, it marks the pull request ready, labels the issue `review`, and assigns the issue to you. On findings, it posts them as a numbered list, removes the issue's flight status, and leaves the pull request a draft. Build doesn't answer findings yet, so for now you fix them or hand them on yourself.
 
 ## Install the plugin from a checkout
 
@@ -27,19 +30,23 @@ The flows need the Linear MCP server and a `gh` that is logged in as you.
 
 	[build]
 	reproduce = ["reproducing-bugs"]
-	implement = ["tdd"]
+	implement = []
 	finish = []
 
 	[check]
-	review = ["standards-review", "ponytail-review"]
+	review = []
 	```
 
-	Build follows `reproduce` for bugs only, and `implement` and `finish` for bugs and features. A bare name in a slot is a skill bundled in this repo's `skills/` folder. A path, such as `.claude/skills/repro/SKILL.md`, is a skill in the repo itself.
+	Build follows `reproduce` for bugs only, and `implement` and `finish` for bugs and features. A bare name in a slot is a skill bundled in this repo's `skills/` folder. When this repo bundles no skill of that name, it is a skill installed on your machine in `~/.claude/skills/`. A path, such as `.claude/skills/repro/SKILL.md`, is a skill in the repo itself.
+
+	The record above fills only `reproduce`, with `reproducing-bugs`, Flight Deck's own fork for build. Fill the other slots with skills you have, such as `tdd` for `implement`, or `code-review` and `ponytail-review` for `review`. An empty slot means nothing to follow. With an empty `review` slot, check still proves the work, but no review skill reads the code, and the verdict says so.
 3. Name the repo's Linear team and its install, test, and typecheck commands in its `AGENTS.md`. If the repo keeps worktrees in a set folder, name that folder in `AGENTS.md` or in a doc it points at.
 
 ## Run a flow by hand
 
 In a Claude Code session in the repo, run `/flight-build SHA-12` to build one issue. When another skill has the same name, run `/flight-deck:flight-build SHA-12`. Run `/flight-build` with no issue to take the oldest ready `flight-bug` of the highest priority. An issue is ready when it carries an entry label and no `flight-status` label.
+
+Build ends by labelling the issue `checking`. Run `/flight-check SHA-12` to judge its pull request, or run `/flight-check` with no issue to take the oldest `checking` issue of the highest priority. Check ends without a write while the pull request's CI still runs, so run it again once CI finishes. Its verdict, a comment on the issue, names the commit it judged. A commit pushed after the verdict has no verdict.
 
 ## Test the GitHub script
 

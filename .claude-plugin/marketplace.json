@@ -5,7 +5,7 @@
 		{
 			"name": "flight-deck",
 			"source": "./",
-			"description": "Flight Deck's flows, which take a labelled Linear issue to a draft pull request."
+			"description": "Flight Deck's flows, which take a labelled Linear issue to a reviewed pull request."
 		}
 	]
 }
