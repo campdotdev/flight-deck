@@ -11,7 +11,9 @@ You take one issue to a draft pull request. The issue is the one named after the
 
 An issue is a bug or a feature, by its entry label. Steps 1 to 3 and steps 5 and 6 are the same for both. Step 4 follows the issue's own path: **Build a bug** or **Build a feature**.
 
-This version has the bug path only. The feature path and the answer to an issue that check sent back come in later versions, and step 1 ends the run before the take when it meets one.
+When you can't go on without the maintainer, you pause the issue as **Pause** says. The maintainer resumes it by removing `needs-you`, and the next run takes it again and reads the maintainer's answer first.
+
+This version doesn't answer an issue that check sent back. Step 1 ends the run before the take when it meets one.
 
 ## Rules for the whole run
 
@@ -26,8 +28,8 @@ This version has the bug path only. The feature path and the answer to an issue 
 
 The repo is the git repository the session started in. Read these before anything else:
 
-1. **The repo record**, `flight-deck.toml` at the repo root. `[labels]` names the entry labels: `bug` and `feature`. `[build]` names the skills for each slot. Without the file, end and say that this repo has no repo record.
-2. **The repo's `AGENTS.md`** and the docs it points at for the task. Find the Linear team, the install, test, and typecheck commands, where worktrees go, and the rules for commits, branches, and pull request titles and bodies. Without a Linear team named there, end and say so.
+1. **The repo record**, `flight-deck.toml` at the repo root. `[labels]` names the entry labels: `bug` and `feature`. Where this skill says the bug label or the feature label, it means the name `[labels]` gives. A record with `feature = "ready-for-agent"` makes `ready-for-agent` the feature label, and an issue that carries only `flight-feature` is then not an entry issue. `[build]` names the skills for each slot. Without the file, end and say that this repo has no repo record.
+2. **The repo's `AGENTS.md`** and the docs it points at for the task. Find the Linear team, the install, test, typecheck, and lint commands, how to start the app, where worktrees go, and the rules for commits, branches, and pull request titles and bodies. Without a Linear team named there, end and say so.
 
 A slot lists skills to follow in order. `reproduce` is for bugs only. `implement` and `finish` are for both kinds. A bare name, such as `reproducing-bugs`, is Flight Deck's own skill at `${CLAUDE_PLUGIN_ROOT}/skills/<name>/SKILL.md`. When Flight Deck has no skill of that name, such as `tdd`, it is the skill installed on this machine at `~/.claude/skills/<name>/SKILL.md`. A name with a slash, such as `.claude/skills/repro/SKILL.md`, is a path from the repo root. Read each skill's `SKILL.md` and follow it. An empty slot means nothing to follow.
 
@@ -40,11 +42,11 @@ The flight status is one label from the `flight-status` group: `building`, `chec
 - It already carries a flight status. Say which one.
 - Its status type is `completed`, `canceled`, or `duplicate`.
 - It carries neither entry label from `[labels]`.
-- It carries the feature label. Say that the feature path isn't written yet.
+- It carries both entry labels. Say that the maintainer has to remove one.
 
-The bug label makes it a bug.
+The bug label makes it a bug, and the feature label makes it a feature.
 
-**Not named.** Call `list_issues` with the team, `label` set to the bug label from `[labels]`, `limit` 250, and `fields` `["title", "priority", "createdAt", "statusType", "labels"]`. While the result has `hasNextPage`, fetch the next page with its `cursor`. Keep the issues whose status type is `backlog`, `unstarted`, or `started` and that carry no flight status. When none is left, end and say that nothing waits. Write nothing.
+**Not named.** For each entry label, call `list_issues` with the team, `label` set to that label, `limit` 250, and `fields` `["title", "priority", "createdAt", "statusType", "labels"]`. While a result has `hasNextPage`, fetch the next page with its `cursor`. Keep the issues whose status type is `backlog`, `unstarted`, or `started` and that carry no flight status. Leave out an issue that carries both entry labels, and name it in your reply. When none is left, end and say that nothing waits. Write nothing.
 
 Order what is left by priority, where 1 is the highest and 0, no priority, ranks below 4. Break a tie with the oldest `createdAt`.
 
@@ -54,7 +56,9 @@ For a named issue, end. Otherwise skip to the next issue in the order, and end a
 
 ## 2. Take the issue
 
-Add `building` with `save_issue` and `addLabels`. Do this before any other work. Then read the issue whole with `get_issue` and its comments with `list_comments`.
+Add `building` with `save_issue` and `addLabels`. Do this before any other work. Then read the issue whole with `get_issue` and its comments with `list_comments`, ordered by `createdAt`.
+
+**A paused issue.** When a comment opens with `**Paused.**`, an earlier run paused this issue, and the maintainer has since removed `needs-you`. Read the latest such comment, then every comment posted after it. Those later comments are the maintainer's answer. Read them before any other work, and use them on the issue's path: a detail for a bug's report, or a correction to a feature's brief. The maintainer may have edited the issue's description instead, so read the description again too. Your comment at the end of this run says what you took from the answer. When no comment follows the pause, say that you found no answer in the comments.
 
 ## 3. Make the worktree
 
@@ -66,7 +70,7 @@ Run every later command in that worktree.
 
 ## 4. Build the change
 
-Follow **Build a bug** for a bug. Commit as the repo's commit rules say.
+Follow **Build a bug** for a bug, or **Build a feature** for a feature. Commit as the repo's commit rules say.
 
 Before you push, run the repo's test, typecheck, and lint commands, and confirm that they pass.
 
@@ -100,14 +104,28 @@ When the `reproduce` slot hands back no failing test, pause as **Pause** says. T
 
 ## Build a feature
 
-Not written yet. Step 1 ends the run before the take on a feature.
+The issue's description is the brief, and `${CLAUDE_PLUGIN_ROOT}/skills/brief/SKILL.md` is the format it follows. The brief is the contract, and the comments are context. Do nothing that its `## Out of scope` names. Make no break of a contract that its `## Key interfaces` doesn't list.
+
+1. **Read the criteria.** Find the brief's `## Acceptance criteria` heading. Each list item under it is one criterion, and each one names its proof: a test command that the repo's docs name, `running app`, or `type check only`. A criterion may also say "CI only" or "Regression guard". Pause as **Pause** says in these cases, and name the part that is missing:
+	- The brief has no `## Acceptance criteria` heading.
+	- The heading has no criterion under it.
+	- A criterion names no proof, or names a test command that the repo's docs don't name. Quote the criterion.
+2. **Build.** Follow the `implement` slot, then the `finish` slot. Prove each criterion the way it names:
+	- **A test command.** Write the criterion's test where that command runs it, before the code that makes it pass, and watch it fail. A regression guard's test may pass before your change. Run the test with that command, and confirm that it passes after your change.
+	- **A test command marked CI only.** Write the test where that command runs it. The command doesn't run in this session, so mark the criterion unproven, and say that CI runs its test.
+	- **running app.** Start the app the way the repo's docs say, and do what the criterion describes. Note what you ran and what you saw. When this session can't drive the app, mark the criterion unproven, and say what blocked you.
+	- **type check only.** Run the repo's typecheck command, and confirm that it passes.
+
+When you can't make a criterion hold, pause as **Pause** says. The comment names the criterion, lists each attempt and why it failed, and says what detail from the maintainer would help.
+
+- **The pull request body** says what the feature does, and lists each criterion, in your own words, with its proof.
+- **The comment** lists each criterion in the brief's order, with its proof: the test's name and the command, and that the test now passes; what you ran in the app, and what you saw; or the typecheck command. Name each unproven criterion first, with the reason.
 
 ## Pause
 
-When a step above says to pause:
+When a step above says to pause, push nothing, and open no pull request. Then follow the pause step in `${CLAUDE_PLUGIN_ROOT}/skills/pause/SKILL.md`:
 
-1. Push nothing, and open no pull request.
-2. Post one comment. Open it with what the maintainer has to do, in one or two sentences. Then say what happened.
-3. In one `save_issue` call, set `removeLabels` to `["building"]`, `addLabels` to `["needs-you"]`, and `assignee` to `"me"`. The Linear MCP server acts as the maintainer, so `"me"` is the maintainer.
+- The flight status to remove is `building`.
+- The maintainer resumes the issue by removing `needs-you`. The next build run then takes it again, and reads the comments posted after this one.
 
 Leave the worktree and its branch in place, and say where they are in your reply.

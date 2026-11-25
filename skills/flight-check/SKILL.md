@@ -163,9 +163,9 @@ Findings follow as a numbered list. Each one has a short title, then its locatio
 
 ## Pause
 
-When a step above says to pause:
+When a step above says to pause, follow the pause step in `${CLAUDE_PLUGIN_ROOT}/skills/pause/SKILL.md`. Its comment takes the place of the verdict.
 
-1. Post one comment. Open it with what the maintainer has to do, in one or two sentences, and say that replacing `needs-you` with `checking` sends the issue back to check. Then say what happened. This comment takes the place of the verdict.
-2. In one `save_issue` call, set `removeLabels` to `["checking"]`, `addLabels` to `["needs-you"]`, and `assignee` to `"me"`.
+- The flight status to remove is `checking`.
+- The maintainer resumes the issue by replacing `needs-you` with `checking`, which sends it back to check.
 
 Remove the worktree, and end.
