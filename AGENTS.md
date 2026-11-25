@@ -2,7 +2,7 @@
 
 Flight Deck is a software factory a solo developer adds to a repo. Two skills, `/flight-build` and `/flight-check`, take a labelled issue to a reviewed pull request. The maintainer runs them by hand or from Claude Desktop scheduled tasks, and approves every merge.
 
-`/flight-build` builds bugs so far, and `/flight-check` is not written yet. Build them one small issue at a time, and add a feature only after real use shows the need for it.
+`/flight-build` builds bugs so far, and `/flight-check` judges what build opens. Build them one small issue at a time, and add a feature only after real use shows the need for it.
 
 ## The archived design
 

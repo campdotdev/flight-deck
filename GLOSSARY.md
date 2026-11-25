@@ -64,7 +64,7 @@ The TOML file a repo commits for its factory. It names the entry labels and the 
 _Avoid_: Config, manifest, settings
 
 **Slot**:
-A named point in a flow, such as `reproduce`, `implement`, or `review`. The repo record names the skills that fill each slot, in order. Flight Deck ships a default for each.
+A named point in a flow, such as `reproduce`, `implement`, or `review`. The repo record names the skills that fill each slot, in order. A slot can be empty.
 _Avoid_: Hook (Claude Code uses that word for something else), plugin, extension point
 
 **Report**:
