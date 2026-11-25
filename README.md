@@ -37,7 +37,7 @@ The flows need the Linear MCP server and a `gh` that is logged in as you.
 	review = []
 	```
 
-	Build follows `reproduce` for bugs only, and `implement` and `finish` for bugs and features. A bare name in a slot is a skill bundled in this repo's `skills/` folder. When this repo bundles no skill of that name, it is a skill installed on your machine in `~/.claude/skills/`. A path, such as `.claude/skills/repro/SKILL.md`, is a skill in the repo itself.
+	Build follows `reproduce` for bugs only, and `implement` and `finish` for bugs and features. A bare name in a slot is one of Flight Deck's own skills in this repo's `skills/` folder, such as `reproducing-bugs`. Any other bare name, such as `tdd`, is a skill installed on your machine in `~/.claude/skills/`. A path, such as `.claude/skills/repro/SKILL.md`, is a skill in the repo itself.
 
 	The record above fills only `reproduce`, with `reproducing-bugs`, Flight Deck's own fork for build. Fill the other slots with skills you have, such as `tdd` for `implement`, or `code-review` and `ponytail-review` for `review`. An empty slot means nothing to follow. With an empty `review` slot, check still proves the work, but no review skill reads the code, and the verdict says so.
 3. Name the repo's Linear team and its install, test, and typecheck commands in its `AGENTS.md`. If the repo keeps worktrees in a set folder, name that folder in `AGENTS.md` or in a doc it points at.

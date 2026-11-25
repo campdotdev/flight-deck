@@ -30,7 +30,7 @@ The repo is the git repository the session started in. Read these before anythin
 1. **The repo record**, `flight-deck.toml` at the repo root. `[labels]` names the entry labels: `bug` and `feature`. `[check]` names the skills for the `review` slot. Without the file, end and say that this repo has no repo record.
 2. **The repo's `AGENTS.md`** and the docs it points at for the task. Find the Linear team, the install, test, typecheck, and lint commands, and where worktrees go. Without a Linear team named there, end and say so.
 
-A slot lists skills to follow in order. A bare name, such as `code-review`, is Flight Deck's bundled skill at `${CLAUDE_PLUGIN_ROOT}/skills/<name>/SKILL.md`. When Flight Deck bundles no skill of that name, it is the skill installed on this machine at `~/.claude/skills/<name>/SKILL.md`. A name with a slash, such as `.claude/skills/review/SKILL.md`, is a path from the repo root. Read each skill's `SKILL.md` and follow it. An empty or missing slot means nothing to follow.
+A slot lists skills to follow in order. A bare name is Flight Deck's own skill at `${CLAUDE_PLUGIN_ROOT}/skills/<name>/SKILL.md`. When Flight Deck has no skill of that name, such as `code-review`, it is the skill installed on this machine at `~/.claude/skills/<name>/SKILL.md`. A name with a slash, such as `.claude/skills/review/SKILL.md`, is a path from the repo root. Read each skill's `SKILL.md` and follow it. An empty or missing slot means nothing to follow.
 
 Confirm now that each skill in the `review` slot has a `SKILL.md`. When one has none, end without a write, and name the skill and the path you looked for.
 
