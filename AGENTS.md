@@ -28,6 +28,6 @@ Single-context: `GLOSSARY.md` at the root. See `docs/agents/domain.md`.
 
 The repo root is the Claude Code plugin. `.claude-plugin/` holds its manifest and a marketplace entry, so the plugin installs from a local checkout.
 
-`skills/` holds the flows, such as `skills/flight-build/`, beside the copies and forks that the flows read as files. `CREDITS.md` names each copy's and each fork's upstream and commit.
+`skills/` holds the flows, such as `skills/flight-build/`, beside the forks that the flows read as files. `CREDITS.md` names each fork's upstream and commit. Flight Deck bundles no unchanged copy of another skill. A slot that names one, such as `tdd`, reads it from `~/.claude/skills/`.
 
 `bin/flight-github` makes every GitHub write the flows make. Test it with `bash test/flight-github.sh`.
