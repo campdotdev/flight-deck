@@ -46,7 +46,7 @@ The flight status is one label from the `flight-status` group: `building`, `chec
 
 The bug label makes it a bug, and the feature label makes it a feature.
 
-**Not named.** For each entry label, call `list_issues` with the team, `label` set to that label, `limit` 250, and `fields` `["title", "priority", "createdAt", "statusType", "labels"]`. While a result has `hasNextPage`, fetch the next page with its `cursor`. Keep the issues whose status type is `backlog`, `unstarted`, or `started` and that carry no flight status. Leave out an issue that carries both entry labels, and name it in your reply. When none is left, end and say that nothing waits. Write nothing.
+**Not named.** For each entry label, call `list_issues` with the team, `label` set to that label, `limit` 250, and `fields` `["title", "priority", "createdAt", "statusType", "labels"]`. While a result has `hasNextPage`, fetch the next page with its `cursor`. Keep the issues whose status type is `backlog`, `unstarted`, or `started` and that carry no flight status. Leave out an issue that carries both entry labels, and name it in your reply. When none is left, end and say that nothing waits. Write nothing, and make no other Linear call: an empty result is the answer, so don't confirm that a label exists or look for issues in another flight status.
 
 Order what is left by priority, where 1 is the highest and 0, no priority, ranks below 4. Break a tie with the oldest `createdAt`.
 
