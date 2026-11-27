@@ -40,7 +40,7 @@ The flight status is one label from the `flight-status` group: `building`, `chec
 
 **Named.** Read it with `get_issue`. End without a write when its flight status isn't `checking`, and say what it carries instead. End the same way when its status type is `completed`, `canceled`, or `duplicate`.
 
-**Not named.** Call `list_issues` with the team, `label` set to `checking`, `limit` 250, and `fields` `["title", "priority", "createdAt", "statusType", "labels"]`. While the result has `hasNextPage`, fetch the next page with its `cursor`. Keep the issues whose status type is `backlog`, `unstarted`, or `started`. When none is left, end and say that nothing waits. Write nothing.
+**Not named.** Call `list_issues` with the team, `label` set to `checking`, `limit` 250, and `fields` `["title", "priority", "createdAt", "statusType", "labels"]`. While the result has `hasNextPage`, fetch the next page with its `cursor`. Keep the issues whose status type is `backlog`, `unstarted`, or `started`. When none is left, end and say that nothing waits. Write nothing, and make no other Linear call: an empty result is the answer, so don't confirm that a label exists or look for issues in another flight status.
 
 Order what is left by priority, where 1 is the highest and 0, no priority, ranks below 4. Break a tie with the oldest `createdAt`. Take the first issue, and go on to step 2 with it.
 
